@@ -1,0 +1,121 @@
+.home-welcome,
+.home-scenarios {
+  align-self: center;
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 10px 0 34px;
+}
+
+.home-scenarios {
+  max-width: 760px;
+}
+
+.home-headline {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.home-subline {
+  margin: 0 0 18px;
+  color: var(--muted-foreground);
+}
+
+.home-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.home-tab {
+  border: none;
+  background: none;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted-foreground);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+
+.home-tab.on {
+  color: var(--foreground);
+  border-bottom-color: var(--foreground);
+  font-weight: 550;
+}
+
+.home-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.home-cards.scenario {
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 0;
+}
+
+.home-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  padding: 11px 13px;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.home-card:hover {
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
+}
+
+.home-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.home-card-sub {
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  margin-top: 2px;
+}
+
+.home-card-prompt {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-shuffle {
+  margin-top: 12px;
+  border: none;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.home-shuffle:hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
+@media (max-width: 720px) {
+  .home-cards,
+  .home-cards.scenario {
+    grid-template-columns: 1fr;
+  }
+}

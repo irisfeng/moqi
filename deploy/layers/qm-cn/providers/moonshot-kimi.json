@@ -1,0 +1,76 @@
+{
+  "name": "Kimi（月之暗面）",
+  "protocol": "openai",
+  "baseUrl": "https://api.moonshot.cn/v1",
+  "models": [
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3",
+      "contextWindow": 1048576,
+      "maxTokens": 131072,
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "reasoning": true,
+      "modalities": ["text", "image"],
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": false,
+        "thinkingFormat": "openai",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "deferredToolsMode": "kimi"
+      },
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": null,
+        "low": "low",
+        "medium": null,
+        "high": "high",
+        "xhigh": null,
+        "max": "max"
+      }
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "name": "Kimi K2.7 Code",
+      "contextWindow": 262144,
+      "maxTokens": 262144,
+      "input": 0.95,
+      "output": 4,
+      "cacheRead": 0.19,
+      "reasoning": true,
+      "modalities": ["text", "image"],
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": false,
+        "thinkingFormat": "deepseek"
+      },
+      "thinkingLevelMap": { "off": null }
+    },
+    {
+      "id": "kimi-k2.5",
+      "name": "Kimi K2.5",
+      "contextWindow": 262144,
+      "maxTokens": 262144,
+      "input": 0.6,
+      "output": 3,
+      "cacheRead": 0.1,
+      "reasoning": true,
+      "modalities": ["text", "image"],
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": false,
+        "thinkingFormat": "deepseek"
+      }
+    }
+  ]
+}

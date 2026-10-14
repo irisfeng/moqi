@@ -56,11 +56,17 @@ import {
 import { paneKindByKey, paneKindEntry } from "./pane-kinds";
 import { focusComposerOnPaneClick, focusPaneComposer, preservingFocus } from "./pane-focus";
 import { attachTooltip, tip } from "./tooltip";
-import { icon, workingWave } from "./ui";
-import { contextsState, scopeTitle } from "./contexts";
+import { icon } from "./ui";
+import { contextsState, scopeGlyph, scopeTitle } from "./contexts";
 import type { DensityTier } from "./density";
-import { appState } from "./shell-state";
-import { renderSidebarTop, switchView, syncDocumentTitle, syncUrlFromState } from "./shell";
+import { appState, hasDestination } from "./shell-state";
+import {
+  blockUnsentAttachmentNavigation,
+  renderSidebarTop,
+  switchView,
+  syncDocumentTitle,
+  syncUrlFromState,
+} from "./shell";
 import {
   createConversation,
   disposeConversation,
@@ -78,9 +84,9 @@ import {
   sessionsState,
   sessionTitle,
   archiveSessionById,
-  syncWorkingPulse,
+  runStatusMark,
 } from "./sessions";
-import { conversationBackground, rowIndicators, type RowIndicators } from "./session-list";
+import { conversationBackground, rowIndicators, runStatus, type RowIndicators } from "./session-list";
 import { scopeToolCount, setScopedSession, type SessionTool } from "./session-scope";
 import {
   fetchTranscript,
@@ -413,8 +419,9 @@ onPhoneChange((phone) => {
   renderList();
 });
 
-export function exitSplitIfActive(): void {
-  if (!splitState.active) return;
+export function exitSplitIfActive(): boolean {
+  if (!splitState.active) return true;
+  if (blockUnsentAttachmentNavigation()) return false;
   if (dockApi) lastLayout = dockApi.toJSON();
   splitState.active = false;
   splitState.focusedId = null;
@@ -424,6 +431,7 @@ export function exitSplitIfActive(): void {
   canvasHost = null;
   headerSignature = "";
   renderSidebarTop();
+  return true;
 }
 
 function adoptPersisted(raw: unknown): void {
@@ -517,6 +525,7 @@ export function sessionInCanvas(sessionId: string): boolean {
 /** Close any pane (and, outside the canvas, the main view) showing this session. */
 export function closeSessionSurfaces(sessionId: string): boolean {
   if (!sessionId) return false;
+  if (blockUnsentAttachmentNavigation()) return false;
   if (splitState.active && dockApi) {
     const showing = dockApi.panels.filter((p) => panelParams(p).sessionId === sessionId);
     if (showing.length) {
@@ -653,6 +662,7 @@ function paneSplitWithBlank(panel: IDockviewPanel): void {
 
 function closePanels(panels: IDockviewPanel[]): void {
   if (!dockApi) return;
+  if (blockUnsentAttachmentNavigation()) return;
   for (const p of panels) {
     dockApi.removePanel(p);
   }
@@ -788,6 +798,7 @@ function paneZonesTpl(paneId: string): TemplateResult | typeof nothing {
 function paneZoneAct(paneId: string): (edge: DropEdge) => () => void {
   return (edge) => () => {
     const drag = paneDrag;
+    if (drag && edge === "center" && blockUnsentAttachmentNavigation()) return;
     endPaneDrag();
     if (!drag) return;
     if (edge === "center") {
@@ -879,6 +890,11 @@ function paneCrumb(panel: IDockviewPanel): string | null {
   return scopeTitle(scope, context?.name ?? null);
 }
 
+function paneScopeGlyph(panel: IDockviewPanel): IconNode {
+  const scope = paneScopeId(panel);
+  return scopeGlyph(scope, contextsState.list.find((c) => c.scopeId === scope)?.name ?? null);
+}
+
 const PANE_TOOLS: { tool: SessionTool; glyph: IconNode; label: string }[] = [
   { tool: "crons", glyph: Clock3, label: "Crons" },
   { tool: "apps", glyph: Rocket, label: "Apps" },
@@ -898,6 +914,7 @@ function openPaneTool(panel: IDockviewPanel, tool: SessionTool): void {
     threadRef: params.threadRef ?? null,
     title: session?.title?.trim() || "New chat",
     crumb: paneCrumb(panel),
+    crumbGlyph: paneScopeGlyph(panel),
   });
   if (scope && (tool === "crons" || tool === "files" || tool === "apps")) contextsState.selected = scope;
   switchView(tool === "apps" ? "deploys" : tool);
@@ -1231,8 +1248,7 @@ class PaneTab implements ITabRenderer {
     attachTooltip(this.element, [crumb, parent ? sessionTitle(parent) : null, title].filter(Boolean).join(" / "));
     render(
       html`
-        ${working ? html`<span class="working-mark" ${ref(syncWorkingPulse)}>${workingWave()}</span>` : nothing}
-        ${awaiting ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>` : nothing}
+        ${runStatusMark(runStatus(paneSession(panel), { working, awaiting }))}
         ${
           background
             ? html`<span class="bg-chip" aria-label=${background.label} ${tip(background.label)}
@@ -1242,11 +1258,9 @@ class PaneTab implements ITabRenderer {
               >`
             : nothing
         }
-        ${
-          crumb
-            ? html`<span class="split-pane-crumb">${crumb}</span><span class="split-pane-crumb-sep">/</span>`
-            : nothing
-        }
+        <span class="split-pane-crumb" data-scope=${crumb ? "shared" : "personal"}
+          >${icon(paneScopeGlyph(panel), 11)}<span dir="auto">${crumb ?? "Personal"}</span></span
+        >
         ${
           parent
             ? html`<button
@@ -1428,7 +1442,7 @@ class GroupActions implements IHeaderActionsRenderer {
             ${ref(this.placeMenu)}
             @click=${(e: Event) => e.stopPropagation()}
           >
-            ${PANE_TOOLS.map(
+            ${PANE_TOOLS.filter((t) => t.tool !== "apps" || hasDestination("apps")).map(
               (t) => html`
                 <button class="session-menu-option" type="button" role="menuitem" @click=${() => runTool(t.tool)}>
                   ${icon(t.glyph, 15)}<span>${t.label}</span>
@@ -1532,7 +1546,7 @@ class GroupActions implements IHeaderActionsRenderer {
       html`${
           single
             ? html`<span class="split-single-tools">
-                ${PANE_TOOLS.map((t) => {
+                ${PANE_TOOLS.filter((t) => t.tool !== "apps" || hasDestination("apps")).map((t) => {
                   const count = scope ? scopeToolCount(t.tool, scope, () => this.draw()) : null;
                   return html`<button
                     class="session-tool"

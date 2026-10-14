@@ -13,6 +13,12 @@ test("pressing the nav entry for the view you are already on drops back to its i
   assert.match(refresh, /syncUrlFromState\(\);/);
 });
 
+test("Home opens the home screen from anywhere, including from inside a conversation", () => {
+  const onNavClick = shell.match(/function onNavClick\(e: Event\): void \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(onNavClick, /if \(view === "chats"\) startNewChat\(\);\s*else switchView\(view\);/);
+  assert.match(shell, /navRow\("chats", ICON\.home, "Home"\)/);
+});
+
 test("every view with a detail page clears it, so no nav entry is a no-op", () => {
   for (const [view, reset] of [
     ["inbox", "resetActiveInboxItem"],

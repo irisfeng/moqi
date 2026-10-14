@@ -82,6 +82,38 @@ test("session lists check each project once per request and observe membership c
   }
 });
 
+test("pinning a conversation inside a project pins the project for that person only", async () => {
+  const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "project-pin-")) }));
+  try {
+    const project = await built.projects.create({ name: "Pinned work", ownerId: "owner" });
+    await built.projects.addMember(project.id, "owner", "member");
+    const scope = projectScopeId(project.id);
+    const first = await built.sessions.getOrCreateByThread("web:owner:pin-a", "group", scope);
+    const second = await built.sessions.getOrCreateByThread("web:owner:pin-b", "group", scope);
+    for (const session of [first, second]) {
+      for (const person of ["owner", "member"])
+        await built.sessions.addParticipant(session.id, person, undefined, { includeHistory: true });
+      await built.app.updateSession(session.id, "owner", { title: `Listed ${session.id}` });
+    }
+    const pinnedFor = async (person: string) =>
+      (await built.app.listSessions(person))
+        .filter((session) => session.pinned)
+        .map((session) => session.id)
+        .sort();
+
+    assert.equal((await built.app.updateSession(first.id, "owner", { pinned: true }))?.pinned, true);
+    assert.deepEqual(await pinnedFor("owner"), [first.id, second.id].sort());
+    assert.deepEqual(await pinnedFor("member"), []);
+    assert.deepEqual(await built.projectCollaboration.pinnedIds("owner"), [project.id]);
+
+    assert.equal((await built.app.updateSession(second.id, "owner", { pinned: false }))?.pinned, false);
+    assert.deepEqual(await pinnedFor("owner"), []);
+    assert.deepEqual(await built.projectCollaboration.pinnedIds("owner"), []);
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
 test("ProjectStore rename is owner-only and cleans the name", async () => {
   let at = 100;
   const projects = createProjectStore(undefined, { id: () => "pr", now: () => at++ });

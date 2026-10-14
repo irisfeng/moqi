@@ -1,5 +1,5 @@
 import { assistantSidebar, assistantMessage } from "./assistant-sidebar";
-import { formatMessageTime } from "./message-time.ts";
+import { formatMessageTime, messageTimeDetail } from "./message-time.ts";
 import { messageEntrySeqs, highlightMessage } from "./message-link.ts";
 import { appEditSlug } from "./app-edit";
 import { isConnectionReturn } from "./connection-return";
@@ -25,12 +25,15 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { UserMessageWithAttachments } from "@earendil-works/pi-web-ui";
 import { markdown } from "./message-markdown";
+import { splitMentions } from "./mention";
+import { createTranscriptNavigation } from "./transcript-navigation";
 import { html, nothing, render, type TemplateResult } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { ref } from "lit/directives/ref.js";
 import { guard } from "lit/directives/guard.js";
 import {
   Activity,
+  ArrowDown,
   Ban,
   BookOpen,
   Search,
@@ -113,6 +116,7 @@ import {
   type SessionEntry,
   type SubagentMailRef,
   type ToolActivity,
+  type TranscriptPage,
   type TurnOptions,
   type WorkBlock,
   fileContentUrl,
@@ -133,9 +137,12 @@ import {
 } from "./timeline";
 import "./slack-setup";
 import { connectorLinksIn, stripConnectorLinks, type ConnectorLink } from "./connector-link";
-import { deepLinkPath, sessionLink, UI_BASE } from "./deep-link";
+import { deepLinkPath, isPlainLeftClick, sessionLink, UI_BASE } from "./deep-link";
+import { previewLinkedImage } from "./image-preview";
+import { ratingButtons, ratingsVersion } from "./answer-ratings";
 import type { ChatSurface, ConvCtx } from "./conv-types";
-import { errMessage, swallow } from "../../chassis/src/errors";
+import { swallow } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error";
 import { showStateError } from "./error-banner";
 import { splitLinks } from "./linkify";
 import { slackWireToPlain, splitSlackWire, stripSlackDirectives } from "./slack-text";
@@ -148,6 +155,7 @@ import {
 } from "./model-options";
 import {
   attachmentGallery,
+  brandName,
   browserRenderableImage,
   chipBadge,
   copyText,
@@ -158,11 +166,12 @@ import {
   waveLoader,
   workingWave,
 } from "./ui";
-import { appState, renderSidebarTop, switchView, syncUrlFromState } from "./shell";
-import { contextsState, scopeTitle } from "./contexts";
+import { appState, blockUnsentAttachmentNavigation, renderSidebarTop, switchView, syncUrlFromState } from "./shell";
+import { contextsState, scopeGlyph, scopeTitle } from "./contexts";
 import { openProjectPage, scopeToolCount, sessionTopbarTpl, setScopedSession } from "./session-scope";
 import {
   addPendingSession,
+  cancelOpeningSession,
   onSessionDragStart,
   endSessionDrag,
   dropPendingSession,
@@ -199,6 +208,26 @@ import {
 } from "./subagent-activity";
 import { createSwarmStrip } from "./swarm-strip.ts";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
+import {
+  activeTips,
+  dateKeyOf,
+  ensureWebuiHome,
+  pickDaily,
+  reportHomeEvent,
+  webuiHome,
+  type HomeTip,
+  type WebuiHomeConfig,
+} from "./home-config";
+import {
+  createScenarioCardController,
+  featuredHomeConfig,
+  nextScenarioCardOffset,
+  scenarioCardPage,
+  scenarioCardPageHasMore,
+  scenarioCategory,
+  scenarioCategoryChips,
+  type ScenarioCategoryFilter,
+} from "./scenario-cards";
 import { createForkOriginController, forkOriginView } from "./fork-origin";
 import { base64ToBytes } from "./paste-text";
 import { tip } from "./tooltip";
@@ -206,6 +235,7 @@ import { goalWorked, workSeconds, workedLabel } from "./work-duration";
 import { decorateTextCodeBlocks } from "./text-code";
 
 import { createTranscriptViewport } from "./transcript-viewport";
+import { messageLocation, type MessageLocation } from "./message-location.ts";
 import { suggestedActivities } from "./suggested-activities";
 import { reportHandledError } from "./browser-errors.ts";
 
@@ -228,6 +258,7 @@ interface SettledRowKey {
   speakerLabel: string | undefined;
   edited: boolean;
   deleted: boolean;
+  ratings: number;
   tpl: TemplateResult | typeof nothing;
 }
 const settledRowCache = new WeakMap<object, SettledRowKey>();
@@ -254,6 +285,14 @@ function nextChatCta(): string {
 const connectedConnectors = new Set<string>();
 const redrawHooks = new Set<() => void>();
 let proactiveOpenerStarted = false;
+const openerSuppressedThreads = new Set<string>();
+let welcomeRoleKey: string | null = null;
+let welcomeShuffleOffset = 0;
+const WELCOME_CARD_PAGE = 3;
+
+export function suppressProactiveOpener(threadRef: string): void {
+  openerSuppressedThreads.add(threadRef);
+}
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -272,6 +311,13 @@ export function createChatSurface(
   });
   let pendingFork: { index: number } | null = null;
   const transcriptViewport = createTranscriptViewport();
+  const transcriptNavigation = createTranscriptNavigation(() => scrollToBottom());
+  let scenarioPageOffset = 0;
+  let scenarioCategoryFilter: ScenarioCategoryFilter = "all";
+  const scenarioCardController = createScenarioCardController({
+    existingDraft: () => ctx.composer.state.draft,
+    onUse: (tip, prompt) => applyExampleCard({ ...tip, prompt }),
+  });
   let preserveConnectionScroll = isConnectionReturn();
   let connectionReturnMessageCount: number | null = null;
   const transcriptFetcher = dependencies.fetchTranscript ?? fetchTranscript;
@@ -346,6 +392,8 @@ export function createChatSurface(
     }
     const viewer = appState.me?.displayName?.trim().toLowerCase();
     chatState.labelSpeakers = names.size > 1 || (Boolean(viewer) && [...names].some((n) => n.toLowerCase() !== viewer));
+    if (names.size > 0 && chatState.scopeId !== null && chatState.scopeId !== `personal:${appState.me?.user}`)
+      chatState.labelSpeakers = true;
   }
 
   function speakerLabelFor(message: AgentMessage): string | undefined {
@@ -412,7 +460,227 @@ export function createChatSurface(
   let readonlyApprove: ((decision: ApprovalDecision) => Promise<void>) | null = null;
   let readOnlyView: { id: string; threadRef: string; session: CoreSession; anchorSeq: number | null } | null = null;
 
+  let quotePopup: HTMLButtonElement | null = null;
+
+  function dismissQuotePopup(event: MouseEvent): void {
+    if (!quotePopup?.contains(event.target as Node)) removeQuotePopup();
+  }
+
+  function removeQuotePopup(): void {
+    document.removeEventListener("mousedown", dismissQuotePopup);
+    quotePopup?.remove();
+    quotePopup = null;
+  }
+
+  function offerQuote(host: HTMLElement): void {
+    removeQuotePopup();
+    const selection = window.getSelection();
+    const text = selection?.toString().trim().slice(0, 300) ?? "";
+    if (!selection || selection.isCollapsed || text.length < 2) return;
+    const range = selection.getRangeAt(0);
+    const node = range.commonAncestorContainer;
+    const body = (node instanceof Element ? node : node.parentElement)?.closest(".message-bubble, .assistant-body");
+    const row = body?.closest<HTMLElement>(".message-row");
+    if (!row || !host.contains(row)) return;
+    const author = row.classList.contains("assistant-row")
+      ? brandName()
+      : row.querySelector(".speaker-label")?.textContent?.trim();
+    const location = row.dataset.messageLocation ?? "";
+    const seq = location.startsWith("seq:") ? Number(location.slice(4)) : undefined;
+    const popup = document.createElement("button");
+    popup.type = "button";
+    popup.className = "quote-selection-btn";
+    popup.textContent = "Quote";
+    popup.addEventListener("mousedown", (event) => event.preventDefault());
+    popup.addEventListener("click", (event) => {
+      event.stopPropagation();
+      ctx.composer.quoteMessage({ ...(seq === undefined ? {} : { seq }), text, ...(author ? { author } : {}) });
+      removeQuotePopup();
+      selection.removeAllRanges();
+    });
+    const rect = range.getBoundingClientRect();
+    popup.style.left = `${Math.min(rect.right + 6, window.innerWidth - 100)}px`;
+    popup.style.top = `${Math.max(8, rect.top - 38)}px`;
+    document.body.appendChild(popup);
+    quotePopup = popup;
+    document.addEventListener("mousedown", dismissQuotePopup);
+  }
+
+  function quotedOriginal(message: AgentMessage): TemplateResult | typeof nothing {
+    const quote = message as { quoteText?: unknown; quoteAuthor?: unknown };
+    if (typeof quote.quoteText !== "string" || !quote.quoteText) return nothing;
+    const text = quote.quoteText.length > 200 ? `${quote.quoteText.slice(0, 200)}…` : quote.quoteText;
+    return html`<div class="quoted-original">
+      ${typeof quote.quoteAuthor === "string" && quote.quoteAuthor ? html`<span class="quoted-original-author">${quote.quoteAuthor}:</span>` : nothing}${text}
+    </div>`;
+  }
+
+  function latestMessagesButton(): TemplateResult {
+    return html`<button
+      class="chat-latest-button"
+      type="button"
+      aria-label="Back to the latest message"
+      title="Back to the latest message"
+      hidden
+    >
+      ${icon(ArrowDown, 18)}
+    </button>`;
+  }
+
+  function userText(text: string): TemplateResult {
+    const context = contextsState.list.find((c) => c.scopeId === chatState.scopeId);
+    const names = (context?.project?.members ?? []).map((member) => member.displayName).filter(Boolean);
+    const segments = names.length && !text.includes("```") ? splitMentions(text, names) : [];
+    if (!segments.some((segment) => segment.mention)) return markdown(text);
+    return html`<span class="plain-user-text"
+      >${segments.map((segment) => (segment.mention ? html`<span class="mention-chip">${segment.text}</span>` : segment.text))}</span
+    >`;
+  }
+
+  function roleTipPool(config: WebuiHomeConfig, roleId: string | null): HomeTip[] {
+    const role = config.welcome.roles.find((r) => r.id === roleId) ?? config.welcome.roles[0];
+    if (!role) return [];
+    const byId = new Map(config.tips.map((tip) => [tip.id, tip] as const));
+    const tips = role.tips.flatMap((id) => {
+      const tip = byId.get(id);
+      return tip && tip.status === "active" ? [tip] : [];
+    });
+    return tips.length ? tips : activeTips(config);
+  }
+
+  function inScenarioCategory(tip: HomeTip): boolean {
+    return scenarioCategoryFilter === "all" || scenarioCategory(tip) === scenarioCategoryFilter;
+  }
+
+  function applyExampleCard(tip: HomeTip): void {
+    reportHomeEvent("example_card_click", tip.id);
+    ctx.composer.state.draft = tip.prompt;
+    if (chatState.threadRef) {
+      saveDraft(chatState.threadRef, tip.prompt);
+      if (
+        chatState.sessionId === null &&
+        !(chatState.agent?.state.messages ?? []).some((m) => !(m as { opener?: boolean }).opener)
+      )
+        saveDraft(newChatDraftKey(appState.me?.user), tip.prompt);
+    }
+    if (chatState.agent) drawActiveChat(chatState.agent);
+    ctx.composer.focusComposerEnd();
+  }
+
+  function homeWelcomeArea(home: WebuiHomeConfig, showHeading: boolean): TemplateResult {
+    const config = featuredHomeConfig(home);
+    const roles = config.welcome.roles;
+    const activeRole = roles.find((r) => r.id === welcomeRoleKey) ?? roles[0];
+    const pool = activeRole ? roleTipPool(config, activeRole.id) : [];
+    const filteredPool = pool.filter(inScenarioCategory);
+    const cards = pickDaily(
+      filteredPool,
+      appState.me?.user ?? "anon",
+      dateKeyOf(new Date()),
+      WELCOME_CARD_PAGE,
+      welcomeShuffleOffset,
+    );
+    return html`
+      <article class="home-welcome">
+        ${showHeading ? html`<h1 class="home-headline">${config.welcome.headline}</h1>` : nothing}
+        ${showHeading && config.welcome.subline ? html`<p class="home-subline">${config.welcome.subline}</p>` : nothing}
+        ${
+          roles.length > 1
+            ? html`<div class="home-tabs" role="tablist">
+                ${roles.map(
+                  (r) =>
+                    html`<button
+                      type="button"
+                      role="tab"
+                      aria-selected=${r === activeRole ? "true" : "false"}
+                      class="home-tab ${r === activeRole ? "on" : ""}"
+                      @click=${() => {
+                        if (r === activeRole) return;
+                        welcomeRoleKey = r.id;
+                        welcomeShuffleOffset = 0;
+                        scenarioCategoryFilter = "all";
+                        drawActiveChat();
+                      }}
+                    >
+                      ${r.label}
+                    </button>`,
+                )}
+              </div>`
+            : nothing
+        }
+        ${scenarioCategoryChips(pool, scenarioCategoryFilter, (filter) => {
+          scenarioCategoryFilter = filter;
+          welcomeShuffleOffset = 0;
+          drawActiveChat();
+        })}
+        ${cards.length ? html`<div class="home-cards">${cards.map((tip) => scenarioCardController.card(tip))}</div>` : nothing}
+        ${
+          cards.length && filteredPool.length > WELCOME_CARD_PAGE
+            ? html`<button
+                type="button"
+                class="home-shuffle"
+                @click=${() => {
+                  welcomeShuffleOffset = (welcomeShuffleOffset + WELCOME_CARD_PAGE) % Math.max(1, filteredPool.length);
+                  drawActiveChat();
+                }}
+              >
+                Show others
+              </button>`
+            : nothing
+        }
+        ${scenarioCardController.dialog()}
+      </article>
+    `;
+  }
+
+  function homeScenarioCards(home: WebuiHomeConfig): TemplateResult {
+    const config = featuredHomeConfig(home);
+    const cards = scenarioCardPage(
+      config,
+      appState.me?.user ?? "anon",
+      dateKeyOf(new Date()),
+      3,
+      scenarioPageOffset,
+      scenarioCategoryFilter,
+    );
+    return html`
+      <article class="home-scenarios">
+        <div class="home-scenario-heading">
+          <div class="home-scenario-heading-copy">
+            <p class="home-scenario-eyebrow">Featured scenarios</p>
+            <p class="home-scenario-hint">
+              Start from a real piece of work. You can adjust the prompt before using it.
+            </p>
+          </div>
+          ${
+            scenarioCardPageHasMore(config, 3, scenarioCategoryFilter)
+              ? html`<button
+                  type="button"
+                  class="home-scenario-shuffle"
+                  @click=${() => {
+                    scenarioPageOffset = nextScenarioCardOffset(scenarioPageOffset, config, scenarioCategoryFilter);
+                    drawActiveChat();
+                  }}
+                >
+                  Show others
+                </button>`
+              : nothing
+          }
+        </div>
+        ${scenarioCategoryChips(activeTips(config), scenarioCategoryFilter, (filter) => {
+          scenarioCategoryFilter = filter;
+          scenarioPageOffset = 0;
+          drawActiveChat();
+        })}
+        <div class="home-cards scenario">${cards.map((tip) => scenarioCardController.card(tip))}</div>
+        ${scenarioCardController.dialog()}
+      </article>
+    `;
+  }
+
   function teardownActiveChat(): void {
+    removeQuotePopup();
+    transcriptNavigation.disconnect();
     transcriptViewport.dispose();
     transcriptRefreshGeneration++;
     readOnlyView = null;
@@ -447,6 +715,8 @@ export function createChatSurface(
   }
 
   function newChat(context?: { scopeId: string; name: string | null }): string {
+    if (blockUnsentAttachmentNavigation([ctx])) return chatState.threadRef ?? "";
+    if (!ctx.pane) cancelOpeningSession();
     appState.currentView = "chats";
     renderSidebarTop();
     const user = appState.me?.user ?? "anon";
@@ -531,6 +801,8 @@ export function createChatSurface(
     chatState.pins = [];
     chatState.host = document.createElement("div");
     chatState.host.className = "custom-chat";
+    const quoteHost = chatState.host;
+    quoteHost.addEventListener("mouseup", () => setTimeout(() => offerQuote(quoteHost), 10));
 
     const model = ctx.composer.currentModelOption()?.model;
     const defaultThinkingLevel = defaultEffortForModel(model);
@@ -545,6 +817,10 @@ export function createChatSurface(
       convertToLlm: () => [],
     });
     chatState.agent = agent;
+    if (!webuiHome())
+      void ensureWebuiHome().then((config) => {
+        if (config && agent === chatState.agent) drawActiveChat(agent);
+      });
     clearLiveWork();
     resetBackgroundPanel();
     chatState.resolvingApprovals.clear();
@@ -628,17 +904,31 @@ export function createChatSurface(
     messages: ReturnType<typeof entriesToMessages>,
   ): boolean {
     if (ctx.inbox || appState.me?.welcomeCohort || appEditSlug(threadRef, appState.me?.user)) return false;
-    if (
-      !shouldStartProactiveOpener({
+    if (openerSuppressedThreads.has(threadRef) || webuiHome()?.opener.enabled === false) return false;
+    const eligible = (session: string | null, scope: string | null, messageCount: number): boolean =>
+      shouldStartProactiveOpener({
         started: proactiveOpenerStarted,
-        sessionId,
-        scopeId,
-        messageCount: messages.length,
+        sessionId: session,
+        scopeId: scope,
+        messageCount,
         loaded: sessionsState.loaded,
         sessions: sessionsState.list,
-      })
-    )
-      return false;
+      });
+    if (!eligible(sessionId, scopeId, messages.length)) return false;
+    void ensureWebuiHome().then((config) => {
+      if (config?.opener.enabled === false || agent !== chatState.agent) return;
+      if (!eligible(chatState.sessionId, chatState.scopeId, agent.state.messages.length)) return;
+      beginProactiveOpener(agent, threadRef, normalStreamFn, onWork);
+    });
+    return true;
+  }
+
+  function beginProactiveOpener(
+    agent: Agent,
+    threadRef: string,
+    normalStreamFn: Agent["streamFn"],
+    onWork: (work: WorkBlock) => void,
+  ): void {
     proactiveOpenerStarted = true;
     agent.state.messages = [{ role: "user", content: "", opener: true } as unknown as AgentMessage];
     agent.streamFn = makeOpenerStreamFn(threadRef, agent, currentTurnOptions, onWork, runSlot);
@@ -662,7 +952,6 @@ export function createChatSurface(
         }
       }
     })();
-    return true;
   }
 
   function currentTurnOptions(): TurnOptions {
@@ -675,6 +964,7 @@ export function createChatSurface(
       harness,
       scopeId: chatState.scopeId,
       channelName: chatState.contextName,
+      ...(appState.me?.verifiedSends ? { expectedUser: appState.me.user } : {}),
     };
   }
 
@@ -696,12 +986,17 @@ export function createChatSurface(
     );
   }
 
-  function onDelivery(threadRef: string): void {
+  function isVisible(): boolean {
+    return ctx.visible() && Boolean(chatState.host?.isConnected) && chatState.host!.getClientRects().length > 0;
+  }
+
+  async function onDelivery(threadRef: string): Promise<void> {
     const ro = readOnlyView;
     if (ro && threadRef === ro.threadRef) {
-      void fetchTranscript(ro.id, ro.anchorSeq !== null ? { sinceSeq: ro.anchorSeq } : { tailTurns: TAIL_TURNS })
+      if (!chatState.host) return;
+      await fetchTranscript(ro.id, ro.anchorSeq !== null ? { sinceSeq: ro.anchorSeq } : { tailTurns: TAIL_TURNS })
         .then((page) => {
-          if (readOnlyView?.id !== ro.id) return;
+          if (readOnlyView?.id !== ro.id || !chatState.host) return;
           const split = inheritedTranscript(ro.session, page.entries ?? []);
           const rawEarlier = page.earlierEntries ?? 0;
           const earlier = currentEarlierCount(ro.session, rawEarlier);
@@ -718,7 +1013,127 @@ export function createChatSurface(
     }
     const agent = chatState.agent;
     if (!agent || threadRef !== chatState.threadRef || agent.state.isStreaming) return;
-    void refreshTranscriptFromEntries(agent);
+    await refreshTranscriptFromEntries(agent);
+  }
+
+  let notificationHighlight: { location: string; until: number } | null = null;
+  let notificationHighlightTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function restoreNotificationHighlight(): void {
+    const active =
+      notificationHighlight && notificationHighlight.until > Date.now() ? notificationHighlight.location : "";
+    for (const row of chatState.host?.querySelectorAll<HTMLElement>(".message-row") ?? [])
+      row.classList.toggle("message-notification-target", Boolean(active) && row.dataset.messageLocation === active);
+  }
+
+  async function showLatestMessages(target: MessageLocation = {}, signal?: AbortSignal): Promise<boolean> {
+    const threadRef = readOnlyView?.threadRef ?? chatState.threadRef;
+    const sessionId = readOnlyView?.id ?? chatState.sessionId;
+    const ro = readOnlyView;
+    const agent = chatState.agent;
+    const location = messageLocation(target);
+    const generation = sessionsState.openGeneration;
+    const view = appState.viewRenderSeq;
+    const current = (): boolean =>
+      !signal?.aborted &&
+      sessionId === (readOnlyView?.id ?? chatState.sessionId) &&
+      threadRef === (readOnlyView?.threadRef ?? chatState.threadRef) &&
+      isVisible() &&
+      agent === chatState.agent &&
+      generation === sessionsState.openGeneration &&
+      view === appState.viewRenderSeq;
+    const pause = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 250));
+    const shown = (messages: AgentMessage[]): boolean =>
+      messages.some((message) => messageLocation(message) === location);
+    if (!sessionId || !current()) return false;
+    const deadline = Date.now() + 30_000;
+    let page: TranscriptPage;
+    let searchHistory = true;
+    for (;;) {
+      page = await transcriptFetcher(sessionId, { tailTurns: TAIL_TURNS });
+      if (!current()) return false;
+      let found = !location;
+      for (let loaded = 0; location; loaded++) {
+        const split = inheritedTranscript(ro?.session ?? chatState.forkSession ?? {}, page.entries ?? []);
+        if (shown(entriesToMessages(split.current, transcriptModel()))) {
+          found = true;
+          break;
+        }
+        const firstSeq = page.entries?.[0]?.seq;
+        if (!searchHistory || !page.earlierEntries || firstSeq === undefined || loaded >= 19) break;
+        const earlier = await transcriptFetcher(sessionId, { beforeSeq: firstSeq, tailTurns: TAIL_TURNS });
+        if (!current()) return false;
+        if (!earlier.entries?.length || (earlier.entries[0]?.seq ?? firstSeq) >= firstSeq) break;
+        page = { ...earlier, entries: [...earlier.entries, ...(page.entries ?? [])] };
+      }
+      if (page.entries?.length) searchHistory = false;
+      if (found) break;
+      if (Date.now() >= deadline) return false;
+      await pause();
+      if (!current()) return false;
+    }
+    let refreshPage = false;
+    for (;;) {
+      if (!current()) return false;
+      if (location && agent?.state.isStreaming && !shown(visibleMessages(agent))) {
+        if (Date.now() >= deadline) return false;
+        refreshPage = true;
+        await pause();
+        continue;
+      }
+      if (refreshPage) {
+        page = await transcriptFetcher(sessionId, { sinceSeq: page.entries?.[0]?.seq });
+        if (!current()) return false;
+        refreshPage = false;
+        continue;
+      }
+      if (ro) {
+        const split = inheritedTranscript(ro.session, page.entries ?? []);
+        mountReadOnly(
+          ro.session,
+          entriesToMessages(split.current, transcriptModel()),
+          currentEarlierCount(ro.session, page.earlierEntries ?? 0),
+          page.entries?.[0]?.seq ?? null,
+          entriesToMessages(split.inherited, transcriptModel()),
+        );
+      } else if (!agent) {
+        return false;
+      } else if (agent.state.isStreaming) {
+        drawActiveChat(agent);
+      } else {
+        await refreshTranscriptFromEntries(agent, page);
+      }
+      if (!current()) return false;
+      if (location) transcriptViewport.cancelFollow();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (!current()) return false;
+      const scroller = chatState.host?.querySelector<HTMLElement>(".chat-scroll");
+      if (!scroller) return false;
+      if (!location) {
+        scrollToBottom();
+        return true;
+      }
+      const row = [...scroller.querySelectorAll<HTMLElement>(".message-row")].find(
+        (element) => element.dataset.messageLocation === location,
+      );
+      if (!row) {
+        if (Date.now() >= deadline) return false;
+        refreshPage = true;
+        await pause();
+        continue;
+      }
+      notificationHighlight = { location, until: Date.now() + 6000 };
+      restoreNotificationHighlight();
+      clearTimeout(notificationHighlightTimer);
+      notificationHighlightTimer = setTimeout(() => {
+        notificationHighlight = null;
+        restoreNotificationHighlight();
+      }, 6000);
+      row.scrollIntoView({ block: "center", behavior: "instant" });
+      row.tabIndex = -1;
+      row.focus({ preventScroll: true });
+      return true;
+    }
   }
 
   async function stopLiveRun(): Promise<void> {
@@ -838,7 +1253,7 @@ export function createChatSurface(
     attachPendingApprovals(messages, r.approvals ?? [], transcriptModel());
   }
 
-  async function refreshTranscriptFromEntries(agent: Agent): Promise<void> {
+  async function refreshTranscriptFromEntries(agent: Agent, prefetched?: TranscriptPage): Promise<void> {
     const sessionId = chatState.sessionId;
     if (!sessionId || agent !== chatState.agent || agent.state.isStreaming) return drawActiveChat(agent);
     const generation = ++transcriptRefreshGeneration;
@@ -867,7 +1282,8 @@ export function createChatSurface(
           return drawActiveChat(agent);
       }
       const anchor = chatState.transcriptAnchorSeq;
-      const page = await transcriptFetcher(sessionId, anchor !== null ? { sinceSeq: anchor } : undefined);
+      const page =
+        prefetched ?? (await transcriptFetcher(sessionId, anchor !== null ? { sinceSeq: anchor } : undefined));
       if (!isCurrent()) return;
       if (last?.stopReason === "error" && !hasRecordedRunReply(page.entries ?? [], last.interruptedRunId!))
         return drawActiveChat(agent);
@@ -1106,6 +1522,7 @@ export function createChatSurface(
     resetBackgroundPanel();
     const host = document.createElement("div");
     host.className = "custom-chat readonly-chat";
+    chatState.host = host;
     let approvals: PendingApproval[] = [];
     const draw = () => {
       approvals = unresolvedApprovals(approvals);
@@ -1196,10 +1613,13 @@ export function createChatSurface(
                 ${ctx.composer.state.error ? html`<div class="composer-error inline">${ctx.composer.state.error}</div>` : nothing}
               </div>
             </section>
+            ${latestMessagesButton()}
           </div>
         `,
         host,
       );
+      transcriptNavigation.sync(host);
+      restoreNotificationHighlight();
       requestAnimationFrame(() => {
         decorateTextCodeBlocks(host);
         if (host.isConnected) transcriptViewport.sync(host.querySelector<HTMLElement>(".chat-scroll"));
@@ -1492,9 +1912,11 @@ export function createChatSurface(
     prepareMessageRows(messages);
     const isNewUser = sessionsState.list.filter((s) => s.id).length === 0;
     const editingApp = appEditSlug(chatState.threadRef, appState.me?.user);
+    const home = ctx.inbox || editingApp || appState.me?.welcomeCohort || messages.length ? null : webuiHome();
     const showWelcome =
       !ctx.inbox &&
       !editingApp &&
+      !home &&
       (appState.me?.welcomeCohort
         ? isWelcomeConversation(sessionsState.list, appState.me.user, chatState.threadRef, chatState.scopeId)
         : isNewUser && !messages.length);
@@ -1507,7 +1929,9 @@ export function createChatSurface(
     }
     const tier = ctx.density();
     const glanceTier = tier === "card" || tier === "strip" ? tier : null;
-    const emptyChat = !messages.length && (showWelcome || !chatState.forkSession);
+    const homeStart = Boolean(home) && !chatState.forkSession && (!ctx.pane || tier === "full");
+    if (home) messageContent = isNewUser ? homeWelcomeArea(home, !homeStart) : homeScenarioCards(home);
+    const emptyChat = !home && !messages.length && (showWelcome || !chatState.forkSession);
     const showSuggestions =
       !ctx.inbox &&
       emptyChat &&
@@ -1533,7 +1957,7 @@ export function createChatSurface(
         context: ctx.inbox.context(),
         messages: html`${pinnedStrip()} ${inheritedHeader()} ${chatState.earlierCount > 0 ? earlierNotice() : nothing}
         ${messageContent}
-        ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${agent.state.errorMessage}</div>` : nothing}`,
+        ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${errMessage(agent.state.errorMessage)}</div>` : nothing}`,
         status: liveWorkStatus(agent),
         busy: agent.state.isStreaming,
         showPrompts: !messages.length,
@@ -1552,6 +1976,23 @@ export function createChatSurface(
           : nothing,
       });
     } else {
+      const transcript = html`${glanceTier ? paneGlance(agent, messages, glanceTier) : nothing}
+        <section class="chat-scroll" tabindex="0" aria-label="Conversation">
+          ${pinnedStrip()}
+          <div class="message-stack ${emptyChat ? "empty-stack" : ""}">
+            ${showWelcome ? welcomeGreeting(!messages.length) : nothing} ${inheritedHeader()}
+            ${chatState.earlierCount > 0 ? earlierNotice() : nothing} ${messageContent}
+            ${glanceTier ? nothing : liveWorkStatus(agent)}
+            ${emptyChat && !isNewUser && !editingApp && !showWelcome ? html`<h1 class="chat-cta">${chatCta()}</h1>` : nothing}
+            ${ctx.pane ? suggestions : nothing}
+            ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${errMessage(agent.state.errorMessage)}</div>` : nothing}
+          </div>
+        </section>
+        ${glanceTier ? nothing : latestMessagesButton()}`;
+      const dock = html`<div class="chat-bottom-dock">
+        ${goalStrip(agent)} ${ctx.composer.queuedStrip(agent)} ${subagentStrip()} ${swarmUi.strip(chatState.sessionId)}
+        ${backgroundActivityStrip()} ${ctx.composer.composerForm(agent)} ${ctx.pane ? nothing : suggestions}
+      </div>`;
       content = html`
         <div
           class="custom-chat-shell ${editingApp ? "app-edit-chat" : ""} ${ctx.pane ? "in-pane" : ""} ${ctx.composer.state.dragging ? "dragging" : ""} ${
@@ -1570,28 +2011,27 @@ export function createChatSurface(
               : nothing
           }
           ${glanceTier || ctx.pane || editingApp ? nothing : sessionTopbar()}
-          ${glanceTier ? paneGlance(agent, messages, glanceTier) : nothing}
-          <section class="chat-scroll" tabindex="0" aria-label="Conversation">
-            ${pinnedStrip()}
-            <div class="message-stack ${emptyChat ? "empty-stack" : ""}">
-              ${showWelcome ? welcomeGreeting(!messages.length) : nothing} ${inheritedHeader()}
-              ${chatState.earlierCount > 0 ? earlierNotice() : nothing} ${messageContent}
-              ${glanceTier ? nothing : liveWorkStatus(agent)}
-              ${emptyChat && !isNewUser && !editingApp && !showWelcome ? html`<h1 class="chat-cta">${chatCta()}</h1>` : nothing}
-              ${ctx.pane ? suggestions : nothing}
-              ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${agent.state.errorMessage}</div>` : nothing}
-            </div>
-          </section>
-          <div class="chat-bottom-dock">
-            ${goalStrip(agent)} ${ctx.composer.queuedStrip(agent)} ${subagentStrip()}
-            ${swarmUi.strip(chatState.sessionId)} ${backgroundActivityStrip()} ${ctx.composer.composerForm(agent)}
-            ${ctx.pane ? nothing : suggestions}
-          </div>
+          ${
+            home && homeStart
+              ? html`<section class="home-launch">
+                  <div class="home-launch-inner">
+                    <header class="home-launch-heading">
+                      <h1 class="home-headline">${home.welcome.headline}</h1>
+                      ${home.welcome.subline ? html`<p class="home-subline">${home.welcome.subline}</p>` : nothing}
+                    </header>
+                    ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline" role="alert">${errMessage(agent.state.errorMessage)}</div>` : nothing}
+                    ${dock} ${messageContent}
+                  </div>
+                </section>`
+              : html`${transcript} ${dock}`
+          }
         </div>
       `;
     }
     render(content, chatState.host);
     transcriptViewport.afterRender();
+    transcriptNavigation.sync(chatState.host);
+    restoreNotificationHighlight();
     const host = chatState.host;
     requestAnimationFrame(() => {
       if (chatState.host !== host || chatState.agent !== agent || !host.isConnected) return;
@@ -1614,6 +2054,7 @@ export function createChatSurface(
     const parent = parentId ? sessionsState.list.find((row) => row.id === parentId) : undefined;
     const title = currentSession?.title?.trim() ?? "";
     const crumb = scope && !scope.startsWith("personal:") ? scopeTitle(scope, chatState.contextName) : null;
+    const crumbGlyph = crumb ? scopeGlyph(scope, chatState.contextName) : null;
     const forkedFrom =
       chatState.forkSession && chatState.sessionId === chatState.forkSession.id
         ? chatState.forkSession.forkedFrom
@@ -1622,6 +2063,7 @@ export function createChatSurface(
       status: session?.status,
       sessionId: chatState.sessionId ?? session?.id,
       crumb,
+      crumbGlyph,
       title,
       parent: parentId
         ? { title: parent?.title?.trim() || "Parent session", onClick: () => void openSessionById(parentId) }
@@ -1641,6 +2083,7 @@ export function createChatSurface(
           threadRef: chatState.threadRef,
           title: title || "New chat",
           crumb,
+          crumbGlyph,
         });
         if (scope && (tool === "crons" || tool === "files" || tool === "apps")) contextsState.selected = scope;
         switchView(tool === "apps" ? "deploys" : tool);
@@ -1726,7 +2169,8 @@ export function createChatSurface(
       hit.forking === forking &&
       hit.speakerLabel === speakerLabel &&
       hit.edited === edited &&
-      hit.deleted === deleted
+      hit.deleted === deleted &&
+      hit.ratings === ratingsVersion()
     ) {
       return hit.tpl;
     }
@@ -1747,6 +2191,7 @@ export function createChatSurface(
       speakerLabel,
       edited,
       deleted,
+      ratings: ratingsVersion(),
       tpl,
     });
     return tpl;
@@ -1805,6 +2250,7 @@ export function createChatSurface(
           class="message-row user-row ${steered ? "steered-row" : ""}"
           data-index=${index}
           data-entry-seqs=${messageEntrySeqs(message).join(" ")}
+          data-message-location=${messageLocation(message)}
         >
           ${speaker ? html`<div class="speaker-label">${speaker}</div>` : nothing}
           ${attachmentGallery(attachments, (attachment) => browserRenderableImage(attachment.mimeType), userAttachmentBadge)}
@@ -1812,8 +2258,9 @@ export function createChatSurface(
             class="message-bubble user-bubble ${deleted ? "deleted-bubble" : ""}"
             ?hidden=${!messageText(message).trim() && !edited && !deleted}
           >
+            ${quotedOriginal(message)}
             <div class="pin-content">
-              ${isReadOnlySlackView() ? slackWireBubble(messageText(message)) : markdown(messageText(message))}
+              ${isReadOnlySlackView() ? slackWireBubble(messageText(message)) : userText(messageText(message))}
               ${edited || deleted ? html`<span class="revision-badge">(${deleted ? "deleted" : "edited"})</span>` : nothing}
             </div>
             <button class="pin-toggle" type="button" hidden aria-expanded="false">
@@ -1914,8 +2361,9 @@ export function createChatSurface(
             .filter((seq) => !inlineSteers.has(seq))
             .join(" "),
           streaming: isStreaming,
-          content: html`${workView} ${assistantContent(msg, isStreaming, showWork)} ${assistantFileList(deliveredFiles)}
-          ${msg.stopReason === "error" && msg.errorMessage ? html`<div class="composer-error inline">${msg.errorMessage}</div>` : nothing}`,
+          content: html`${workView} ${assistantContent(msg, isStreaming, showWork)}
+          ${assistantFileList(deliveredFiles, message)}
+          ${msg.stopReason === "error" && msg.errorMessage ? html`<div class="composer-error inline">${errMessage(msg.errorMessage)}</div>` : nothing}`,
           meta: isStreaming ? nothing : messageMeta(msg, index),
         });
       return html`
@@ -1925,10 +2373,11 @@ export function createChatSurface(
           data-entry-seqs=${messageEntrySeqs(message)
             .filter((seq) => !inlineSteers.has(seq))
             .join(" ")}
+          data-message-location=${messageLocation(message)}
         >
           <div class="assistant-body">
-            ${workView} ${assistantContent(msg, isStreaming, showWork)} ${assistantFileList(deliveredFiles)}
-            ${msg.stopReason === "error" && msg.errorMessage ? html`<div class="composer-error inline">${msg.errorMessage}</div>` : nothing}
+            ${workView} ${assistantContent(msg, isStreaming, showWork)} ${assistantFileList(deliveredFiles, message)}
+            ${msg.stopReason === "error" && msg.errorMessage ? html`<div class="composer-error inline">${errMessage(msg.errorMessage)}</div>` : nothing}
             ${isStreaming ? nothing : messageMeta(msg, index)}
           </div>
         </article>
@@ -1951,10 +2400,11 @@ export function createChatSurface(
     const text = copyableText(message).trim();
     const ts = (message as { timestamp?: number }).timestamp;
     if (!text && ts === undefined) return nothing;
+    const time = ts === undefined ? null : messageTimeDetail(ts);
     const forkable = Boolean(index >= 0 && chatState.threadRef && chatState.sessionId && chatState.agent);
     return html`
       <div class="message-meta">
-        ${ts !== undefined ? html`<span class="message-time">${formatMessageTime(ts)}</span>` : nothing}
+        ${time ? html`<time class="message-time" datetime=${time.iso} title=${time.title}>${formatMessageTime(ts!)}</time>` : nothing}
         ${
           text
             ? html`<button
@@ -1979,6 +2429,11 @@ export function createChatSurface(
               >
                 ${icon(Link2, 13)}${icon(Check, 13)}
               </button>`
+            : nothing
+        }
+        ${
+          message.role === "assistant" && rateable() && chatState.sessionId && messageEntrySeqs(message).length
+            ? ratingButtons(chatState.sessionId, messageEntrySeqs(message)[0]!, redrawTranscript)
             : nothing
         }
         ${
@@ -2165,9 +2620,27 @@ export function createChatSurface(
     return parts;
   }
 
-  function assistantFileList(files: DeliveredFile[] | undefined): TemplateResult | typeof nothing {
+  function assistantFileList(
+    files: DeliveredFile[] | undefined,
+    message: AgentMessage,
+  ): TemplateResult | typeof nothing {
     if (!files?.length) return nothing;
-    return html`<div class="message-files">${files.map((f) => deliveredFileBadge(f))}</div>`;
+    const sessionId = chatState.sessionId;
+    const seq = messageEntrySeqs(message)[0];
+    return html`<div class="message-files">
+      ${files.map(
+        (f) =>
+          html`${deliveredFileBadge(f)}${
+            rateable() && sessionId && seq !== undefined && f.artifactId
+              ? html`<span class="file-rating">${ratingButtons(sessionId, seq, redrawTranscript, f.artifactId)}</span>`
+              : nothing
+          }`,
+      )}
+    </div>`;
+  }
+
+  function rateable(): boolean {
+    return !isReadOnlySlackView() && !appState.me?.impersonatedBy;
   }
 
   function messageText(message: AgentMessage): string {
@@ -2188,8 +2661,9 @@ export function createChatSurface(
     const goalTicking = Boolean(
       chatState.agent?.state.isStreaming && latestGoal(visibleMessages(chatState.agent))?.status === "active",
     );
-    const active =
-      (chatState.liveWork?.status === "working" && !chatState.liveWork.stale) || goalTicking || subagentUi.ticking;
+    const live = chatState.liveWork;
+    const running = Boolean(live && (live.status === "working" || live.status === "thinking") && !live.stale);
+    const active = running || goalTicking || subagentUi.ticking;
     if (active && !workTicker) {
       workTicker = setInterval(() => drawActiveChat(), 1000);
     } else if (!active && workTicker) {
@@ -2692,6 +3166,7 @@ export function createChatSurface(
       return html`<div class="stopped-head" role="status">${icon(Ban, 13)}<span>Stop requested</span></div>`;
     const work = chatState.liveWork ?? { status: "thinking", activity: [] };
     if (work.status !== "thinking" && work.status !== "working") return nothing;
+    const elapsed = work.stale ? 0 : workSeconds(work);
     if (currentTextPhase(work)?.phase === "final_answer" || shouldShowWork(work, "")) return nothing;
     const summary = liveWorkSummary(work);
     const expandable = Boolean(summary?.detail);
@@ -2713,6 +3188,13 @@ export function createChatSurface(
             >${summary ? summary.label : sheenLabel(`Thinking${usedToolsSuffix(work)}`, true)}</span
           >
           ${summary?.detail ? html`<span class="live-work-detail">${summary.detail}</span>` : nothing}
+          ${
+            elapsed > 0
+              ? html`<span class="live-work-elapsed" aria-label="Time since this task started"
+                  >${goalElapsedLabel(0, elapsed * 1000)}</span
+                >`
+              : nothing
+          }
           ${expandable ? html`<span class="live-work-toggle">${icon(ChevronRight, 14)}</span>` : nothing}
         </button>
       </section>
@@ -2783,7 +3265,7 @@ export function createChatSurface(
   function workLabel(work: WorkBlock): string {
     if (work.stale && (work.status === "thinking" || work.status === "working")) return "Interrupted, resuming…";
     if (currentTextPhase(work)?.phase === "final_answer") return workedLabel("Worked", workSeconds(work));
-    if (work.status === "thinking") return "Thinking";
+    if (work.status === "thinking") return workedLabel("Thinking", workSeconds(work));
     const secs = workSeconds(work);
     return workedLabel(work.status === "working" ? "Working" : "Worked", secs);
   }
@@ -3336,6 +3818,13 @@ export function createChatSurface(
     document.addEventListener("scroll", unpeekAttachment, true);
   }
 
+  function previewImage(event: MouseEvent): void {
+    if (!isPlainLeftClick(event)) return;
+    event.preventDefault();
+    unpeekAttachment();
+    previewLinkedImage(event.currentTarget as HTMLAnchorElement, ctx.container());
+  }
+
   function userAttachmentBadge(a: UserAttachmentView): TemplateResult {
     const artifactHref = a.artifactId ? fileContentUrl(a.artifactId, a.fileName) : undefined;
     if (a.mimeType?.startsWith("image/")) {
@@ -3349,6 +3838,7 @@ export function createChatSurface(
           target="_blank"
           rel="noreferrer"
           ${tip(a.fileName)}
+          @click=${previewImage}
           @mouseenter=${peekAttachment}
           @mouseleave=${unpeekAttachment}
           @focus=${peekAttachment}
@@ -3375,7 +3865,13 @@ export function createChatSurface(
     const href = fileContentUrl(file.artifactId, file.name);
     if (file.mimetype?.startsWith("image/")) {
       if (!browserRenderableImage(file.mimetype)) return imageChip(file.name, file.sizeBytes, href);
-      return html`<a class="file-image" href=${href} target="_blank" rel="noreferrer" ${tip(file.name)}
+      return html`<a
+        class="file-image"
+        href=${href}
+        target="_blank"
+        rel="noreferrer"
+        ${tip(file.name)}
+        @click=${previewImage}
         ><img src=${href} alt=${file.name} loading="lazy"
       /></a>`;
     }
@@ -3451,6 +3947,9 @@ export function createChatSurface(
     notePendingSessionOnSend,
     syncPaneState: postCurrentPaneState,
     onDelivery,
+    isVisible,
+    mountedThreadRef: () => readOnlyView?.threadRef ?? chatState.threadRef,
+    showLatestMessages,
     resumeIfIdle,
     redraw: () => drawActiveChat(),
     dispose,

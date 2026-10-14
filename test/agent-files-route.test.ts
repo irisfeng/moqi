@@ -136,4 +136,20 @@ describe("agent files self-API", async () => {
     assert.equal(binary.headers.get("content-type"), "image/png");
     await Promise.all([text.arrayBuffer(), encoded.arrayBuffer(), binary.arrayBuffer()]);
   });
+
+  it("serves content inline by default and as an attachment with download=1", async () => {
+    const token = await capFor("U1");
+    const inline = await get(`/v1/files/${mineId}/content`, token);
+    assert.equal(inline.headers.get("content-disposition"), "inline; filename*=UTF-8''mine.txt");
+    await inline.arrayBuffer();
+
+    const download = await get(`/v1/files/${mineId}/content?download=1`, token);
+    assert.equal(download.status, 200);
+    assert.equal(
+      download.headers.get("content-disposition"),
+      "attachment; filename=\"mine.txt\"; filename*=UTF-8''mine.txt",
+    );
+    assert.equal(download.headers.get("content-type"), "application/octet-stream");
+    assert.equal(Buffer.from(await download.arrayBuffer()).toString(), "mine");
+  });
 });

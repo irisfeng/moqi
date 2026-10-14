@@ -52,6 +52,8 @@ export interface LocalSandboxOptions {
   repoRoot?: string;
   dockerExec?: DockerExec;
   fetchImpl?: typeof fetch;
+  apiHost?: string;
+  bindHost?: string;
   onError?: (e: { category: string; code: string; message: string; scopeLabel?: string }) => void;
 }
 
@@ -94,6 +96,8 @@ function localSlug(id: string): string {
 
 export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandboxOptions = {}): Sandbox {
   const image = opts.image ?? DEFAULT_LOCAL_SANDBOX_IMAGE;
+  const apiHost = opts.apiHost ?? "127.0.0.1";
+  const bindHost = opts.bindHost ?? "127.0.0.1";
   const dexec = opts.dockerExec ?? spawnDockerExec(opts.dockerBin ?? "docker");
   const fetchImpl = opts.fetchImpl ?? fetch;
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
@@ -173,7 +177,7 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
   ): Promise<{ status: number; text: string }> {
     const base = opts.coreContainer
       ? `http://${name}:${AGENT_PORT}${path}`
-      : `http://127.0.0.1:${await resolvePort(name)}${path}`;
+      : `http://${apiHost}:${await resolvePort(name)}${path}`;
     const signals = [AbortSignal.timeout(timeoutMs ?? 30_000), ...(signal ? [signal] : [])];
     const res = await fetchImpl(base, {
       method: body === undefined ? "GET" : "POST",
@@ -277,7 +281,7 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
       "--network",
       net,
       ...(withVolume && scope ? ["-v", `${localVolumeName(scope)}:${homeDir}`] : []),
-      ...(opts.coreContainer ? [] : ["-p", `127.0.0.1:0:${AGENT_PORT}`]),
+      ...(opts.coreContainer ? [] : ["-p", `${bindHost}:0:${AGENT_PORT}`]),
       "--add-host=host.docker.internal:host-gateway",
       ...(opts.cpus ? ["--cpus", String(opts.cpus)] : []),
       ...(opts.memoryMb ? ["--memory", `${opts.memoryMb}m`] : []),

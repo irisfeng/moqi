@@ -1,0 +1,20 @@
+name: 想法 · Idea
+description: 希望它能做什么 · Something you would like it to do
+labels: [needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        像跟同事聊天一样写就好，不需要正式提案。我们会读过、审过再决定是否去做，但不承诺回复时间。
+        Write it the way you would tell a colleague; no formal proposal needed. We read and review every idea before deciding, but promise no response time.
+  - type: textarea
+    id: want
+    attributes:
+      label: 想要什么 · What you want
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么 · Why
+      description: 现在遇到了什么问题 · The problem you run into today

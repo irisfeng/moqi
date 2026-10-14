@@ -3,7 +3,7 @@ import "./support/auto-fake-sprites.ts";
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +47,15 @@ function asUser(user: string, init: RequestInit = {}): RequestInit {
   };
 }
 
+function verifiedSend(user: string, text: string, threadRef = `web:${user}:default`) {
+  const body = { text, threadRef, expectedUser: user };
+  return {
+    ...body,
+    idempotencyKey: randomUUID(),
+    clientRequestFingerprint: createHash("sha256").update(JSON.stringify(body)).digest("hex"),
+  };
+}
+
 function parseSse(body: string): Array<{ event: string; data: unknown }> {
   return body.split("\n\n").flatMap((frame) => {
     const data = frame
@@ -66,8 +75,8 @@ function parseSse(body: string): Array<{ event: string; data: unknown }> {
 test("SSE streams partial frames then a terminal done frame carrying the reply", async () => {
   const submit = (await (
     await fetch(
-      `${webBase}/api/turn`,
-      asUser("alice", { method: "POST", body: JSON.stringify({ text: "stream me?" }) }),
+      `${webBase}/api/turn/v2`,
+      asUser("alice", { method: "POST", body: JSON.stringify(verifiedSend("alice", "stream me?")) }),
     )
   ).json()) as { runId?: string };
   assert.ok(submit.runId, "async turn should return a runId");
@@ -98,8 +107,8 @@ test("SSE relays tool activity frames and folds them into the done frame", async
   await built.sandboxResources.setDefault("alice", "personal:alice", computer.id);
   const submit = (await (
     await fetch(
-      `${webBase}/api/turn`,
-      asUser("alice", { method: "POST", body: JSON.stringify({ text: "!run echo hi" }) }),
+      `${webBase}/api/turn/v2`,
+      asUser("alice", { method: "POST", body: JSON.stringify(verifiedSend("alice", "!run echo hi")) }),
     )
   ).json()) as { runId?: string };
   assert.ok(submit.runId, "async turn should return a runId");
@@ -134,8 +143,8 @@ test("active run lookup returns the latest tracked run for the caller's web thre
   const threadRef = `web:alice:${randomUUID()}`;
   const submit = (await (
     await fetch(
-      `${webBase}/api/turn`,
-      asUser("alice", { method: "POST", body: JSON.stringify({ text: "track me", threadRef }) }),
+      `${webBase}/api/turn/v2`,
+      asUser("alice", { method: "POST", body: JSON.stringify(verifiedSend("alice", "track me", threadRef)) }),
     )
   ).json()) as { runId?: string };
   assert.ok(submit.runId, "async turn should return a runId");
@@ -164,8 +173,8 @@ test("active run lookup is cleared after the events stream reaches a terminal fr
   const threadRef = `web:alice:${randomUUID()}`;
   const submit = (await (
     await fetch(
-      `${webBase}/api/turn`,
-      asUser("alice", { method: "POST", body: JSON.stringify({ text: "cleanup me", threadRef }) }),
+      `${webBase}/api/turn/v2`,
+      asUser("alice", { method: "POST", body: JSON.stringify(verifiedSend("alice", "cleanup me", threadRef)) }),
     )
   ).json()) as { runId?: string };
   assert.ok(submit.runId, "async turn should return a runId");
@@ -191,10 +200,10 @@ test("web command approval pause is durable and blocks fresh input for the threa
   const threadRef = `web:alice:${randomUUID()}`;
   const submit = (await (
     await fetch(
-      `${webBase}/api/turn`,
+      `${webBase}/api/turn/v2`,
       asUser("alice", {
         method: "POST",
-        body: JSON.stringify({ text: "!run git push --force origin main", threadRef }),
+        body: JSON.stringify(verifiedSend("alice", "!run git push --force origin main", threadRef)),
       }),
     )
   ).json()) as { runId?: string };
@@ -212,21 +221,61 @@ test("web command approval pause is durable and blocks fresh input for the threa
   const requestId = doneData.result?.pendingApprovals?.[0]?.requestId;
   assert.ok(requestId);
 
+  const blockedRequest = verifiedSend("alice", "can you keep going?", threadRef);
+  const runCount = (await built.runs.list()).length;
   const blocked = await fetch(
-    `${webBase}/api/turn`,
-    asUser("alice", { method: "POST", body: JSON.stringify({ text: "can you keep going?", threadRef }) }),
+    `${webBase}/api/turn/v2`,
+    asUser("alice", { method: "POST", body: JSON.stringify(blockedRequest) }),
   );
-  assert.equal(blocked.status, 200);
-  const blockedBody = (await blocked.json()) as { status?: string; runId?: string };
-  assert.equal(blockedBody.status, "pending_approval");
+  assert.equal(blocked.status, 409);
+  const blockedBody = (await blocked.json()) as { error?: string; sendProtocol?: number; runId?: string };
+  assert.equal(blockedBody.error, "approval_pending");
+  assert.equal(blockedBody.sendProtocol, 2);
   assert.equal(blockedBody.runId, undefined);
+  assert.equal((await built.runs.list()).length, runCount);
+  const blockedReceipt = await fetch(
+    `${webBase}/api/turn/v2/receipt`,
+    asUser("alice", { method: "POST", body: JSON.stringify(blockedRequest) }),
+  );
+  assert.equal(blockedReceipt.status, 404);
+  const blockedAgain = await fetch(
+    `${webBase}/api/turn/v2`,
+    asUser("alice", { method: "POST", body: JSON.stringify(blockedRequest) }),
+  );
+  assert.equal(blockedAgain.status, 409);
+  const changedRequest = {
+    ...verifiedSend("alice", "a different message", threadRef),
+    idempotencyKey: blockedRequest.idempotencyKey,
+  };
+  const changedWhileBlocked = await fetch(
+    `${webBase}/api/turn/v2`,
+    asUser("alice", { method: "POST", body: JSON.stringify(changedRequest) }),
+  );
+  assert.equal(changedWhileBlocked.status, 409);
+  assert.equal((await built.runs.list()).length, runCount);
 
   const denied = await fetch(
     `${webBase}/api/approvals/${encodeURIComponent(requestId)}`,
     asUser("alice", { method: "POST", body: JSON.stringify({ approved: false }) }),
   );
   assert.equal(denied.status, 202);
-  assert.ok(((await denied.json()) as { runId?: string }).runId);
+  const deniedRunId = ((await denied.json()) as { runId?: string }).runId;
+  assert.ok(deniedRunId);
+  await built.runs.waitFor(deniedRunId, 20_000);
+  const retried = await fetch(
+    `${webBase}/api/turn/v2`,
+    asUser("alice", { method: "POST", body: JSON.stringify(blockedRequest) }),
+  );
+  assert.equal(retried.status, 202);
+  const retriedBody = (await retried.json()) as { runId?: string; sendProtocol?: number };
+  assert.ok(retriedBody.runId);
+  assert.equal(retriedBody.sendProtocol, 2);
+  const changedAfterAccepted = await fetch(
+    `${webBase}/api/turn/v2`,
+    asUser("alice", { method: "POST", body: JSON.stringify(changedRequest) }),
+  );
+  assert.equal(changedAfterAccepted.status, 403);
+  assert.equal((await built.runs.list()).length, runCount + 2);
 });
 
 test("the events route is ownership-gated (404 for a run the caller doesn't own)", async () => {

@@ -4,7 +4,7 @@ import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import { JSDOM } from "jsdom";
-import type { SessionTool, SessionTopbarOpts } from "../src/session-scope.ts";
+import type { ScopedSessionInfo, SessionTool, SessionTopbarOpts } from "../src/session-scope.ts";
 
 const source = readFileSync(new URL("../src/session-scope.ts", import.meta.url), "utf8");
 const dom = new JSDOM("<!doctype html><body></body>");
@@ -18,30 +18,46 @@ for (const [key, value] of Object.entries({
 const { html, nothing, render } = await import("lit");
 const { sessionStatusMark } = await import("../src/session-status.ts");
 
-function load(api: (path: string) => Promise<unknown> = async () => ({})) {
+function load(
+  api: (path: string) => Promise<unknown> = async () => ({}),
+  icon: (glyph: string) => unknown = () => nothing,
+) {
   return runInNewContext(
     stripTypeScriptTypes(
-      source.replace(/^import .*;\n/gm, "").replace(/^export /gm, "") + "\n({ scopeToolCount, sessionTopbarTpl });",
+      source.replace(/^import .*;\n/gm, "").replace(/^export /gm, "") +
+        "\n({ scopeToolCount, sessionTopbarTpl, scopedViewTopbar, setScopedSession });",
     ),
     {
       api,
       html,
       sessionStatusMark,
       nothing,
-      icon: () => nothing,
+      icon,
       tip: () => nothing,
+      hasDestination: () => true,
       closeFormMenus: () => {},
       toggleFormMenu: () => {},
       ...Object.fromEntries(
-        ["ArrowUpLeft", "Box", "Brain", "Clock3", "Ellipsis", "Files", "GitFork", "KeyRound", "Rocket"].map((name) => [
-          name,
-          name,
-        ]),
+        [
+          "ArrowUpLeft",
+          "Box",
+          "Brain",
+          "Clock3",
+          "Ellipsis",
+          "Files",
+          "Folder",
+          "GitFork",
+          "KeyRound",
+          "Rocket",
+          "User",
+        ].map((name) => [name, name]),
       ),
     },
   ) as {
     scopeToolCount: (tool: SessionTool, scope: string, ready: () => void) => number | null;
     sessionTopbarTpl: (opts: SessionTopbarOpts) => ReturnType<typeof html>;
+    scopedViewTopbar: (current: SessionTool, redraw: () => void) => ReturnType<typeof html>;
+    setScopedSession: (info: Omit<ScopedSessionInfo, "crumbGlyph"> & { crumbGlyph: string }) => void;
   };
 }
 
@@ -172,4 +188,38 @@ test("session status appears after the heading and before tools", () => {
   assert.equal(status.getAttribute("aria-label"), "Live in production");
   assert.ok(status.previousElementSibling?.classList.contains("session-heading"));
   assert.ok(status.nextElementSibling?.classList.contains("session-tools"));
+});
+
+test("a personal chat's header says Personal and a shared one links its scope to the project", () => {
+  const personal = document.createElement("div");
+  render(load().sessionTopbarTpl({ crumb: null, title: "Notes", onTool: () => {} }), personal);
+  const mine = personal.querySelector(".session-crumb");
+  assert.equal(mine?.getAttribute("data-scope"), "personal");
+  assert.equal(mine?.textContent?.trim(), "Personal");
+  let opened = 0;
+  const shared = document.createElement("div");
+  render(load().sessionTopbarTpl({ crumb: "Alpha", title: "Plan", onCrumb: () => opened++, onTool: () => {} }), shared);
+  const pill = shared.querySelector<HTMLButtonElement>("button.session-crumb");
+  assert.equal(pill?.getAttribute("data-scope"), "shared");
+  assert.equal(pill?.textContent?.trim(), "Alpha");
+  pill?.click();
+  assert.equal(opened, 1);
+});
+
+test("a view opened from a chat keeps that chat's scope icon in its header", () => {
+  const module = load(undefined, (glyph) => html`<i data-glyph=${glyph}></i>`);
+  module.setScopedSession({
+    scopeId: "channel:C1",
+    sessionId: "s1",
+    threadRef: null,
+    title: "Plan",
+    crumb: "general",
+    crumbGlyph: "Hash",
+  });
+  const host = document.createElement("div");
+  render(
+    module.scopedViewTopbar("files", () => {}),
+    host,
+  );
+  assert.equal(host.querySelector(".session-crumb i")?.getAttribute("data-glyph"), "Hash");
 });

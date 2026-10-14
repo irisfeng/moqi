@@ -22,3 +22,5 @@ __pycache__/
 docs/master.html
 
 .context/
+
+/deploy/layers/qm-cn/private/

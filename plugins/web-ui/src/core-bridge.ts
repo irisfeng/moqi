@@ -5,6 +5,7 @@ import { EventType } from "@tanstack/ai/client";
 import { fetchServerSentEvents, StreamProcessor } from "@tanstack/ai-client";
 import { postCallText, postResultOk } from "./surface-post.ts";
 import type { ModelMetadata } from "./pi-models.ts";
+import { readMessageLocation, type MessageLocation } from "./message-location.ts";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { Attachment } from "@earendil-works/pi-web-ui";
 import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, Usage } from "@earendil-works/pi-ai";
@@ -58,7 +59,7 @@ export interface CoreAttachment {
 }
 
 export const MAX_ATTACHMENT_BYTES = 1_000_000_000;
-export const MAX_FILES_PER_MESSAGE = 10;
+export const MAX_FILES_PER_MESSAGE = 20;
 
 export function oversizeAttachmentNote(name: string): string {
   return `"${name}" is too large — files up to ~1 GB can be sent. It was left out.`;
@@ -141,6 +142,7 @@ export interface CoreSession {
   working?: boolean;
   awaitingInput?: boolean;
   lastTurnFailed?: boolean;
+  lastTurnAt?: number;
   backgroundJobs?: number;
   watches?: number;
   crons?: number;
@@ -296,10 +298,14 @@ export async function updateSession(
 export async function forkSession(
   id: string,
   upToSeq?: number,
+  targetScopeId?: string,
 ): Promise<{ session: CoreSession; entries: SessionEntry[] }> {
   return api<{ session: CoreSession; entries: SessionEntry[] }>(`/api/sessions/${encodeURIComponent(id)}/fork`, {
     method: "POST",
-    body: JSON.stringify(upToSeq !== undefined ? { upToSeq } : {}),
+    body: JSON.stringify({
+      ...(upToSeq !== undefined ? { upToSeq } : {}),
+      ...(targetScopeId !== undefined ? { targetScopeId } : {}),
+    }),
   });
 }
 
@@ -480,6 +486,8 @@ export type AssistantWork = AssistantMessage & {
   streamingBaseline?: string;
   work?: WorkBlock;
   deliveredFiles?: DeliveredFile[];
+  seq?: number;
+  deliveryId?: string;
   retryableSend?: boolean;
   interruptedRunId?: string;
   sendBlocked?: "pending_approval";
@@ -518,6 +526,13 @@ export interface TurnOptions {
   harness?: string;
   scopeId?: string | null;
   channelName?: string | null;
+  expectedUser?: string;
+}
+
+export interface MessageQuote {
+  seq?: number;
+  text: string;
+  author?: string;
 }
 
 export interface ActiveRun {
@@ -636,6 +651,7 @@ async function latestUserTurn(agent: Agent): Promise<{
   text: string;
   attachments: CoreAttachment[];
   idempotencyKey?: string;
+  quote?: MessageQuote;
   issues: string[];
   droppedIds: string[];
   retryable: Attachment[];
@@ -662,10 +678,12 @@ async function latestUserTurn(agent: Agent): Promise<{
     }
     const idempotencyKey = sendKeyOf(m) ?? mintSendKey();
     m.idempotencyKey = idempotencyKey;
+    const quote = quoteOf(m);
     return {
       text,
       attachments: uploaded,
       idempotencyKey,
+      ...(quote ? { quote } : {}),
       issues: skipped.map((s) => s.note),
       droppedIds: skipped.filter((s) => s.permanent).flatMap((s) => (s.id ? [s.id] : [])),
       retryable,
@@ -961,13 +979,12 @@ export async function queueTurn(
   getTurnOptions?: () => TurnOptions,
   idempotencyKey?: string,
   attachments: CoreAttachment[] = [],
+  quote?: MessageQuote,
 ): Promise<QueuedRun> {
-  const submit = await api<{ status?: string; runId?: string; reason?: string }>("/api/turn", {
-    method: "POST",
-    body: JSON.stringify(
-      turnRequestBody(threadRef, text, agent.state.model, agent, getTurnOptions, { idempotencyKey, attachments }),
-    ),
-  });
+  const submit = await submitTurn(
+    turnRequestBody(threadRef, text, agent.state.model, agent, getTurnOptions, { idempotencyKey, attachments, quote }),
+    getTurnOptions?.().expectedUser,
+  );
   if (submit.status === "pending_approval") throw new Error(submit.reason ?? PENDING_APPROVAL_REASON);
   if (!submit.runId) throw new Error("Could not queue the message.");
   return { runId: submit.runId, text, ...(attachments.length ? { hasAttachments: true } : {}) };
@@ -1124,15 +1141,79 @@ export function makeOpenerStreamFn(
   return fn as unknown as StreamFn;
 }
 
+interface TurnSubmit {
+  status?: string;
+  runId?: string;
+  reply?: string;
+  reason?: string;
+}
+
+async function verifiedTurnRequest(
+  body: Record<string, unknown>,
+  expectedUser: string | undefined,
+): Promise<Record<string, unknown> | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!expectedUser || !subtle || typeof body.threadRef !== "string" || !body.threadRef.startsWith("web:")) return null;
+  if (typeof body.idempotencyKey !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(body.idempotencyKey)) return null;
+  const timezone = typeof body.timezone === "string" ? body.timezone.trim().slice(0, 64) : "";
+  const channelName = typeof body.channelName === "string" ? body.channelName.trim().slice(0, 200) : "";
+  const quoteText = typeof body.quoteText === "string" ? body.quoteText.trim().slice(0, 300).trim() : "";
+  const quoteAuthor = typeof body.quoteAuthor === "string" ? body.quoteAuthor.trim().slice(0, 50).trim() : "";
+  const quoteSeq = Number.isSafeInteger(body.quoteSeq) && (body.quoteSeq as number) >= 0 ? body.quoteSeq : undefined;
+  const signed = {
+    text: body.text,
+    threadRef: body.threadRef,
+    expectedUser,
+    ...(quoteText && quoteSeq !== undefined ? { quoteSeq } : {}),
+    ...(quoteText ? { quoteText } : {}),
+    ...(quoteText && quoteAuthor ? { quoteAuthor } : {}),
+    ...(typeof body.harness === "string" && body.harness ? { harness: body.harness } : {}),
+    ...(typeof body.model === "string" && body.model ? { model: body.model } : {}),
+    ...(typeof body.thinkingLevel === "string" && body.thinkingLevel ? { thinkingLevel: body.thinkingLevel } : {}),
+    ...(typeof body.fastMode === "boolean" ? { fastMode: body.fastMode } : {}),
+    ...(timezone ? { timezone } : {}),
+    ...(typeof body.scopeId === "string" && body.scopeId ? { scopeId: body.scopeId } : {}),
+    ...(channelName ? { channelName } : {}),
+    ...(Array.isArray(body.attachments) && body.attachments.length ? { attachments: body.attachments } : {}),
+  };
+  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(signed)));
+  return { ...signed, idempotencyKey: body.idempotencyKey, clientRequestFingerprint: toHex(digest) };
+}
+
+async function submitTurn(body: Record<string, unknown>, expectedUser: string | undefined): Promise<TurnSubmit> {
+  const legacy = (): Promise<TurnSubmit> =>
+    api<TurnSubmit>("/api/turn", { method: "POST", body: JSON.stringify(body) });
+  const verified = await verifiedTurnRequest(body, expectedUser);
+  if (!verified) return legacy();
+  try {
+    return await api<TurnSubmit>("/api/turn/v2", { method: "POST", body: JSON.stringify(verified) });
+  } catch (e) {
+    const code = e instanceof ApiError ? (e.body as { error?: unknown } | null)?.error : undefined;
+    if (code === "approval_pending") return { status: "pending_approval" };
+    if (code === "invalid_request" || code === "unsupported_send_protocol") return legacy();
+    throw e;
+  }
+}
+
+function quoteOf(message: unknown): MessageQuote | undefined {
+  const quoted = message as { quoteSeq?: unknown; quoteText?: unknown; quoteAuthor?: unknown } | null;
+  if (typeof quoted?.quoteText !== "string" || !quoted.quoteText.trim()) return undefined;
+  return {
+    text: quoted.quoteText,
+    ...(typeof quoted.quoteSeq === "number" ? { seq: quoted.quoteSeq } : {}),
+    ...(typeof quoted.quoteAuthor === "string" && quoted.quoteAuthor.trim() ? { author: quoted.quoteAuthor } : {}),
+  };
+}
+
 function turnRequestBody(
   threadRef: string,
   text: string,
   model: Model<Api>,
   agent: Agent,
   getTurnOptions?: () => TurnOptions,
-  send: { idempotencyKey?: string; attachments?: CoreAttachment[] } = {},
+  send: { idempotencyKey?: string; attachments?: CoreAttachment[]; quote?: MessageQuote } = {},
 ): Record<string, unknown> {
-  const { idempotencyKey, attachments = [] } = send;
+  const { idempotencyKey, attachments = [], quote } = send;
   const turnOptions = getTurnOptions?.() ?? {};
   const thinkingLevel =
     !turnOptions.harness || harnessSupportsEffort(turnOptions.harness)
@@ -1142,6 +1223,9 @@ function turnRequestBody(
   return {
     text,
     threadRef,
+    ...(quote?.seq !== undefined ? { quoteSeq: quote.seq } : {}),
+    ...(quote?.text ? { quoteText: quote.text } : {}),
+    ...(quote?.author ? { quoteAuthor: quote.author } : {}),
     ...(turnOptions.harness ? { harness: turnOptions.harness } : {}),
     model: model.id,
     ...(thinkingLevel ? { thinkingLevel } : {}),
@@ -1167,11 +1251,17 @@ export function sendKeyOf(message: unknown): string | undefined {
   return typeof key === "string" && key ? key : undefined;
 }
 
-export function userSendMessage(text: string, attachments?: unknown[]): AgentMessage {
+export function userSendMessage(text: string, attachments?: unknown[], quote?: MessageQuote): AgentMessage {
   const base = attachments?.length
     ? { role: "user-with-attachments", content: text, attachments, timestamp: Date.now() }
     : { role: "user", content: text, timestamp: Date.now() };
-  return { ...base, idempotencyKey: mintSendKey() } satisfies SendKeyed as unknown as AgentMessage;
+  return {
+    ...base,
+    ...(quote?.seq !== undefined ? { quoteSeq: quote.seq } : {}),
+    ...(quote?.text ? { quoteText: quote.text } : {}),
+    ...(quote?.author ? { quoteAuthor: quote.author } : {}),
+    idempotencyKey: mintSendKey(),
+  } satisfies SendKeyed as unknown as AgentMessage;
 }
 
 async function drive(
@@ -1196,11 +1286,12 @@ async function drive(
     stream.push({ type: "start", partial });
     stream.push({ type: "text_start", contentIndex: 0, partial });
 
-    const { text, attachments, idempotencyKey, issues, droppedIds, retryable } = opener
+    const { text, attachments, idempotencyKey, quote, issues, droppedIds, retryable } = opener
       ? {
           text: "",
           attachments: [] as CoreAttachment[],
           idempotencyKey: undefined,
+          quote: undefined,
           issues: [] as string[],
           droppedIds: [] as string[],
           retryable: [] as Attachment[],
@@ -1219,13 +1310,26 @@ async function drive(
     }
     if (issues.length) onSendIssues?.(issues, retryable);
 
-    const submit = await api<{ status?: string; runId?: string; reply?: string; reason?: string }>("/api/turn", {
-      method: "POST",
-      body: JSON.stringify({
-        ...turnRequestBody(threadRef, text, model, agent, getTurnOptions, { idempotencyKey, attachments }),
-        ...(opener ? { proactiveOpener: true } : {}),
-      }),
+    const request = turnRequestBody(threadRef, text, model, agent, getTurnOptions, {
+      idempotencyKey,
+      attachments,
+      quote,
     });
+    const expectedUser = getTurnOptions?.().expectedUser;
+    const submit =
+      opener && expectedUser
+        ? await api<TurnSubmit>("/api/proactive-opener", {
+            method: "POST",
+            body: JSON.stringify({
+              threadRef,
+              ...(request.model ? { model: request.model } : {}),
+              ...(request.harness ? { harness: request.harness } : {}),
+              ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
+              ...(request.fastMode !== undefined ? { fastMode: request.fastMode } : {}),
+              ...(request.timezone ? { timezone: request.timezone } : {}),
+            }),
+          })
+        : await submitTurn({ ...request, ...(opener ? { proactiveOpener: true } : {}) }, expectedUser);
 
     if (submit.runId) {
       if (!opener) {
@@ -1517,7 +1621,7 @@ export interface InboxItemEvent {
 }
 
 export function subscribeDeliveries(
-  onThread: (threadRef: string) => void,
+  onThread: (threadRef: string, target: MessageLocation) => void,
   onSessionState?: (event: SessionStateEvent) => void,
   onResync?: () => void,
   onInboxItem?: (event: InboxItemEvent) => void,
@@ -1554,7 +1658,7 @@ export function subscribeDeliveries(
   es.addEventListener("delivery", (e: MessageEvent) => {
     try {
       const d = JSON.parse(e.data) as { threadRef?: string };
-      if (typeof d.threadRef === "string" && d.threadRef) onThread(d.threadRef);
+      if (typeof d.threadRef === "string" && d.threadRef) onThread(d.threadRef, readMessageLocation(d));
     } catch (err) {
       swallow("web-ui: handle delivery nudge", err);
     }
@@ -1735,6 +1839,10 @@ interface HistoryUserMessage {
   role: "user" | "user-with-attachments";
   runId?: string;
   entrySeq?: number;
+  seq?: number;
+  quoteSeq?: number;
+  quoteText?: string;
+  quoteAuthor?: string;
   content: string;
   timestamp?: number;
   attachments?: HistoryAttachment[];
@@ -1885,6 +1993,9 @@ export function userEntryMessage(
     steered?: boolean;
     name?: string;
     ts?: string;
+    quoteSeq?: unknown;
+    quoteText?: unknown;
+    quoteAuthor?: unknown;
     attachments?: Array<{ name?: string; mimetype?: string; sizeBytes?: number; artifactId?: string }>;
   } | null;
   if (payload?.hidden) return null;
@@ -1895,9 +2006,12 @@ export function userEntryMessage(
   return {
     role: "user",
     ...(typeof payload?.runId === "string" ? { runId: payload.runId } : {}),
-    ...(entry.seq !== undefined ? { entrySeq: entry.seq } : {}),
+    ...(entry.seq !== undefined ? { entrySeq: entry.seq, seq: entry.seq } : {}),
     content: text,
     timestamp: entry.createdAt,
+    ...(typeof payload?.quoteSeq === "number" ? { quoteSeq: payload.quoteSeq } : {}),
+    ...(typeof payload?.quoteText === "string" ? { quoteText: payload.quoteText } : {}),
+    ...(typeof payload?.quoteAuthor === "string" ? { quoteAuthor: payload.quoteAuthor } : {}),
     ...(mail ? { subagentMail: mail } : {}),
     ...(payload?.steered ? { steered: true } : {}),
     ...(typeof payload?.name === "string" && payload.name.trim() ? { speaker: payload.name.trim() } : {}),
@@ -1974,8 +2088,20 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
     timing?: { startedAt?: number; finishedAt?: number },
     stopped = false,
     entrySeqs: number[] = [],
+    location: MessageLocation = {},
   ): void => {
     if (!text && !pending.length && !deliveryFiles.length && !stopped) return;
+    const seq = location.seq ?? pending[pending.length - 1]?.seq;
+    const delivered = pending.findLast((activity) => {
+      const posted = activity.payload as { tool?: string; action?: string; deliveryId?: string } | null;
+      return (
+        activity.type === "tool_result" &&
+        postResultOk(posted) &&
+        (posted?.action === "post" || posted?.tool === "post") &&
+        typeof posted.deliveryId === "string"
+      );
+    });
+    const deliveryId = location.deliveryId ?? (delivered?.payload as { deliveryId?: string } | undefined)?.deliveryId;
     entrySeqs = [...entrySeqs, ...pending.map((entry) => entry.seq)];
     const deliveredSilence = (a: ToolActivity): boolean => {
       if (a.type !== "tool_result") return false;
@@ -2007,6 +2133,8 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
       usage: zeroUsage(),
       stopReason: stopped ? "aborted" : "stop",
       timestamp: at ?? pending[pending.length - 1]?.createdAt,
+      ...(seq !== undefined ? { seq } : {}),
+      ...(deliveryId ? { deliveryId } : {}),
     };
     if (pending.length || (stopped && timing?.startedAt !== undefined)) {
       const boundary = pending.findLast(
@@ -2029,6 +2157,7 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
       text?: string;
       display?: string;
       callId?: string;
+      deliveryId?: string;
       attachments?: Array<{ name?: string; mimetype?: string; sizeBytes?: number; artifactId?: string }>;
       files?: Array<{ name?: string; mimetype?: string; sizeBytes?: number; artifactId?: string }>;
       hidden?: boolean;
@@ -2071,10 +2200,18 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
         heldPosts.delete(payload.callId);
         if (postResultOk(e.payload)) {
           appendPostFiles(e.payload);
-          flushWork(held.text, e.createdAt, false, undefined, false, [
-            held.activity.seq,
-            ...(e.seq === undefined ? [] : [e.seq]),
-          ]);
+          flushWork(
+            held.text,
+            e.createdAt,
+            false,
+            undefined,
+            false,
+            [held.activity.seq, ...(e.seq === undefined ? [] : [e.seq])],
+            {
+              ...(e.seq === undefined ? {} : { seq: e.seq }),
+              ...(typeof payload.deliveryId === "string" ? { deliveryId: payload.deliveryId } : {}),
+            },
+          );
           posted = true;
         } else {
           pending.push(held.activity, activity);
@@ -2132,7 +2269,15 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
           });
           flushWork("", e.createdAt, false, timing, stopped, e.seq === undefined ? [] : [e.seq]);
         } else {
-          flushWork(text, e.createdAt, !posted, timing, stopped, e.seq === undefined ? [] : [e.seq]);
+          flushWork(
+            text,
+            e.createdAt,
+            !posted,
+            timing,
+            stopped,
+            e.seq === undefined ? [] : [e.seq],
+            e.seq === undefined ? {} : { seq: e.seq },
+          );
         }
       }
       posted = false;

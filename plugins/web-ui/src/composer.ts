@@ -11,7 +11,8 @@ import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import { createFileDragState } from "./file-drag";
 import type { Attachment } from "@earendil-works/pi-web-ui";
 import { FolderDropError, folderToZipFile, isFolderReadError, splitDropItems, type DropEntryLike } from "./folder-drop";
-import { html, nothing, render, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
+import { openImagePreview } from "./image-preview";
 import { live } from "lit/directives/live.js";
 import { repeat } from "lit/directives/repeat.js";
 import { ArrowUp, Box, CornerDownRight, FileText, Paperclip, Square, X } from "lucide";
@@ -32,10 +33,11 @@ import {
   withdrawRun,
   type ApprovalDecision,
   type CoreAttachment,
+  type MessageQuote,
   type PendingApproval,
   type QueuedRun,
 } from "./core-bridge";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error";
 import { browserRenderableImage, fieldSelect, icon } from "./ui";
 import {
   defaultEffortForModel,
@@ -51,9 +53,21 @@ import { modelSupportsFastMode } from "./pi-models";
 import type { ComposerSurface, ConvCtx } from "./conv-types";
 import { bumpSessionActivity, dropPendingSession, renderList } from "./sessions";
 import { appState } from "./shell";
+import { webuiHome } from "./home-config";
 import { base64ToText, bytesToBase64, insertIntoDraft, pasteChipLabel } from "./paste-text";
-import { clearDraft, newChatDraftKey, saveDraft } from "./drafts";
+import {
+  clearDraft,
+  discardDraftConflict,
+  DRAFT_PERSISTENCE_EVENT,
+  draftConflicts,
+  draftPersistenceFailed,
+  newChatDraftKey,
+  restoreDraftConflict,
+  saveDraft,
+} from "./drafts";
 import { tip } from "./tooltip";
+import { mentionQuery, replaceMentionToken } from "./mention";
+import { contextsState } from "./contexts";
 import { isPhone } from "./viewport";
 import {
   LOADOUT_CAP,
@@ -65,6 +79,7 @@ import {
   reconcileLoadout,
   upsertLoadout,
   effortLevelsForHarness,
+  equivalentOfferedEffort,
   compatibleHarnessOptions,
   modelLoadoutOptions,
   type LoadoutEntry,
@@ -168,11 +183,11 @@ export function clearSkillsCache(): void {
   skillsCache = null;
 }
 
-const SLASH_TOKEN = /(^|\s)\/([a-zA-Z0-9_-]*)$/;
+const SLASH_TOKEN = /\/([a-zA-Z0-9_-]*)$/;
 
 export function slashQuery(draft: string): string | null {
   const m = SLASH_TOKEN.exec(draft);
-  return m ? (m[2] ?? "") : null;
+  return m ? (m[1] ?? "") : null;
 }
 
 export function resyncModelSelection(): void {
@@ -230,6 +245,71 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     );
   }
 
+  const onDraftPersistenceChange = (): void => {
+    const agent = ctx.chat.state.agent;
+    if (agent) ctx.chat.drawActiveChat(agent);
+  };
+  const onDraftStorageChange = (event: StorageEvent): void => {
+    if (event.key?.startsWith("web-ui:draft")) onDraftPersistenceChange();
+  };
+  window.addEventListener(DRAFT_PERSISTENCE_EVENT, onDraftPersistenceChange);
+  window.addEventListener("storage", onDraftStorageChange);
+
+  function draftNotices(agent: Agent): TemplateResult {
+    const key = ctx.chat.state.threadRef ?? "";
+    const conflicts = draftConflicts(key, composerState.draft);
+    return html`
+      ${
+        conflicts.length
+          ? html`<details class="draft-conflicts">
+              <summary>Restore another version of this draft</summary>
+              ${conflicts.map(
+                (entry) =>
+                  html`<div>
+                    <pre class="draft-conflict-text">${entry.text}</pre>
+                    <button
+                      class="btn compact primary"
+                      type="button"
+                      @click=${() => {
+                        const restored = restoreDraftConflict(key, entry.revision, composerState.draft);
+                        if (restored !== null) {
+                          composerState.draft = restored;
+                          persistDraft();
+                        }
+                        ctx.chat.drawActiveChat(agent);
+                      }}
+                    >
+                      Restore this version
+                    </button>
+                    ${
+                      entry.archived
+                        ? html`<button
+                            class="btn compact"
+                            type="button"
+                            @click=${() => {
+                              discardDraftConflict(key, entry.revision);
+                              ctx.chat.drawActiveChat(agent);
+                            }}
+                          >
+                            Delete this copy
+                          </button>`
+                        : nothing
+                    }
+                  </div>`,
+              )}
+            </details>`
+          : nothing
+      }
+      ${
+        draftPersistenceFailed()
+          ? html`<div class="composer-error" role="alert">
+              This draft is not saved in this browser yet. Keep this page open and copy your text before leaving.
+            </div>`
+          : nothing
+      }
+    `;
+  }
+
   function persistDraft(): void {
     if (!ctx.chat.state.threadRef) return;
     saveDraft(ctx.chat.state.threadRef, composerState.draft);
@@ -250,6 +330,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     openMenu: null as ComposerMenu | null,
     menuQuery: "",
     slashDismissed: false,
+    quotedMessage: null as MessageQuote | null,
     get effortLevel(): EffortLevel {
       const selected = currentModelOption();
       const effort =
@@ -257,8 +338,10 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         (restoredLoadout?.value === selected?.value ? restoredLoadout?.effort : undefined) ??
         (getRuntimeConfig(scopeKey())?.effective.effortLevel as EffortLevel | undefined) ??
         defaultEffortForModel(selected?.model);
-      const levels = effortLevelsForHarness(selected?.harnessId ?? "", selected?.model);
-      return levels.some((level) => level.value === effort) ? effort : levels[0]!.value;
+      return (
+        equivalentOfferedEffort(selected?.harnessId ?? "", selected?.model, effort) ??
+        effortLevelsForHarness(selected?.harnessId ?? "", selected?.model)[0]!.value
+      );
     },
     set effortLevel(value: EffortLevel) {
       ++effortSelectionRevision;
@@ -328,6 +411,8 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   });
   let skillsLoading = false;
   let slashActiveIndex = 0;
+  let mentionActiveIndex = 0;
+  let mentionDismissed = false;
   function effectiveFastMode(): boolean {
     return composerState.fastMode === true;
   }
@@ -342,6 +427,9 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     composerState.openMenu = null;
     slashActiveIndex = 0;
     composerState.slashDismissed = false;
+    composerState.quotedMessage = null;
+    mentionActiveIndex = 0;
+    mentionDismissed = false;
   }
 
   function scopeKey(): string | null {
@@ -539,7 +627,9 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const attachingDisabled = inputBlocked;
     let placeholder =
       options.placeholder ??
-      (appEditSlug(ctx.chat.state.threadRef, appState.me?.user) ? "Describe a change…" : "Ask anything");
+      (appEditSlug(ctx.chat.state.threadRef, appState.me?.user)
+        ? "Describe a change…"
+        : webuiHome()?.composerPlaceholder.trim() || "Ask anything");
     if (inputBlocked) placeholder = runtimePending ? "Loading runtime…" : "Approve or deny to continue";
     else if (agent.state.isStreaming) placeholder = "Queue a message for after this turn…";
     let composerNotice: TemplateResult | typeof nothing = nothing;
@@ -566,7 +656,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         @submit=${(e: Event) => submitComposer(e, agent)}
         @keydown=${(e: KeyboardEvent) => composerShortcut(e, agent, inputBlocked)}
       >
-        ${header} ${slashMenu(agent)}
+        ${header} ${slashMenu(agent)} ${mentionMenu(agent)}
         ${
           !options.prepareSubmit && activeRuntimeConfig?.upgradeAvailable
             ? html`<div class="runtime-upgrade">
@@ -604,7 +694,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                                 type="button"
                                 class="composer-image-open"
                                 aria-label=${`Preview ${a.fileName}`}
-                                @click=${() => openImagePreview(a)}
+                                @click=${() => previewAttachment(a)}
                               >
                                 <img
                                   src=${a.content.startsWith("data:") ? a.content : `data:${a.mimeType};base64,${a.content}`}
@@ -652,6 +742,35 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
               `
             : nothing
         }
+        ${
+          composerState.quotedMessage
+            ? html`
+                <div class="quote-banner">
+                  <div class="quote-banner-text">
+                    ${
+                      composerState.quotedMessage.author
+                        ? html`<span class="quote-banner-author">${composerState.quotedMessage.author}</span>`
+                        : nothing
+                    }
+                    <span class="quote-banner-content" dir="auto"
+                      >${composerState.quotedMessage.text.slice(0, 120)}${composerState.quotedMessage.text.length > 120 ? "…" : ""}</span
+                    >
+                  </div>
+                  <button
+                    class="quote-banner-close"
+                    type="button"
+                    aria-label="Remove quote"
+                    @click=${() => {
+                      composerState.quotedMessage = null;
+                      ctx.chat.drawActiveChat(agent);
+                    }}
+                  >
+                    ${icon(X, 13)}
+                  </button>
+                </div>
+              `
+            : nothing
+        }
         ${approvalPauses.length ? composerApprovalPanel(approvalPauses) : nothing}
         ${
           blockingPauses.length
@@ -666,6 +785,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                   ?disabled=${inputBlocked}
                   .value=${live(composerState.draft)}
                   @input=${(e: InputEvent) => onDraftInput(e, agent)}
+                  @compositionend=${(e: CompositionEvent) => onDraftCompositionEnd(e, agent)}
                   @keydown=${(e: KeyboardEvent) => onComposerKeydown(e, agent)}
                   @paste=${(e: ClipboardEvent) => void onComposerPaste(e, agent)}
                 ></textarea>
@@ -695,7 +815,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
           </div>
           <div class="composer-right">${sendControls(agent)}</div>
         </div>
-        ${composerNotice}
+        ${composerNotice} ${draftNotices(agent)}
       </form>
       ${pasteViewDialog(agent)}
     `;
@@ -1042,7 +1162,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const fallbackEffort = levels.some((level) => level.value === defaultEffort) ? defaultEffort : levels[0]!.value;
     return {
       value: option.value,
-      effort: levels.some((level) => level.value === entry.effort) ? entry.effort : fallbackEffort,
+      effort: equivalentOfferedEffort(option.harnessId, option.model, entry.effort) ?? fallbackEffort,
       fast:
         entry.fast && harnessSupportsFastMode(option.harnessId) && modelSupportsFastMode(scopeKey(), option.model.id),
     };
@@ -1141,7 +1261,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   }
 
   function acceptSkill(skill: SkillItem, agent: Agent): void {
-    composerState.draft = composerState.draft.replace(SLASH_TOKEN, (_m, pre: string) => `${pre}/${skill.name} `);
+    composerState.draft = composerState.draft.replace(SLASH_TOKEN, () => `/${skill.name} `);
     persistDraft();
     slashActiveIndex = 0;
     composerState.slashDismissed = false;
@@ -1163,6 +1283,68 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     persistDraft();
     ctx.chat.drawActiveChat(agent);
     focusComposerEnd();
+  }
+
+  interface MentionPick {
+    principalId: string;
+    displayName: string;
+  }
+
+  function clampedMention(count: number): number {
+    return Math.max(0, Math.min(mentionActiveIndex, count - 1));
+  }
+
+  function currentMentionMenu(): { open: boolean; matches: MentionPick[] } {
+    const query = mentionQuery(composerState.draft);
+    const scopeId = ctx.chat.state.scopeId;
+    if (query === null || mentionDismissed || !scopeId || scopeId.startsWith("personal:"))
+      return { open: false, matches: [] };
+    const members = (contextsState.list.find((c) => c.scopeId === scopeId)?.project?.members ?? [])
+      .filter((m) => m.principalId !== appState.me?.user && m.displayName)
+      .map((m) => ({ principalId: m.principalId, displayName: m.displayName }));
+    const q = query.toLowerCase();
+    const matches = q
+      ? members.filter(
+          (m) =>
+            m.displayName.toLowerCase().includes(q) || (q.includes("@") && m.principalId.toLowerCase().includes(q)),
+        )
+      : members;
+    return { open: matches.length > 0, matches };
+  }
+
+  function acceptMention(match: MentionPick, agent: Agent): void {
+    composerState.draft = replaceMentionToken(composerState.draft, `@${match.displayName} `);
+    persistDraft();
+    mentionActiveIndex = 0;
+    mentionDismissed = false;
+    ctx.chat.drawActiveChat(agent);
+    focusComposerEnd();
+  }
+
+  function mentionMenu(agent: Agent): TemplateResult | typeof nothing {
+    const menu = currentMentionMenu();
+    if (!menu.open) return nothing;
+    const active = clampedMention(menu.matches.length);
+    return html`
+      <div class="slash-popover mention-popover" role="listbox" aria-label="Mention a member">
+        <div class="menu-title">Mention a member</div>
+        ${menu.matches.map(
+          (m, i) => html`
+            <button
+              type="button"
+              role="option"
+              aria-selected=${i === active ? "true" : "false"}
+              class="slash-option ${i === active ? "active" : ""}"
+              @mousedown=${(e: Event) => e.preventDefault()}
+              @click=${() => acceptMention(m, agent)}
+            >
+              <span class="slash-name" dir="auto">${m.displayName}</span>
+              <span class="slash-desc">${m.principalId}</span>
+            </button>
+          `,
+        )}
+      </div>
+    `;
   }
 
   let pendingComposerFocus = false;
@@ -1244,15 +1426,24 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     persistDraft();
     const hadError = Boolean(composerState.error);
     composerState.error = "";
+    if (e.isComposing) {
+      syncComposerControls(agent);
+      resizeComposer();
+      return;
+    }
     composerState.slashDismissed = false;
     slashActiveIndex = 0;
+    mentionDismissed = false;
+    mentionActiveIndex = 0;
     const armed = slashQuery(composerState.draft) !== null;
     if (armed && skillsCache === null && !skillsLoading) void loadSkills(agent);
-    const popoverShown = Boolean(ctx.chat.state.host?.querySelector(".slash-popover"));
+    const popoverShown = Boolean(ctx.chat.state.host?.querySelector(".slash-popover, .draft-conflicts"));
     if (
       armed ||
       popoverShown ||
       hadError ||
+      draftConflicts(ctx.chat.state.threadRef ?? "", composerState.draft).length > 0 ||
+      mentionQuery(composerState.draft) !== null ||
       (Boolean(appState.me?.suggestedActivities?.length) && wasEmpty !== !composerState.draft)
     ) {
       ctx.chat.drawActiveChat(agent);
@@ -1260,6 +1451,17 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     }
     syncComposerControls(agent);
     resizeComposer();
+  }
+
+  function onDraftCompositionEnd(e: CompositionEvent, agent: Agent): void {
+    composerState.draft = (e.currentTarget as HTMLTextAreaElement).value;
+    persistDraft();
+    composerState.slashDismissed = false;
+    slashActiveIndex = 0;
+    mentionDismissed = false;
+    mentionActiveIndex = 0;
+    if (slashQuery(composerState.draft) !== null && skillsCache === null && !skillsLoading) void loadSkills(agent);
+    ctx.chat.drawActiveChat(agent);
   }
 
   function composerCanSend(): boolean {
@@ -1325,6 +1527,29 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         return;
       }
     }
+    const mention = currentMentionMenu();
+    if (mention.open) {
+      const count = mention.matches.length;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        mentionDismissed = true;
+        return ctx.chat.drawActiveChat(agent);
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        mentionActiveIndex = (clampedMention(count) + 1) % count;
+        return ctx.chat.drawActiveChat(agent);
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        mentionActiveIndex = (clampedMention(count) - 1 + count) % count;
+        return ctx.chat.drawActiveChat(agent);
+      }
+      if (!e.shiftKey && (e.key === "Enter" || e.key === "Tab")) {
+        e.preventDefault();
+        return acceptMention(mention.matches[clampedMention(count)]!, agent);
+      }
+    }
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
     void sendPrompt(agent);
@@ -1358,10 +1583,12 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const threadRef = ctx.chat.state.threadRef;
     const text = composerState.draft.trim();
     const staged = composerState.attachments;
+    const quote = composerState.quotedMessage;
     if ((!text && !staged.length) || !threadRef) return;
     clearActiveDraft();
     composerState.draft = "";
     composerState.attachments = [];
+    composerState.quotedMessage = null;
     composerState.error = "";
     ctx.chat.drawActiveChat(agent);
     clearComposerDom(agent);
@@ -1372,11 +1599,12 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const transientIds = new Set(skipped.filter((s) => !s.permanent).flatMap((s) => (s.id ? [s.id] : [])));
     const sendable = staged.filter((a) => !droppedIds.has(a.id));
     if (!text && !uploaded.length) {
-      if (stillHere()) restoreStagedOnFailure(text, sendable, composerState.error || "Could not queue the files.");
+      if (stillHere())
+        restoreStagedOnFailure(text, sendable, composerState.error || "Could not queue the files.", quote);
       return ctx.chat.drawActiveChat(agent);
     }
-    if (!(await enqueueTurn(agent, threadRef, text, uploaded, queuedFilesKey(sendable)))) {
-      if (stillHere()) restoreStagedOnFailure(text, sendable, composerState.error);
+    if (!(await enqueueTurn(agent, threadRef, text, uploaded, queuedFilesKey(sendable), quote ?? undefined))) {
+      if (stillHere()) restoreStagedOnFailure(text, sendable, composerState.error, quote);
     } else if (transientIds.size && stillHere()) {
       restageAttachments(
         staged.filter((a) => transientIds.has(a.id)),
@@ -1386,11 +1614,17 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     ctx.chat.drawActiveChat(agent);
   }
 
-  function restoreStagedOnFailure(text: string, staged: Attachment[], note: string): void {
+  function restoreStagedOnFailure(
+    text: string,
+    staged: Attachment[],
+    note: string,
+    quote: typeof composerState.quotedMessage = null,
+  ): void {
     const typedSince = composerState.draft.trim();
     composerState.draft = !typedSince || typedSince === text ? text : `${text}\n${composerState.draft}`;
     const { kept, note: capNote } = mergeStagedAttachments(staged, composerState.attachments);
     composerState.attachments = kept;
+    composerState.quotedMessage ??= quote;
     composerState.error = combineNote(note, capNote);
   }
 
@@ -1400,10 +1634,19 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     text: string,
     attachments: CoreAttachment[] = [],
     filesKey = "",
+    quote?: MessageQuote,
   ): Promise<boolean> {
     const idempotencyKey = queueSendKey(threadRef, text, filesKey);
     try {
-      const queued = await queueTurn(threadRef, text, agent, ctx.chat.currentTurnOptions, idempotencyKey, attachments);
+      const queued = await queueTurn(
+        threadRef,
+        text,
+        agent,
+        ctx.chat.currentTurnOptions,
+        idempotencyKey,
+        attachments,
+        quote,
+      );
       failedQueueSend = null;
       setQueuedRuns(threadRef, [...queuedRunsFor(threadRef).filter((r) => r.runId !== queued.runId), queued]);
       bumpSessionActivity(threadRef);
@@ -1554,6 +1797,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       renderList();
     }
     const attachments = composerState.attachments;
+    const quote = composerState.quotedMessage;
     const sentFromThread = ctx.chat.state.threadRef;
     ctx.chat.notePendingSessionOnSend();
     clearActiveDraft();
@@ -1563,9 +1807,9 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     try {
       if (ctx.chat.state.normalStreamFn) agent.streamFn = ctx.chat.state.normalStreamFn;
       ctx.chat.scrollToBottom();
-      await agent.prompt(userSendMessage(text, attachments.length ? attachments : undefined));
-      restoreBlockedSend(agent, sentFromThread, text, attachments);
-      restoreFailedAttachments(agent, text, attachments);
+      await agent.prompt(userSendMessage(text, attachments.length ? attachments : undefined, quote ?? undefined));
+      restoreBlockedSend(agent, sentFromThread, text, attachments, quote);
+      restoreFailedAttachments(agent, text, attachments, quote);
     } catch (err) {
       ctx.chat.state.pendingSend = null;
       if (ctx.chat.state.threadRef && ctx.chat.state.sessionId === null) dropPendingSession(ctx.chat.state.threadRef);
@@ -1575,7 +1819,12 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     }
   }
 
-  function restoreFailedAttachments(agent: Agent, text: string, attachments: Attachment[]): void {
+  function restoreFailedAttachments(
+    agent: Agent,
+    text: string,
+    attachments: Attachment[],
+    quote: typeof composerState.quotedMessage,
+  ): void {
     const messages = agent.state.messages;
     const last = messages[messages.length - 1] as
       { role?: string; sendFailed?: string; droppedAttachmentIds?: string[] } | undefined;
@@ -1595,6 +1844,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       retryable.length
         ? "Couldn't attach the files, so the message wasn't sent. Try again."
         : "Nothing could be attached, so the message wasn't sent.",
+      quote,
     );
     persistDraft();
     ctx.chat.drawActiveChat(agent);
@@ -1605,6 +1855,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     sentFromThread: string | null,
     text: string,
     attachments: Attachment[],
+    quote: typeof composerState.quotedMessage,
   ): void {
     const messages = agent.state.messages;
     const last = messages[messages.length - 1] as
@@ -1625,6 +1876,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     composerState.draft = !typedSince || typedSince === text ? text : `${text}\n${composerState.draft}`;
     const { kept, note } = mergeStagedAttachments(attachments, composerState.attachments);
     composerState.attachments = kept;
+    composerState.quotedMessage ??= quote;
     composerState.error = combineNote(last.errorMessage || PENDING_APPROVAL_REASON, note);
     persistDraft();
     ctx.chat.drawActiveChat(agent);
@@ -1817,41 +2069,15 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     ctx.chat.state.host?.querySelector<HTMLInputElement>(".file-input")?.click();
   }
 
-  function openImagePreview(attachment: Attachment): void {
-    const dialog = document.createElement("dialog");
-    dialog.className = "project-dialog attachment-preview";
-    dialog.setAttribute("aria-label", attachment.fileName);
-    dialog.addEventListener(
-      "close",
-      () => {
-        render(nothing, dialog);
-        dialog.remove();
-      },
-      { once: true },
+  function previewAttachment(attachment: Attachment): void {
+    const shown = composerState.attachments.filter((a) => browserRenderableImage(a.mimeType));
+    openImagePreview(
+      shown.map((a) => ({
+        src: a.content.startsWith("data:") ? a.content : `data:${a.mimeType};base64,${a.content}`,
+        name: a.fileName,
+      })),
+      shown.indexOf(attachment),
     );
-    document.body.append(dialog);
-    const src = attachment.content.startsWith("data:")
-      ? attachment.content
-      : `data:${attachment.mimeType};base64,${attachment.content}`;
-    render(
-      html`
-        <div class="attachment-preview-head">
-          <span dir="auto">${attachment.fileName}</span>
-          <button type="button" class="btn compact" @click=${() => dialog.close()}>Close</button>
-        </div>
-        <div class="attachment-preview-body">
-          <button
-            type="button"
-            aria-label="Toggle actual image size"
-            @click=${(event: Event) => (event.currentTarget as HTMLElement).classList.toggle("actual-size")}
-          >
-            <img src=${src} alt=${attachment.fileName} />
-          </button>
-        </div>
-      `,
-      dialog,
-    );
-    dialog.showModal();
   }
 
   function removeAttachment(id: string, agent: Agent): void {
@@ -1971,6 +2197,8 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   }
 
   function dispose(): void {
+    window.removeEventListener(DRAFT_PERSISTENCE_EVENT, onDraftPersistenceChange);
+    window.removeEventListener("storage", onDraftStorageChange);
     window.removeEventListener("model-account-changed", refreshAccount);
     document.removeEventListener("visibilitychange", revalidateRuntime);
     modelPicker.dispose();
@@ -1982,8 +2210,35 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     autosizedTa = null;
   }
 
+  async function submitPresetPrompt(value: string): Promise<void> {
+    const text = value.trim();
+    const agent = ctx.chat.state.agent;
+    if (!text || !agent || !ctx.chat.state.threadRef) return;
+    if (composerState.draft.trim() || composerState.attachments.length || composerState.quotedMessage) {
+      composerState.error = "You have an unsent draft. Check it first; this request was not sent.";
+      ctx.chat.drawActiveChat(agent);
+      focusComposerEnd();
+      return;
+    }
+    composerState.draft = text;
+    persistDraft();
+    ctx.chat.drawActiveChat(agent);
+    await refreshRuntimeSelection(ctx.chat.state.scopeId, agent);
+    if (ctx.chat.state.agent !== agent || composerState.draft !== text) return;
+    await sendPrompt(agent);
+  }
+
+  function quoteMessage(message: MessageQuote): void {
+    composerState.quotedMessage = message;
+    const agent = ctx.chat.state.agent;
+    if (agent) ctx.chat.drawActiveChat(agent);
+    focusComposerEnd();
+  }
+
   return {
     state: composerState,
+    submitPresetPrompt,
+    quoteMessage,
     submit: async (instruction = "") => {
       if (submitting || !getRuntimeConfig(scopeKey())) return;
       const agent = ctx.chat.state.agent;

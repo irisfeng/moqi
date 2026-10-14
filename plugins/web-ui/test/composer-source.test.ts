@@ -44,7 +44,10 @@ test("switching setups preserves prior tweaks and validates effort and Fast for 
     composer.indexOf("function seededLoadout"),
   );
   assert.ok(normalize.includes("effortLevelsForHarness(option.harnessId, option.model)"));
-  assert.ok(/levels.some\([\s\S]*?\? entry.effort/.test(normalize));
+  assert.ok(
+    /equivalentOfferedEffort\(option\.harnessId, option\.model, entry\.effort\) \?\? fallbackEffort/.test(normalize),
+    "a saved effort the menu no longer lists keeps its meaning before falling back",
+  );
   assert.ok(apply.includes("normalizeLoadoutEntry(entry, option)"));
   assert.ok(
     /entry.fast && harnessSupportsFastMode\(option.harnessId\) && modelSupportsFastMode\(scopeKey\(\), option.model.id\)/.test(
@@ -82,4 +85,40 @@ test("scope runtime defaults include effort and fast mode", () => {
   assert.match(picker, /fastMode: settings\.fast/);
   assert.match(composer, /getRuntimeConfig\(scopeKey\(\)\)\?\.effective\.effortLevel/);
   assert.match(composer, /getRuntimeConfig\(scopeKey\(\)\)\?\.effective\.fastMode === true/);
+});
+
+test("sending with a quote stamps it onto the optimistic user message, not just the wire payload", () => {
+  const bridge = readFileSync(new URL("../src/core-bridge.ts", import.meta.url), "utf8");
+  const send = composer.slice(
+    composer.indexOf("async function sendPrompt"),
+    composer.indexOf("function restoreFailedAttachments"),
+  );
+  assert.match(send, /const quote = composerState\.quotedMessage;/);
+  assert.match(
+    send,
+    /await agent\.prompt\(userSendMessage\(text, attachments\.length \? attachments : undefined, quote \?\? undefined\)\);/,
+  );
+  const optimistic = bridge.slice(
+    bridge.indexOf("export function userSendMessage"),
+    bridge.indexOf("async function drive("),
+  );
+  assert.match(optimistic, /\.\.\.\(quote\?\.seq !== undefined \? \{ quoteSeq: quote\.seq \} : \{\}\),/);
+  assert.match(optimistic, /\.\.\.\(quote\?\.text \? \{ quoteText: quote\.text \} : \{\}\),/);
+  assert.match(optimistic, /\.\.\.\(quote\?\.author \? \{ quoteAuthor: quote\.author \} : \{\}\),/);
+});
+
+test("selecting text in a message offers a quote, and a sent quote shows above the message text", () => {
+  const chat = readFileSync(new URL("../src/chat.ts", import.meta.url), "utf8");
+  assert.match(
+    chat,
+    /quoteHost\.addEventListener\("mouseup", \(\) => setTimeout\(\(\) => offerQuote\(quoteHost\), 10\)\);/,
+  );
+  const offer = chat.slice(chat.indexOf("function offerQuote"), chat.indexOf("function quotedOriginal"));
+  assert.match(offer, /closest\("\.message-bubble, \.assistant-body"\)/);
+  assert.match(offer, /if \(!row \|\| !host\.contains\(row\)\) return;/);
+  assert.match(offer, /ctx\.composer\.quoteMessage\(/);
+  assert.match(offer, /document\.addEventListener\("mousedown", dismissQuotePopup\);/);
+  assert.match(chat, /document\.removeEventListener\("mousedown", dismissQuotePopup\);/);
+  assert.match(chat, /function teardownActiveChat\(\): void \{\n {4}removeQuotePopup\(\);/);
+  assert.match(chat, /\$\{quotedOriginal\(message\)\}\n {12}<div class="pin-content">/);
 });

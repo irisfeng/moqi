@@ -1,0 +1,55 @@
+{
+  "name": "DeepSeek",
+  "protocol": "openai",
+  "baseUrl": "https://api.deepseek.com",
+  "models": [
+    {
+      "id": "deepseek-flash",
+      "name": "DeepSeek V4.1 Flash",
+      "contextWindow": 1000000,
+      "maxTokens": 384000,
+      "input": 0.3,
+      "output": 1.2,
+      "cacheRead": 0.006,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "requiresReasoningContentOnAssistantMessages": true,
+        "thinkingFormat": "deepseek"
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": null,
+        "medium": null,
+        "high": "high",
+        "max": "max"
+      },
+      "modalities": ["text", "image"]
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "contextWindow": 1000000,
+      "maxTokens": 384000,
+      "input": 1.32,
+      "output": 3.96,
+      "cacheRead": 0.044,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "requiresReasoningContentOnAssistantMessages": true,
+        "thinkingFormat": "deepseek"
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": null,
+        "medium": null,
+        "high": "high",
+        "max": "max"
+      },
+      "modalities": ["text"]
+    }
+  ]
+}

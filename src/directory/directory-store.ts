@@ -93,8 +93,15 @@ export function pickMatch<T>(
   const exact = items.filter((t) => normDirectoryQuery(label(t)) === q);
   if (exact.length === 1) return { kind: "one", item: exact[0]! };
   if (exact.length > 1) return { kind: "ambiguous", items: exact.slice(0, MAX_CANDIDATES) };
-  const prefix = items.filter((t) => normDirectoryQuery(label(t)).startsWith(q));
-  const pool = prefix.length ? prefix : items.filter((t) => normDirectoryQuery(label(t)).includes(q));
+  const labelLc = (t: T) => normDirectoryQuery(label(t));
+  const idLc = (t: T) => id(t).toLowerCase();
+  const tiers = [
+    items.filter((t) => labelLc(t).startsWith(q)),
+    items.filter((t) => idLc(t).startsWith(q)),
+    items.filter((t) => labelLc(t).includes(q)),
+    items.filter((t) => idLc(t).includes(q)),
+  ];
+  const pool = tiers.find((tier) => tier.length > 0) ?? [];
   if (pool.length === 0) return { kind: "none" };
   if (pool.length === 1) return { kind: "one", item: pool[0]! };
   return { kind: "ambiguous", items: pool.slice(0, MAX_CANDIDATES) };

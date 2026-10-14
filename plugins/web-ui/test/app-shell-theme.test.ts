@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { runInNewContext } from "node:vm";
 import { isPalette, themeCss, themeTokens } from "../src/theme-import.ts";
+import { galleryCss, galleryThemes } from "../src/theme-gallery.ts";
 import { JSDOM, type DOMWindow } from "jsdom";
 import { appShellHtml } from "../../../src/deploy/app-shell.ts";
 
@@ -55,7 +56,15 @@ test("embedded chat publishes active colors and tracks theme changes from other 
   const frame = dom.window.document.querySelector("iframe")!.contentWindow as unknown as DOMWindow;
   const messages: Array<{ data: { dark: boolean; colors: Record<string, string> }; origin: string }> = [];
   dom.window.postMessage = (data, origin) => messages.push({ data, origin: origin as string });
-  Object.assign(frame, { isPalette, themeCss, themeTokens });
+  Object.assign(frame, {
+    isPalette,
+    themeCss,
+    themeTokens,
+    galleryCss,
+    galleryThemes,
+    storedPalette: () => frame.localStorage.getItem("theme:palette"),
+    PALETTE_KEY: "theme:palette",
+  });
   frame.eval("window.matchMedia = () => ({ matches: false, addEventListener() {} });");
   const source =
     settings.slice(settings.indexOf("export function storedTheme"), settings.indexOf("let themeParentOrigin")) +
@@ -63,7 +72,7 @@ test("embedded chat publishes active colors and tracks theme changes from other 
     settings.slice(settings.indexOf("export function watchSystemTheme"), settings.indexOf("function themeSwatches"));
   frame.eval(
     stripTypeScriptTypes(
-      'const THEME_KEY = "theme", CUSTOM_THEME_KEY = "theme:custom", CUSTOM_THEME_STYLE_ID = "custom-theme";\n' +
+      'const THEME_KEY = "theme", CUSTOM_THEME_KEY = "theme:custom", CUSTOM_THEME_STYLE_ID = "custom-theme", GALLERY_STYLE_ID = "gallery-theme";\n' +
         source.replaceAll("export function", "function"),
     ),
   );
@@ -97,8 +106,21 @@ test("embedded chat publishes active colors and tracks theme changes from other 
   frame.dispatchEvent(new frame.StorageEvent("storage", { key: "theme" }));
   assert.equal(messages.at(-1)!.data.dark, true);
   assert.equal(messages.at(-1)!.data.colors["--background"], "#102820");
+  const themesBlock = frame.document.createElement("script");
+  themesBlock.type = "application/json";
+  themesBlock.id = "coworker-themes";
+  themesBlock.textContent = JSON.stringify({
+    themes: [{ id: "mist", name: "雾蓝", light: { background: "#f5f7fa" }, dark: { background: "#11161d" } }],
+  });
+  frame.document.head.appendChild(themesBlock);
+  frame.localStorage.setItem("theme", "light");
+  frame.localStorage.setItem("theme:palette", "mist");
+  frame.dispatchEvent(new frame.StorageEvent("storage", { key: "theme:palette" }));
+  assert.ok(frame.document.getElementById("gallery-theme"), "a palette picked in another tab is applied here");
+  assert.equal(messages.at(-1)!.data.colors["--background"], "#f5f7fa");
   frame.localStorage.clear();
   frame.dispatchEvent(new frame.StorageEvent("storage", { key: null }));
+  assert.equal(frame.document.getElementById("gallery-theme"), null);
   assert.equal(messages.at(-1)!.data.dark, false);
   dom.window.close();
 });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { bootProblems, readConfig, senderAddress } from "../src/config.ts";
+import { bootProblems, emailConfigured, passwordConfigured, readConfig, senderAddress } from "../src/config.ts";
 import { testEnv } from "./helpers.ts";
 
 const problemsFor = (over: Record<string, string | undefined>, isProd = true): string =>
@@ -139,6 +139,33 @@ test("a rate limit that core could not honour is refused at boot rather than sil
   );
   assert.match(problemsFor({ AUTH_SEND_WINDOW_S: "86400" }), /AUTH_SEND_WINDOW_S must be at most 3600/);
   assert.equal(problemsFor({ AUTH_SEND_LIMIT_PER_IP: "64", CORE_SIGNING_SECRET: "a".repeat(48) }), "");
+});
+
+test("password mode needs no email transport, turns the email link off and tolerates explicit plain http", () => {
+  const base = {
+    AUTH_LOGIN_MODE: "password",
+    CORE_SIGNING_SECRET: "a".repeat(48),
+  };
+  const cfg = readConfig(testEnv(base));
+  assert.deepEqual(bootProblems(cfg, true), []);
+  assert.equal(passwordConfigured(cfg), true);
+  assert.equal(emailConfigured(cfg), false);
+  const http = {
+    ...base,
+    AUTH_ISSUER: "http://10.0.0.5:8081/idp",
+    AUTH_REDIRECT_URI: "http://10.0.0.5:8081/auth/callback",
+  };
+  assert.deepEqual(bootProblems(readConfig(testEnv({ ...http, AUTH_ALLOW_INSECURE_HTTP: "1" })), true), []);
+  const problems = problemsFor(http);
+  assert.match(problems, /AUTH_ISSUER must be https/);
+  assert.match(problems, /AUTH_REDIRECT_URI must be https/);
+});
+
+test("the default mode keeps the email link and uses listed password users only", () => {
+  const cfg = readConfig(testEnv({ CORE_SIGNING_SECRET: "a".repeat(48) }));
+  assert.equal(cfg.loginMode, "email");
+  assert.equal(emailConfigured(cfg), true);
+  assert.equal(passwordConfigured(cfg), false);
 });
 
 test("senderAddress unwraps a display name", () => {

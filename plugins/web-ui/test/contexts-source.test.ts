@@ -75,3 +75,15 @@ test("every project member can invite while only the owner can remove people", (
   assert.doesNotMatch(detail, /c\.project && isProjectOwner\(c\)/);
   assert.match(members, /isProjectOwner\(context\) && principalId !== project\.ownerId/);
 });
+
+test("resource groups carry an explicit view id so display labels never derive routes", () => {
+  const group = source.match(/function resourceGroup\([^]*?\n\}/)?.[0] ?? "";
+  assert.ok(group, "resourceGroup exists");
+  assert.match(group, /function resourceGroup\(view: string, label: string/);
+  assert.doesNotMatch(group, /label\.toLowerCase\(\)/);
+  const views = [...source.matchAll(/resourceGroup\(\s*"([a-z]+)",\s*"/g)].map((m) => m[1]);
+  assert.deepEqual(views.sort(), ["crons", "deploys", "skills", "webhooks"]);
+  const files = source.match(/function filesPanel\([^]*?\n\}/)?.[0] ?? "";
+  assert.ok(files, "the files panel exists");
+  assert.match(files, /href=\$\{`\$\{UI_BASE\}\/files\?scope=\$\{encodeURIComponent\(scopeId\)\}`\}/);
+});

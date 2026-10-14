@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  REMEMBER_TTL_S,
+  UNREMEMBERED_TTL_S,
+  readTmpCookies,
   deriveKey,
   seal,
+  sealSession,
   open,
   openSession,
   openImpersonation,
@@ -296,4 +300,103 @@ test("openSession preserves signed app-only authority and rejects malformed mark
   for (const appOnly of ["true", "false", 1, 0, null, {}]) {
     assert.equal(openSession(seal({ ...claims, appOnly }, sessionKey), sessionKey, Date.now()), null);
   }
+});
+
+test("remembered session lifetime is fixed at authentication and cannot be extended by renewal", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const claims: SessionClaims = {
+    k: "session",
+    sub: "member",
+    org: "test",
+    auth: now,
+    iat: now,
+    exp: now + REMEMBER_TTL_S,
+    remember: true,
+    sid: "a".repeat(64),
+    passwordVersion: "version",
+  };
+  const token = sealSession(claims, sessionKey);
+  assert.equal(open(token, sessionKey)!.v, 2);
+  assert.equal(
+    open(token, sessionKey)!.iat,
+    undefined,
+    "older portal versions must reject remembered cookies after rollback",
+  );
+  assert.equal(openSession(token, sessionKey, (now + 86400 * 29) * 1000, "test", 86400)?.sub, "member");
+  assert.equal(openSession(token, sessionKey, (now + REMEMBER_TTL_S) * 1000, "test", 86400), null);
+  assert.equal(
+    openSession(
+      sealSession({ ...claims, iat: now + 86400, exp: now + REMEMBER_TTL_S + 86400 }, sessionKey),
+      sessionKey,
+      (now + 86400) * 1000,
+      "test",
+      86400,
+    ),
+    null,
+  );
+  for (const patch of [
+    { sid: undefined },
+    { sid: "guess" },
+    { passwordVersion: undefined },
+    { auth: undefined },
+    { anon: true },
+  ])
+    assert.equal(
+      openSession(
+        sealSession({ ...claims, ...patch } as SessionClaims, sessionKey),
+        sessionKey,
+        now * 1000,
+        "test",
+        86400,
+      ),
+      null,
+    );
+  assert.equal(openSession(seal({ ...claims, remember: undefined }, sessionKey), sessionKey, now * 1000), null);
+  assert.doesNotMatch(setCookie("portal_session", token, { secure: true }), /Max-Age|Expires/);
+  const persistent = setCookie("portal_session", token, {
+    secure: true,
+    maxAge: REMEMBER_TTL_S,
+    expires: new Date(claims.exp * 1000),
+  });
+  assert.match(persistent, /HttpOnly; SameSite=Lax; Path=\/; Secure; Max-Age=2592000; Expires=/);
+});
+
+test("a password session without the remember choice lasts a day at most, whatever the configured maximum", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const claims: SessionClaims = {
+    k: "session",
+    sub: "member",
+    org: "test",
+    auth: now,
+    iat: now,
+    exp: now + UNREMEMBERED_TTL_S,
+    passwordVersion: "version",
+  };
+  const month = 30 * 86400;
+  const token = seal(claims, sessionKey);
+  assert.equal(openSession(token, sessionKey, (now + UNREMEMBERED_TTL_S - 1) * 1000, "test", month)?.sub, "member");
+  assert.equal(openSession(token, sessionKey, (now + UNREMEMBERED_TTL_S - 1) * 1000, "test")?.sub, "member");
+  assert.equal(openSession(token, sessionKey, (now + UNREMEMBERED_TTL_S) * 1000, "test", month), null);
+  const stretched = seal({ ...claims, exp: now + UNREMEMBERED_TTL_S + 1 }, sessionKey);
+  assert.equal(openSession(stretched, sessionKey, now * 1000, "test", month), null);
+  assert.equal(openSession(stretched, sessionKey, now * 1000, "test"), null);
+  assert.equal(openSession(token, sessionKey, (now + 3600) * 1000, "test", 1800), null);
+  const ordinary = seal({ ...claims, passwordVersion: undefined, exp: now + month }, sessionKey);
+  assert.equal(openSession(ordinary, sessionKey, (now + 86400 * 2) * 1000, "test", month)?.sub, "member");
+});
+
+test("pending sign-in cookies are read per state, and a cookie under another state's name is ignored", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const state = "a".repeat(64);
+  const other = "b".repeat(64);
+  const tmp: TmpClaims = { k: "tmp", state, nonce: "n", pkceVerifier: "v", returnTo: "/", iat: now, exp: now + 600 };
+  const value = seal(tmp, tmpKey);
+  const read = (header: string) => readTmpCookies(header, tmpKey, now * 1000);
+  assert.deepEqual(read(`portal_oidc_tmp_${state}=${value}`), [{ name: `portal_oidc_tmp_${state}`, claims: tmp }]);
+  assert.deepEqual(read(`portal_oidc_tmp=${value}`), [{ name: "portal_oidc_tmp", claims: tmp }]);
+  assert.deepEqual(read(`portal_oidc_tmp_${other}=${value}`), [{ name: `portal_oidc_tmp_${other}`, claims: null }]);
+  assert.deepEqual(read(`portal_oidc_tmp_short=${value}; unrelated=1`), []);
+  assert.deepEqual(readTmpCookies(`portal_oidc_tmp_${state}=${value}`, tmpKey, (now + 601) * 1000), [
+    { name: `portal_oidc_tmp_${state}`, claims: null },
+  ]);
 });

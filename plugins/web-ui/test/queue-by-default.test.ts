@@ -35,11 +35,11 @@ test("the queue lives in core, not in the browser", () => {
   );
   assert.match(
     composer,
-    /const queued = await queueTurn\(threadRef, text, agent, ctx\.chat\.currentTurnOptions, idempotencyKey, attachments\);/,
+    /const queued = await queueTurn\(\s*threadRef,\s*text,\s*agent,\s*ctx\.chat\.currentTurnOptions,\s*idempotencyKey,\s*attachments,\s*quote,\s*\);/,
   );
   assert.match(
     bridge,
-    /export async function queueTurn\([\s\S]{0,600}?api<\{ status\?: string; runId\?: string; reason\?: string \}>\("\/api\/turn"/,
+    /export async function queueTurn\([\s\S]{0,600}?await submitTurn\([\s\S]{0,200}?turnRequestBody\(/,
     "queuing is an ordinary turn submission; core enqueues it behind the live run",
   );
 });
@@ -51,11 +51,11 @@ test("a queued turn carries the same model, effort and scope a typed one would",
   assert.match(body, /scopeId: turnOptions\.scopeId/);
   assert.match(
     bridge,
-    /\.\.\.turnRequestBody\(threadRef, text, model, agent, getTurnOptions, \{ idempotencyKey, attachments \}\),/,
+    /turnRequestBody\(threadRef, text, model, agent, getTurnOptions, \{\s*idempotencyKey,\s*attachments,\s*quote,\s*\}\)/,
   );
   assert.match(
     bridge,
-    /turnRequestBody\(threadRef, text, agent\.state\.model, agent, getTurnOptions, \{ idempotencyKey, attachments \}\)/,
+    /turnRequestBody\(threadRef, text, agent\.state\.model, agent, getTurnOptions, \{ idempotencyKey, attachments, quote \}\)/,
   );
 });
 

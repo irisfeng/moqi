@@ -209,7 +209,20 @@ function uploadFileName(req: IncomingMessage): string {
   }
 }
 
-async function stageUploadStream(req: IncomingMessage, sha256: string): Promise<Response> {
+const ANNOUNCEMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+async function readAnnouncementImage(req: IncomingMessage): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > ANNOUNCEMENT_IMAGE_MAX_BYTES) return null;
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function stageUploadStream(req: IncomingMessage | Buffer, sha256: string): Promise<Response> {
   const corePath = withSourceAuthNonce("/v1/blobs", CORE_SIGNING_SECRET);
   const headers = signedRequestHeaders(CORE_SIGNING_SECRET, "POST", corePath, sha256, {
     "content-type": "application/octet-stream",
@@ -228,25 +241,35 @@ async function uploadFileFromRequest(
   res: ServerResponse,
   principal: string,
   scope: string,
+  announcementImage = false,
 ): Promise<void> {
   if (!scope) {
     req.resume();
     return json(res, 400, { error: "bad_request", message: "scope required" });
   }
-  const sha256 = typeof req.headers["x-content-sha256"] === "string" ? req.headers["x-content-sha256"] : "";
+  let upload: IncomingMessage | Buffer = req;
+  let sha256 = typeof req.headers["x-content-sha256"] === "string" ? req.headers["x-content-sha256"] : "";
+  if (announcementImage) {
+    const image = await readAnnouncementImage(req);
+    if (!image) return json(res, 413, { error: "too_large", message: "The image must not exceed 5 MB." });
+    upload = image;
+    sha256 = createHash("sha256").update(image).digest("hex");
+  }
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
     req.resume();
     return json(res, 400, { error: "bad_request", message: "x-content-sha256 required" });
   }
   try {
-    const staged = await stageUploadStream(req, sha256);
+    const staged = await stageUploadStream(upload, sha256);
     const stagedText = await staged.text();
     if (!staged.ok) {
       res.writeHead(staged.status, { "content-type": staged.headers.get("content-type") ?? "application/json" });
       return void res.end(stagedText);
     }
     const { blobId } = JSON.parse(stagedText) as { blobId: string };
-    const corePath = `/v1/admin/files/upload?scope=${encodeURIComponent(scope)}`;
+    const corePath = announcementImage
+      ? "/v1/admin/announcement-images"
+      : `/v1/admin/files/upload?scope=${encodeURIComponent(scope)}`;
     const body = JSON.stringify({
       name: uploadFileName(req),
       mimetype:
@@ -309,6 +332,8 @@ const WRITES = new Map<string, string[]>([
   ["model-providers", ["PUT", "DELETE"]],
   ["model-registry", ["POST", "PUT", "DELETE"]],
   ["custom-providers", ["PUT", "DELETE"]],
+  ["announcements", ["POST", "PUT"]],
+  ["adoption", ["PUT"]],
 ]);
 
 const READS = [
@@ -338,6 +363,10 @@ const READS = [
   "model-registry",
   "custom-providers",
   "principal-links",
+  "announcements",
+  "adoption",
+  "webui-home",
+  "ratings",
 ];
 
 export async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -495,6 +524,26 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
     return uploadFileFromRequest(req, res, principal, url.searchParams.get("scope") ?? "");
   }
+
+  if (method === "GET" && /^\/api\/announcement-images\/[a-f0-9]{32}$/.test(pathname)) {
+    if (!principal) return json(res, 401, { error: "signed_out" });
+    return forwardDownload(res, principal, pathname.replace("/api/", "/v1/"));
+  }
+
+  if (method === "POST" && pathname === "/api/announcement-images") {
+    const status = principal ? await coreWhoami(principal) : null;
+    if (!principal || !status?.isAdmin) {
+      req.resume();
+      return json(res, 403, { error: "forbidden" });
+    }
+    return uploadFileFromRequest(req, res, principal, `org:${ORG}`, true);
+  }
+
+  if (method === "GET" && (rest === "adoption/export" || rest === "adoption/scenarios/export")) {
+    if (!principal) return json(res, 401, { error: "signed_out" });
+    return forwardDownload(res, principal, `/v1/admin/${rest}${url.search}`);
+  }
+  if (first === "adoption") res.setHeader("cache-control", "no-store");
 
   if (WRITES.get(first)?.includes(method)) {
     if (!principal) return json(res, 401, { error: "signed_out" });

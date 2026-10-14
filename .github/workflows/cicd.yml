@@ -355,6 +355,7 @@ jobs:
     needs: reuse
     if: always() && !cancelled()
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Reuse the exact successful PR tree
         if: needs.reuse.outputs.reusable == 'true'

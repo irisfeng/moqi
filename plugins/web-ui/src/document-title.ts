@@ -1,3 +1,4 @@
+import { brandName } from "./brand-name.ts";
 import type { View } from "./shell-state";
 
 interface TitledSession {
@@ -22,6 +23,10 @@ const VIEW_TITLES: Record<View, string> = {
   loops: "Loops",
   webhooks: "Webhooks",
   files: "Files",
+  docs: "Department docs",
+  pm: "Project management",
+  people: "Directory",
+  guide: "Guide",
   keychain: "Keychain",
   deploys: "Apps",
   memory: "Memory",
@@ -32,7 +37,8 @@ const VIEW_TITLES: Record<View, string> = {
 export function documentTitle(view?: View, conversationTitle?: string | null, conversationOpen = false): string {
   const title =
     view === "chats" && conversationOpen ? conversationTitle?.trim() || "New chat" : view && VIEW_TITLES[view];
-  return title ? `${title} · ${PRODUCT_TITLE}` : PRODUCT_TITLE;
+  const product = PRODUCT_TITLE.replace("QM", brandName());
+  return title ? `${title} · ${product}` : product;
 }
 
 export function updateDocumentTitle(view?: View, conversationTitle?: string | null, conversationOpen = false): void {

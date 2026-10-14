@@ -1,9 +1,26 @@
 import { html, nothing, render, type TemplateResult } from "lit";
-import { Box, Brain, Clock, Files, Folder, KeyRound, Repeat, Rocket, ShieldUser, Webhook, type IconNode } from "lucide";
+import {
+  BookOpen,
+  Box,
+  Brain,
+  Clock,
+  Compass,
+  Files,
+  Folder,
+  FolderKanban,
+  KeyRound,
+  Repeat,
+  Rocket,
+  ShieldUser,
+  Users,
+  Webhook,
+  type IconNode,
+} from "lucide";
 import { deepLinkPath, isPlainLeftClick, UI_BASE } from "./deep-link";
 import { nextGridIndex } from "./grid-nav";
 import { setScopedSession } from "./session-scope";
 import { ADMIN_HOME_URL, appState, can, switchView } from "./shell";
+import { canView } from "./shell-state";
 import { icon } from "./ui";
 import type { View } from "./shell-state";
 
@@ -32,12 +49,16 @@ export function destinations(): Destination[] {
   const list: Destination[] = [
     to("contexts", Folder, "Projects", "Group chats, files, and automations"),
     to("files", Files, "Files", "Everything you and QM have shared"),
+    to("docs", BookOpen, "Department docs", "Shared documents, filed by department"),
+    to("pm", FolderKanban, "Project management", "Project materials and completeness checks"),
+    to("people", Users, "Directory", "Everyone in the company, by department"),
     to("crons", Clock, "Crons", "Work that runs on a schedule"),
     to("webhooks", Webhook, "Webhooks", "Inbound events that wake QM"),
     to("keychain", KeyRound, "Keychain", "Connected accounts and credentials"),
     to("deploys", Rocket, "Apps", "What QM has shipped for you"),
     to("memory", Brain, "Memory", "What QM remembers about your work"),
     to("skills", Box, "Skills", "Reusable procedures QM can follow"),
+    to("guide", Compass, "Guide", "Tips, announcements and your progress"),
   ];
   if (can("loops")) list.push(to("loops", Repeat, "Loops", "Standing work QM keeps pushing forward"));
   if (can("admin")) {
@@ -49,7 +70,7 @@ export function destinations(): Destination[] {
       blurb: "Org settings, people, and policy",
     });
   }
-  return list;
+  return list.filter((d) => !d.view || canView(d.view));
 }
 
 export function openBrowse(): void {

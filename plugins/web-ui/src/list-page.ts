@@ -26,6 +26,7 @@ export interface ListPageOpts {
   search?: { value: string; placeholder: string; onInput: (value: string) => void };
   filters?: TemplateResult;
   rows: TemplateResult[];
+  pagination?: TemplateResult | typeof nothing;
   empty: string | TemplateResult;
 }
 
@@ -61,6 +62,8 @@ export function listPageTpl(o: ListPageOpts): TemplateResult {
           : nothing
       }
     </div>
-    ${o.filters ?? nothing} ${o.rows.length ? listRowsTpl(o.rows) : html`<div class="empty compact">${o.empty}</div>`}
+    ${o.filters ?? nothing} ${o.pagination ?? nothing}
+    ${o.rows.length ? listRowsTpl(o.rows) : html`<div class="empty compact">${o.empty}</div>`}
+    ${o.pagination ?? nothing}
   `;
 }

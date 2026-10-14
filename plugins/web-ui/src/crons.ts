@@ -1,8 +1,9 @@
 import { html, nothing, render, type TemplateResult } from "lit";
-import { Archive, Pause, Pencil, Play, Plus, RotateCcw, Trash2 } from "lucide";
+import { Archive, Bot, Pause, Pencil, Play, Plus, RotateCcw, Trash2 } from "lucide";
 import { api, userSendMessage } from "./core-bridge";
-import { errMessage } from "../../chassis/src/errors";
-import { icon } from "./ui";
+import { userErrorMessage as errMessage } from "./user-error";
+import { brandName, icon } from "./ui";
+import { markdown } from "./message-markdown";
 import { listBackLink, listPageTpl } from "./list-page";
 import { contextsState, ensureContexts, scopeChip } from "./contexts";
 import { scopedSession, scopedViewTopbar } from "./session-scope";
@@ -188,7 +189,9 @@ function cronStatusLabel(c: CronView): "enabled" | "disabled" | "archived" {
 
 function cronStatusText(c: CronView): string {
   const status = cronStatusLabel(c);
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  if (status === "enabled") return "Enabled";
+  if (status === "disabled") return "Disabled";
+  return "Archived";
 }
 
 export async function renderCronsPage(): Promise<void> {
@@ -566,6 +569,73 @@ function openCron(c: CronView, opts: { push?: boolean; refreshRuns?: boolean } =
   if (manageable && (shouldRefreshRuns || !cronRuns.has(c.id)) && !cronRunsLoading.has(c.id)) void loadCronRuns(c.id);
 }
 
+const cronRunExpanded = new Map<string, boolean>();
+
+function cronRunBadge(status: string | undefined): { label: string; cls: string } {
+  if (status === "ok") return { label: "Done", cls: "is-ok" };
+  if (status === "silent") return { label: "No update", cls: "is-silent" };
+  if (status === "failed" || status === "refused") return { label: "Failed", cls: "is-fail" };
+  if (status === "pending_approval") return { label: "Needs approval", cls: "is-warn" };
+  return { label: status ?? "Done", cls: "is-silent" };
+}
+
+function cronRunCard(c: CronView, run: CronRunView, defaultExpanded: boolean): TemplateResult {
+  const badge = cronRunBadge(run.status);
+  const reply = run.reply?.trim() ? run.reply : "";
+  const expanded = cronRunExpanded.get(run.fireKey) ?? defaultExpanded;
+  const toggle = (): void => {
+    cronRunExpanded.set(run.fireKey, !expanded);
+    openCron(c);
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    toggle();
+  };
+  return html`
+    <div class="cron-run-card">
+      <div
+        class="cron-run-card-head"
+        role=${reply ? "button" : nothing}
+        tabindex=${reply ? "0" : nothing}
+        aria-expanded=${reply ? String(expanded) : nothing}
+        @click=${reply ? toggle : undefined}
+        @keydown=${reply ? onKey : undefined}
+      >
+        <span class="cron-run-badge ${badge.cls}">${badge.label}</span>
+        <span class="cron-run-time">${cronRunTiming(run)}</span>
+        ${reply ? html`<span class="cron-run-toggle">${expanded ? "Collapse" : "Show full reply"}</span>` : nothing}
+        ${
+          run.sessionId
+            ? html`<a
+                class="cron-run-link"
+                href=${deepLinkPath(UI_BASE, "chats", run.sessionId)}
+                @click=${(event: Event) => event.stopPropagation()}
+                >Worklog</a
+              >`
+            : nothing
+        }
+      </div>
+      ${
+        run.note
+          ? html`<div class="cron-run-note ${run.status === "ok" || run.status === "silent" ? "" : "is-error"}">
+              ${run.note}
+            </div>`
+          : nothing
+      }
+      ${
+        reply && expanded
+          ? html`<div class="cron-run-bubble">
+              <div class="cron-run-role">${icon(Bot, 13)}<span>${brandName()}</span></div>
+              <div class="cron-run-body">${markdown(reply)}</div>
+            </div>`
+          : nothing
+      }
+      ${reply && !expanded ? html`<div class="cron-run-excerpt">${clipWords(reply, 96)}</div>` : nothing}
+    </div>
+  `;
+}
+
 function cronRunHistory(c: CronView): TemplateResult {
   const runs = cronRuns.get(c.id);
   const heading = html`<div class="cron-run-heading">
@@ -583,23 +653,7 @@ function cronRunHistory(c: CronView): TemplateResult {
     </div>`;
   return html` <div class="field">
     ${heading}
-    <div class="cron-run-list">
-      ${[...runs].reverse().map((run) => {
-        const detail = run.note ?? (run.reply ? clipWords(run.reply, 120) : "");
-        return html` <div class="cron-run-row">
-          <span class="badge">${run.status ?? "completed"}</span>
-          <span class="cron-run-time">${cronRunTiming(run)}</span>
-          <span class=${run.note ? "cron-run-detail cron-run-error" : "cron-run-detail"} ${tip(detail)}>
-            ${detail}
-          </span>
-          ${
-            run.sessionId
-              ? html`<a class="cron-run-link" href=${deepLinkPath(UI_BASE, "chats", run.sessionId)}>Worklog</a>`
-              : nothing
-          }
-        </div>`;
-      })}
-    </div>
+    <div class="cron-run-list">${[...runs].reverse().map((run, index) => cronRunCard(c, run, index === 0))}</div>
   </div>`;
 }
 
@@ -760,9 +814,10 @@ async function saveCronEdit(event: SubmitEvent, c: CronView): Promise<void> {
 }
 
 function editCronWithAgent(c: CronView): void {
-  cronDialog = null;
   const conv = startNewChat();
-  void conv?.state.agent?.prompt(
+  if (!conv) return;
+  cronDialog = null;
+  void conv.state.agent?.prompt(
     userSendMessage(
       `Help me edit cron ${c.id} ("${cronTitle(c)}"). Its current schedule is ${cronScheduleSummary(c)}. Ask what I want changed, then update its task, schedule, timezone, destination, or run mode as requested.`,
     ),

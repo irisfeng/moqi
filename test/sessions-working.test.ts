@@ -69,7 +69,7 @@ test("the working flag clears once the in-flight run settles", async () => {
   );
 });
 
-test("listSessions flags a subagent whose latest turn failed, and only while it stays failed", async () => {
+test("listSessions flags a session whose latest turn failed, and only while it stays failed", async () => {
   const { app, runs, sessions } = freshApp();
   const parent = await app.turn(dm("parent", "web:U1:parent"));
   const child = await app.turn(dm("child", "web:U1:child"));
@@ -84,12 +84,30 @@ test("listSessions flags a subagent whose latest turn failed, and only while it 
 
   const list = await app.listSessions("U1");
   assert.equal(list.find((s) => s.id === child.sessionId)?.lastTurnFailed, true);
-  assert.ok(!list.find((s) => s.id === loose.sessionId)?.lastTurnFailed, "only subagents carry the flag");
+  assert.equal(list.find((s) => s.id === loose.sessionId)?.lastTurnFailed, true);
 
   await runs.enqueue({ sessionId: "web:U1:child", request: enqueueRequest() });
   const retry = await runs.claim("w1", 5_000);
   await runs.complete(retry!.id, retry!.leaseToken ?? "", { status: "ok", reply: "fine" });
   assert.ok(!(await app.listSessions("U1")).find((s) => s.id === child.sessionId)?.lastTurnFailed);
+});
+
+test("listSessions carries the time of the latest finished turn, and not while one is running", async () => {
+  const { app, runs } = freshApp();
+  const done = await app.turn(dm("done", "web:U1:done"));
+  await runs.enqueue({ sessionId: "web:U1:done", request: enqueueRequest() });
+  const claimed = await runs.claim("w1", 5_000);
+  await runs.complete(claimed!.id, claimed!.leaseToken ?? "", { status: "ok", reply: "done" });
+  const row = async () => (await app.listSessions("U1")).find((s) => s.id === done.sessionId);
+
+  const settled = await row();
+  assert.ok(settled?.lastTurnAt, "a finished turn carries its time");
+  assert.ok(!settled?.lastTurnFailed);
+
+  await runs.enqueue({ sessionId: "web:U1:done", request: enqueueRequest() });
+  const again = await row();
+  assert.equal(again?.working, true);
+  assert.equal(again?.lastTurnAt, undefined, "a running conversation reports no outcome");
 });
 
 test("sidebar batches visible goals and preserves the lookback boundary and inactive overrides", async () => {

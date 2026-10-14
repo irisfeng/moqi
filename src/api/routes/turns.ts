@@ -1,7 +1,9 @@
 import { fromJSONSchema, z, ZodObject } from "zod";
-import type { ClientToolDeclaration, TurnOrigin, TurnRequest } from "../../types.ts";
+import type { ClientToolDeclaration, TurnOrigin, TurnRequest, TurnResult } from "../../types.ts";
+import { MAX_INBOUND_FILES } from "../../core/attachments.ts";
 import { resolveTurnOrigin } from "../../core/turn-origin.ts";
-import { samePerson } from "../../directory/person.ts";
+import { personKey, samePerson } from "../../directory/person.ts";
+import { defaultOpenerKey, firstWebTurnLockKey, openerKeyFor } from "../first-web-turn.ts";
 import { sendJson } from "../http.ts";
 import { isObj } from "./shared.ts";
 import { type ApiCtx, type Route } from "./route.ts";
@@ -86,6 +88,33 @@ function publicTurnOrigin(body: TurnRequest): { origin?: TurnOrigin; error?: str
   return { origin: resolveTurnOrigin({ ...body, ...(typed ? { origin: typed } : { origin: undefined }) }) };
 }
 
+function validV2Attachments(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_INBOUND_FILES) return false;
+  return value.every((item: unknown) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const attachment = item as Record<string, unknown>;
+    return (
+      Object.keys(attachment).every((key) => ["name", "mimetype", "sizeBytes", "blobId"].includes(key)) &&
+      typeof attachment.name === "string" &&
+      Boolean(attachment.name) &&
+      attachment.name === attachment.name.trim() &&
+      attachment.name.length <= 255 &&
+      attachment.name !== "." &&
+      attachment.name !== ".." &&
+      !/[/\\\x00-\x1f]/.test(attachment.name) &&
+      typeof attachment.mimetype === "string" &&
+      attachment.mimetype.includes("/") &&
+      attachment.mimetype.length <= 127 &&
+      !/[^\x20-\x7e]/.test(attachment.mimetype) &&
+      Number.isSafeInteger(attachment.sizeBytes) &&
+      (attachment.sizeBytes as number) > 0 &&
+      (attachment.sizeBytes as number) <= 1_000_000_000 &&
+      typeof attachment.blobId === "string" &&
+      /^[0-9a-f]{32}$/.test(attachment.blobId)
+    );
+  });
+}
+
 function sanitizedTurnRequest(body: TurnRequest): { request: TurnRequest } | { error: string } {
   const {
     slackSource: _slackSource,
@@ -113,17 +142,234 @@ function sanitizedTurnRequest(body: TurnRequest): { request: TurnRequest } | { e
 }
 
 async function postTurn(ctx: ApiCtx): Promise<void> {
-  const { res, app, url, body } = ctx;
+  const { res, app, deps, url, body } = ctx;
   if (!isTurnRequest(body)) {
     return sendJson(res, 400, { error: "bad_request", message: "expected a TurnRequest" });
   }
+  if (url.pathname === "/v1/web-proactive-opener") {
+    const allowed = new Set([
+      "surface",
+      "actor",
+      "conversation",
+      "liveActor",
+      "deliveryTarget",
+      "text",
+      "proactiveOpener",
+      "harness",
+      "model",
+      "thinkingLevel",
+      "fastMode",
+      "timezone",
+      "idempotencyKey",
+    ]);
+    if (
+      body.surface !== "web" ||
+      body.proactiveOpener !== true ||
+      Object.keys(body).some((field) => !allowed.has(field)) ||
+      Object.keys(body.actor).some((field) => field !== "externalId" && field !== "displayName") ||
+      (body.actor.displayName !== undefined && typeof body.actor.displayName !== "string") ||
+      Object.keys(body.conversation).some((field) => field !== "kind" && field !== "threadRef") ||
+      body.conversation.kind !== "dm" ||
+      typeof body.conversation.threadRef !== "string" ||
+      body.conversation.threadRef.length > 300 ||
+      body.conversation.threadRef === `web:${body.actor.externalId}:` ||
+      !body.conversation.threadRef.startsWith(`web:${body.actor.externalId}:`) ||
+      body.liveActor !== true ||
+      body.deliveryTarget !== body.conversation.threadRef ||
+      body.text !== "" ||
+      (body.harness !== undefined && typeof body.harness !== "string") ||
+      (body.model !== undefined && typeof body.model !== "string") ||
+      (body.thinkingLevel !== undefined && typeof body.thinkingLevel !== "string") ||
+      (body.fastMode !== undefined && typeof body.fastMode !== "boolean") ||
+      (body.timezone !== undefined && typeof body.timezone !== "string")
+    )
+      return sendJson(res, 400, { error: "invalid_opener_request" });
+  }
+  if (url.pathname === "/v1/turns" && body.surface === "web" && body.proactiveOpener)
+    return sendJson(res, 409, { error: "versioned_opener_route_required" });
   const wantAsync = url.searchParams.get("async") === "1" || body.async === true;
+  const sendProtocol = url.pathname.startsWith("/v2/") ? 2 : 1;
+  if (sendProtocol === 2) {
+    const allowed = new Set([
+      "surface",
+      "actor",
+      "conversation",
+      "liveActor",
+      "deliveryTarget",
+      "text",
+      "quoteSeq",
+      "quoteText",
+      "quoteAuthor",
+      "attachments",
+      "harness",
+      "model",
+      "thinkingLevel",
+      "fastMode",
+      "timezone",
+      "idempotencyKey",
+      "verifiedRequestFingerprint",
+      "conversationHeader",
+      "analyticsSuppressed",
+      "async",
+    ]);
+    if (
+      body.surface !== "web" ||
+      Object.keys(body).some((field) => !allowed.has(field)) ||
+      Array.isArray(body.actor) ||
+      Object.keys(body.actor).some((field) => field !== "externalId" && field !== "displayName") ||
+      (body.actor.displayName !== undefined && typeof body.actor.displayName !== "string") ||
+      Array.isArray(body.conversation) ||
+      Object.keys(body.conversation).some(
+        (field) => !["kind", "threadRef", "channelRef", "channelName"].includes(field),
+      ) ||
+      !["dm", "channel", "group"].includes(body.conversation.kind) ||
+      typeof body.conversation.threadRef !== "string" ||
+      !body.conversation.threadRef.startsWith("web:") ||
+      (body.conversation.kind === "dm" &&
+        (!body.conversation.threadRef.startsWith(`web:${body.actor.externalId}:`) ||
+          body.conversation.channelRef !== undefined ||
+          body.conversation.channelName !== undefined)) ||
+      (body.conversation.kind !== "dm" &&
+        (typeof body.conversation.channelRef !== "string" || !body.conversation.channelRef)) ||
+      (body.conversation.channelName !== undefined && typeof body.conversation.channelName !== "string") ||
+      body.liveActor !== true ||
+      body.deliveryTarget !== body.conversation.threadRef ||
+      (!body.text.trim() && !body.attachments?.length) ||
+      (body.attachments !== undefined && !validV2Attachments(body.attachments)) ||
+      ((body.quoteSeq !== undefined || body.quoteText !== undefined || body.quoteAuthor !== undefined) &&
+        (typeof body.quoteText !== "string" ||
+          !body.quoteText ||
+          body.quoteText !== body.quoteText.trim() ||
+          body.quoteText.length > 300 ||
+          (body.quoteSeq !== undefined && (!Number.isSafeInteger(body.quoteSeq) || body.quoteSeq < 0)) ||
+          (body.quoteAuthor !== undefined &&
+            (typeof body.quoteAuthor !== "string" ||
+              !body.quoteAuthor ||
+              body.quoteAuthor !== body.quoteAuthor.trim() ||
+              body.quoteAuthor.length > 50)))) ||
+      (body.harness !== undefined && typeof body.harness !== "string") ||
+      (body.model !== undefined && typeof body.model !== "string") ||
+      (body.thinkingLevel !== undefined && typeof body.thinkingLevel !== "string") ||
+      (body.fastMode !== undefined && typeof body.fastMode !== "boolean") ||
+      (body.timezone !== undefined && typeof body.timezone !== "string") ||
+      (body.async !== undefined && typeof body.async !== "boolean") ||
+      (body.conversationHeader !== undefined && typeof body.conversationHeader !== "string") ||
+      (body.analyticsSuppressed !== undefined && typeof body.analyticsSuppressed !== "boolean") ||
+      typeof body.idempotencyKey !== "string" ||
+      body.idempotencyKey.length > 300 ||
+      !body.idempotencyKey.startsWith(`web:${encodeURIComponent(body.actor.externalId)}:`) ||
+      typeof body.verifiedRequestFingerprint !== "string" ||
+      !/^[0-9a-f]{64}$/.test(body.verifiedRequestFingerprint)
+    )
+      return sendJson(res, 400, { error: "bad_request", message: "verified text send required" });
+  }
   const sanitized = sanitizedTurnRequest(body);
   if ("error" in sanitized) return sendJson(res, 400, { error: "bad_request", message: sanitized.error });
-  const result = await app.turn({ ...sanitized.request, async: wantAsync });
-  if (result.status === "queued") return sendJson(res, 202, result);
+  const submit = () =>
+    app.turn({
+      ...sanitized.request,
+      async: wantAsync,
+      ...(body.surface === "web" ? { webSendProtocol: sendProtocol } : {}),
+      ...(sendProtocol === 1 ? { verifiedRequestFingerprint: undefined } : {}),
+    });
+  const personalWebTurn =
+    body.surface === "web" &&
+    body.conversation.kind === "dm" &&
+    body.conversation.threadRef.startsWith(`web:${body.actor.externalId}:`);
+  if (
+    body.proactiveOpener &&
+    body.surface === "web" &&
+    (typeof body.idempotencyKey !== "string" ||
+      (body.idempotencyKey !== defaultOpenerKey(body.actor.externalId) &&
+        !body.idempotencyKey.startsWith(`${defaultOpenerKey(body.actor.externalId)}:`)))
+  )
+    return sendJson(res, 400, { error: "invalid_opener_key" });
+  if (personalWebTurn && deps.production && (!deps.advisoryLock || !deps.firstWebTurns || !deps.firstWebTurnsDurable))
+    return sendJson(res, 503, { error: "first_turn_gate_unavailable" });
+  let result: TurnResult | null;
+  if (personalWebTurn && deps.advisoryLock && deps.firstWebTurns) {
+    const actorId = body.actor.externalId;
+    const threadRef = body.conversation.threadRef;
+    const firstWebTurns = deps.firstWebTurns;
+    result = await deps.advisoryLock.withLock(firstWebTurnLockKey(actorId), async () => {
+      if (body.approval) {
+        const current = await app.getApproval(body.approval.requestId, actorId);
+        return current ? submit() : { status: "refused", reason: "approval is no longer current" };
+      }
+      const memberKey = personKey(actorId);
+      const prior = await firstWebTurns.get(memberKey);
+      if (body.proactiveOpener) {
+        if (body.idempotencyKey !== openerKeyFor(actorId, prior)) return null;
+        if (prior && prior.kind !== "reset" && (prior.kind !== "opener" || prior.threadRef !== threadRef)) return null;
+        if ((!prior || prior.kind === "reset") && (await app.listSessions(actorId)).length) return null;
+        if (!prior || prior.kind === "reset")
+          await firstWebTurns.put(memberKey, {
+            kind: "opener",
+            threadRef,
+            createdAt: Date.now(),
+            ...(prior?.openerGeneration ? { openerGeneration: prior.openerGeneration } : {}),
+          });
+      } else if (!prior || prior.kind === "reset") {
+        await firstWebTurns.put(memberKey, {
+          kind: "human",
+          threadRef,
+          createdAt: Date.now(),
+          ...(prior?.openerGeneration ? { openerGeneration: prior.openerGeneration } : {}),
+        });
+      } else if (prior.kind === "opener") {
+        const openerKey = openerKeyFor(actorId, prior);
+        const openerRun = await app.webRunForOperationKey(openerKey, actorId);
+        if (!openerRun)
+          await firstWebTurns.put(memberKey, {
+            kind: "human",
+            threadRef,
+            createdAt: Date.now(),
+            ...(prior.openerGeneration ? { openerGeneration: prior.openerGeneration } : {}),
+          });
+      }
+      return submit();
+    });
+  } else {
+    result = await submit();
+  }
+  if (!result) return sendJson(res, 409, { error: "opener_superseded" });
+  const response = sendProtocol === 2 ? { ...result, sendProtocol: 2 } : result;
+  if (result.status === "queued") return sendJson(res, 202, response);
   const status = result.status === "refused" ? 403 : 200;
-  return sendJson(res, status, result);
+  return sendJson(res, status, response);
+}
+
+async function getWebTurnReceipt(ctx: ApiCtx): Promise<void> {
+  const { res, app, deps, url, actor } = ctx;
+  res.setHeader("Cache-Control", "no-store");
+  const viewer = url.searchParams.get("viewer");
+  if (!viewer || !actor || !samePerson(viewer, actor.p)) return sendJson(res, 403, { error: "forbidden" });
+  const key = url.searchParams.get("key") ?? "";
+  if (!key.startsWith(`web:${encodeURIComponent(viewer)}:`) || key.length > 300)
+    return sendJson(res, 400, { error: "bad_request", message: "valid web operation key required" });
+  const baseOpenerKey = defaultOpenerKey(viewer);
+  if (key === baseOpenerKey || key.startsWith(`${baseOpenerKey}:`)) {
+    if (!deps.firstWebTurns || (deps.production && !deps.firstWebTurnsDurable))
+      return sendJson(res, 503, { error: "first_turn_gate_unavailable" });
+    if (key !== openerKeyFor(viewer, await deps.firstWebTurns.get(personKey(viewer))))
+      return sendJson(res, 404, { error: "not_found", sendProtocol: 2 });
+  }
+  const receipt = await app.webRunForOperationKey(key, viewer);
+  if (receipt && "conflict" in receipt) return sendJson(res, 409, { error: "ambiguous_operation", sendProtocol: 2 });
+  return receipt
+    ? sendJson(res, 200, { ...receipt, sendProtocol: 2 })
+    : sendJson(res, 404, { error: "not_found", sendProtocol: 2 });
+}
+
+async function getFirstWebTurnState(ctx: ApiCtx): Promise<void> {
+  const { res, deps, url, actor } = ctx;
+  res.setHeader("Cache-Control", "no-store");
+  const principalId = url.searchParams.get("principalId") ?? "";
+  if (!principalId || !actor || !samePerson(principalId, actor.p)) return sendJson(res, 403, { error: "forbidden" });
+  if (!deps.firstWebTurns || (deps.production && !deps.firstWebTurnsDurable))
+    return sendJson(res, 503, { error: "first_turn_gate_unavailable" });
+  const record = await deps.firstWebTurns.get(personKey(principalId));
+  return sendJson(res, 200, { openerKey: openerKeyFor(principalId, record) });
 }
 
 async function getApproval(ctx: ApiCtx): Promise<void> {
@@ -291,6 +537,10 @@ async function postTurnMetrics(ctx: ApiCtx): Promise<void> {
 
 export const turnRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "POST", path: "/v1/turns", auth: "source", handle: postTurn },
+  { method: "POST", path: "/v1/web-proactive-opener", auth: "source", handle: postTurn },
+  { method: "POST", path: "/v2/turns", auth: "source", handle: postTurn },
+  { method: "GET", path: "/v1/web-first-turn", auth: "source", handle: getFirstWebTurnState },
+  { method: "GET", path: "/v2/turns/receipt", auth: "source", handle: getWebTurnReceipt },
   { method: "POST", path: "/v1/turns/:runId/metrics", auth: "source", handle: postTurnMetrics },
   { method: "GET", path: "/v1/approvals/pending", auth: "source", handle: getPendingApproval },
   { method: "GET", path: "/v1/approvals/:id", auth: "source", handle: getApproval },

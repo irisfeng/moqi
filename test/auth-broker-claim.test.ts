@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { createServer } from "../src/api/server.ts";
+import { createLoginPasswordStore, type LoginPasswordStore } from "../src/auth/login-password-store.ts";
 import { buildApp, type BuiltApp } from "../src/wiring.ts";
 import { signRequest } from "../src/auth/source-auth.ts";
 import { createMemoryReplayDedupe, type ReplayDedupe } from "../src/auth/replay-dedupe.ts";
@@ -32,6 +33,7 @@ function durableStub(): ReplayDedupe {
 function start(
   replayDedupe: ReplayDedupe = durableStub(),
   brokerSessions?: BrokerSessionStore,
+  loginPasswords?: LoginPasswordStore,
 ): {
   base: string;
   dedupe: ReplayDedupe;
@@ -44,6 +46,7 @@ function start(
     signingSecret: SECRET,
     replayDedupe,
     brokerSessions,
+    ...(loginPasswords ? { loginPasswords } : {}),
     requireSignedPortalIdentity: true,
     portalIdentitySecret: SECRET + "identity",
     capabilitySecret: SECRET + "capability",
@@ -159,7 +162,13 @@ test("broker sessions cross the production identity gate, but revocation require
       revoked.push(email);
     },
   };
-  const srv = start(durableStub(), sessions);
+  const passwords = createLoginPasswordStore();
+  const password = await passwords.putInitial({
+    id: "user@example.com",
+    initialPassword: "initial-pass-1",
+    updatedBy: "admin",
+  });
+  const srv = start(durableStub(), sessions, passwords);
   t.after(() => srv.close());
   const post = async (suffix: string, data: unknown, actor?: string, signed = true): Promise<Response> => {
     const path = `/v1/auth/broker/sessions${suffix}?nonce=${crypto.randomUUID()}`;
@@ -189,4 +198,9 @@ test("broker sessions cross the production identity gate, but revocation require
   assert.notEqual((await post("/revoke", { email: "other@example.com" }, "user@example.com")).status, 200);
   assert.equal((await post("/revoke", { email: "user@example.com" }, "user@example.com")).status, 200);
   assert.deepEqual(revoked, ["user@example.com"]);
+  assert.notEqual(
+    (await passwords.get("user@example.com"))?.version,
+    password.version,
+    "signing out everywhere also ends every password sign-in",
+  );
 });

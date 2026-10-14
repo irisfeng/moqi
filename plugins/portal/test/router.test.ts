@@ -428,12 +428,32 @@ test("auth/login sets the tmp cookie and 302s to the IdP with PKCE+state+nonce",
   assert.ok(u.searchParams.get("state"));
   assert.ok(u.searchParams.get("nonce"));
   assert.equal(u.searchParams.get("code_challenge_method"), "S256");
-  assert.match(r.headers.get("set-cookie") ?? "", /portal_oidc_tmp=/);
+  assert.match(r.headers.get("set-cookie") ?? "", /portal_oidc_tmp_[a-f0-9]{64}=/);
 });
 
-test("auth/callback with no tmp cookie fails closed (400, no token exchange)", async () => {
+test("restarting sign-in creates a fresh cookie, state, nonce and PKCE challenge", async () => {
+  const first = await fetch(`${base}/auth/login`, { redirect: "manual" });
+  const firstCookie = first.headers.get("set-cookie")!;
+  const firstUrl = new URL(first.headers.get("location")!);
+  const next = await fetch(`${base}/auth/login`, {
+    redirect: "manual",
+    headers: { cookie: firstCookie.split(";")[0]! },
+  });
+  assert.equal(next.status, 302);
+  assert.notEqual(next.headers.get("set-cookie"), firstCookie);
+  assert.match(next.headers.get("set-cookie") ?? "", /Max-Age=600/);
+  const nextUrl = new URL(next.headers.get("location")!);
+  for (const name of ["state", "nonce", "code_challenge"]) {
+    assert.ok(firstUrl.searchParams.get(name));
+    assert.ok(nextUrl.searchParams.get(name));
+    assert.notEqual(firstUrl.searchParams.get(name), nextUrl.searchParams.get(name));
+  }
+});
+
+test("auth/callback with no pending sign-in restarts it without a token exchange", async () => {
   const r = await fetch(`${base}/auth/callback?code=x&state=y`, { redirect: "manual" });
-  assert.equal(r.status, 400);
+  assert.equal(r.status, 302);
+  assert.equal(r.headers.get("location"), "/auth/login");
 });
 
 test("auth/logout requires same-origin and clears the session cookie", async () => {

@@ -314,6 +314,9 @@ test("addressed + no post but a final text reply → the reply is delivered dire
     assert.ok(direct, "the final text reply was delivered directly");
     assert.equal(direct.destination.target, "slack:C-shed:710.1", "delivered to the addressed conversation");
     const session = await built.sessions.getByThread("ch:C-shed:710.1");
+    const replyEntry = (await built.sessions.getEntries(session!.id)).findLast((entry) => entry.type === "assistant");
+    assert.ok(replyEntry);
+    assert.equal(direct.provenance?.sourceAssistantEntrySeq, replyEntry.seq);
     const requests = await built.sessions.listLlmRequests(session!.id);
     assert.ok(
       !requests.some((r) => JSON.stringify(r.promptEnvelope).includes("[system] You were addressed directly")),
@@ -340,6 +343,9 @@ test("addressed + STILL no post after the nudge → the nudge turn's text is del
     assert.ok(fallback, "the shed reply was delivered as the fallback");
     assert.equal(fallback.destination.target, "slack:C-shedmute:710.3", "delivered to the addressed conversation");
     const session = await built.sessions.getByThread("ch:C-shedmute:710.3");
+    const replyEntry = (await built.sessions.getEntries(session!.id)).findLast((entry) => entry.type === "assistant");
+    assert.ok(replyEntry);
+    assert.equal(fallback.provenance?.sourceAssistantEntrySeq, replyEntry.seq);
     const nudgeRequest = (await built.sessions.listLlmRequests(session!.id)).at(-1)!.promptEnvelope as {
       messages?: Array<{ role?: string; content?: string }>;
     };

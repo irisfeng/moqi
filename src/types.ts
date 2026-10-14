@@ -117,6 +117,7 @@ export interface Session {
   working?: boolean;
   awaitingInput?: boolean;
   lastTurnFailed?: boolean;
+  lastTurnAt?: number;
   backgroundJobs?: number;
   watches?: number;
   crons?: number;
@@ -687,6 +688,9 @@ export interface TurnRequest {
     publishMembers?: ActorAssertion[];
   };
   text: string;
+  quoteSeq?: number;
+  quoteText?: string;
+  quoteAuthor?: string;
   origin?: TurnOrigin;
   triggerTs?: string;
   entryTs?: string;
@@ -727,6 +731,9 @@ export interface TurnRequest {
   spawned?: boolean;
   idempotencyKey?: string;
   redeliveryKey?: string;
+  clientRequestFingerprint?: string;
+  verifiedRequestFingerprint?: string;
+  webSendProtocol?: 1 | 2;
   async?: boolean;
   clientTools?: ClientToolDeclaration[];
 }

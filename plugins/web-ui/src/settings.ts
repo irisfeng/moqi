@@ -9,12 +9,17 @@ import { ADMIN_HOME_URL, appState, can, signOut } from "./shell";
 import { sessionsState, setWebOnly } from "./sessions";
 import { errMessage } from "../../chassis/src/errors";
 import { importTheme, isPalette, themeCss, themeTokens, type Palette } from "./theme-import";
+import { PALETTE_KEY, galleryCss, galleryThemes, storedPalette } from "./theme-gallery";
+import { paletteRow } from "./palette-row";
+import { versionRow } from "./version-row";
+import "./contact-row";
 
 export type ThemeChoice = "light" | "dark" | "system" | "custom";
 
 const THEME_KEY = "theme";
 const CUSTOM_THEME_KEY = "theme:custom";
 const CUSTOM_THEME_STYLE_ID = "custom-theme";
+const GALLERY_STYLE_ID = "gallery-theme";
 const THEME_FILE_ACCEPT = ".itermcolors,.plist,.json,.jsonc,application/json,text/xml,application/xml";
 
 const QM_MAC_DOWNLOAD_URL = "https://github.com/yc-software/qm/releases/download/desktop-v0.1.0/QM-mac-arm64.zip";
@@ -77,6 +82,18 @@ export function applyTheme(): void {
   const custom = choice === "custom" ? storedCustomTheme() : null;
   const root = document.documentElement;
   let styleEl = document.getElementById(CUSTOM_THEME_STYLE_ID);
+  const pick = choice === "custom" ? undefined : galleryThemes(document).find((theme) => theme.id === storedPalette());
+  let galleryEl = document.getElementById(GALLERY_STYLE_ID);
+  if (pick) {
+    if (!galleryEl) {
+      galleryEl = document.createElement("style");
+      galleryEl.id = GALLERY_STYLE_ID;
+      document.head.appendChild(galleryEl);
+    }
+    galleryEl.textContent = galleryCss(pick);
+  } else {
+    galleryEl?.remove();
+  }
   if (custom) {
     const tokens = themeTokens(custom);
     if (!styleEl) {
@@ -139,7 +156,8 @@ export function watchSystemTheme(): void {
     publishTheme();
   });
   window.addEventListener("storage", (event) => {
-    if (event.key === null || event.key === THEME_KEY || event.key === CUSTOM_THEME_KEY) applyTheme();
+    if (event.key === null || event.key === THEME_KEY || event.key === CUSTOM_THEME_KEY || event.key === PALETTE_KEY)
+      applyTheme();
   });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if (storedTheme() === "system") applyTheme();
@@ -489,8 +507,9 @@ function settingsPane(): TemplateResult {
       <h1 class="pane-title">Settings</h1>
     </div>
     <div class="settings-group">
-      ${aiAccountsRow()} ${themeRow()} ${openBehaviorRow()} ${sidebarSurfaceRow()}
-      ${can("admin") ? adminRow() : nothing} ${desktopRow()} ${accountRow()}
+      ${appState.me?.personalModelAccounts === false ? nothing : aiAccountsRow()} ${themeRow()} ${paletteRow()}
+      ${openBehaviorRow()} ${sidebarSurfaceRow()} ${can("admin") ? adminRow() : nothing} ${desktopRow()} ${accountRow()}
+      <qm-contact-row class="settings-row settings-contact"></qm-contact-row> ${versionRow()}
       <div class="settings-row settings-slack-account">
         <qm-slack-account .user=${`${appState.me?.org}:${appState.me?.user}`}></qm-slack-account>
       </div>

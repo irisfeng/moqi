@@ -3,7 +3,7 @@ import { html, nothing, render, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
 import { Archive, Check, Copy, ExternalLink, Plus, RotateCcw, Trash2, X } from "lucide";
 import { api, withBase } from "./core-bridge";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error.ts";
 import { copyText, icon, relTime } from "./ui";
 import { listBackLink, listPageTpl } from "./list-page";
 import { contextsState, ensureContexts, scopeChip } from "./contexts";
@@ -78,8 +78,14 @@ function statusLabel(d: DeploymentView): string {
     d.appliedVersion !== d.currentVersion
   )
     return "Deploying";
+  const statusLabels: Record<string, string> = {
+    running: "Running",
+    archived: "Archived",
+    stopped: "Stopped",
+    unknown: "Unknown",
+  };
   const status = d.status || "unknown";
-  return status.charAt(0).toLocaleUpperCase() + status.slice(1);
+  return statusLabels[status] ?? status.charAt(0).toLocaleUpperCase() + status.slice(1);
 }
 
 function statusClass(d: DeploymentView): string {

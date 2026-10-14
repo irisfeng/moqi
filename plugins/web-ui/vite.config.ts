@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
+import { translateSource, type LineCatalog } from "../../scripts/i18n/translate.ts";
 
 const SERVER = process.env.WEB_UI_SERVER_URL ?? "http://localhost:8096";
 
@@ -50,9 +51,27 @@ export function precompressStaticAssets(): Plugin {
   };
 }
 
+export function localizeSource(): Plugin {
+  const locale = process.env.QM_LOCALE ?? "zh-CN";
+  const packageDir = here("./");
+  const catalog: LineCatalog =
+    locale === "en" ? {} : (JSON.parse(readFileSync(here(`../../i18n/${locale}.json`), "utf8")) as LineCatalog);
+  return {
+    name: "qm-localize-source",
+    enforce: "pre",
+    transform(code, id) {
+      const file = id.split("?")[0] ?? id;
+      const table = file.startsWith(packageDir)
+        ? catalog[`plugins/web-ui/${file.slice(packageDir.length)}`]
+        : undefined;
+      return table ? { code: translateSource(code, table), map: null } : null;
+    },
+  };
+}
+
 export default defineConfig({
   base: process.env.WEB_UI_BASE ?? "/",
-  plugins: [precompressStaticAssets()],
+  plugins: [localizeSource(), precompressStaticAssets()],
   resolve: {
     alias: [
       { find: /^katex$/, replacement: here("src/lazy-katex.ts") },

@@ -13,6 +13,7 @@ export function deepLinkPath(
   itemId?: string | null,
 ): string {
   const b = base.replace(/\/$/, "");
+  if (view === "docs" || view === "pm") return `${b}/?view=${encodeURIComponent(view)}`;
   if (view === "contexts" && contextScope) {
     if (itemId) throw new Error("the contexts view is addressed by scope, not by item id");
     return `${b}/contexts?scope=${encodeURIComponent(contextScope)}`;

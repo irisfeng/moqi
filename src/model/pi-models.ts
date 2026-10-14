@@ -1,6 +1,6 @@
 import { gatewayModelCatalog, gatewayModelsVersion, isGatewayModelId, resolveGatewayModel } from "./gateway-models.ts";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Api, type Model } from "@earendil-works/pi-ai";
 import { parseModelOverlay, type ModelOverlay } from "./model-overlay.ts";
 import { providerBaseUrl } from "./provider-endpoints.ts";
 import { isCustomModelId, resolveCustomModel } from "./custom-providers.ts";
@@ -66,6 +66,45 @@ export function thinkingLevelsForHarness(harnessId: HarnessId, modelId?: string)
     if (harnessId === "codex") return level !== "max" && level !== "ultracode";
     return level === "auto";
   });
+}
+
+const CONCRETE_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
+
+interface CustomEffortMenu {
+  offered: ReadonlySet<string>;
+  equivalents: Readonly<Record<string, string>>;
+}
+
+function customEffortMenu(modelId: string): CustomEffortMenu | undefined {
+  const model = resolveCustomModel(modelId);
+  if (!model || resolveModel(modelId)?.provider !== model.provider) return undefined;
+  if (!model.reasoning) return { offered: new Set(), equivalents: {} };
+  const sent = (level: (typeof CONCRETE_EFFORTS)[number]) => {
+    const clamped = clampThinkingLevel(model as unknown as Model<Api>, level === "ultracode" ? "max" : level);
+    return { clamped, value: model.thinkingLevelMap?.[clamped] ?? clamped };
+  };
+  const levelBySentValue = new Map<string, string>();
+  for (const level of CONCRETE_EFFORTS) {
+    const { clamped, value } = sent(level);
+    if (clamped !== level) continue;
+    if (!levelBySentValue.has(value) || value === level) levelBySentValue.set(value, level);
+  }
+  const offered = new Set(levelBySentValue.values());
+  const equivalents: Record<string, string> = {};
+  for (const level of CONCRETE_EFFORTS) {
+    const equivalent = levelBySentValue.get(sent(level).value);
+    if (!offered.has(level) && equivalent) equivalents[level] = equivalent;
+  }
+  return { offered, equivalents };
+}
+
+function offeredThinkingLevels(harnessId: HarnessId, modelId: string): readonly string[] {
+  const levels = thinkingLevelsForHarness(harnessId, modelId);
+  const menu = harnessId === "pi" ? customEffortMenu(modelId) : undefined;
+  if (!menu) return levels;
+  return levels.filter(
+    (level) => level === "auto" || level === "adaptive" || level === "default" || menu.offered.has(level),
+  );
 }
 
 export function harnessSupportsFastMode(harnessId: HarnessId): boolean {
@@ -739,6 +778,7 @@ export function safeModelMetadata(id: string) {
   const name = modelDisplayName(id) === id ? model.name : modelDisplayName(id);
   const label = entry?.label ?? (entry ? name.replace(/^Claude /, "") : name);
   const buttonLabel = entry?.buttonLabel ?? label;
+  const equivalents = customEffortMenu(id)?.equivalents;
   return {
     id,
     name,
@@ -753,7 +793,8 @@ export function safeModelMetadata(id: string) {
     cost: structuredClone(model.cost),
     fastMode: modelSupportsFastMode(id),
     effortLevelsByHarness: Object.fromEntries(
-      HARNESS_IDS.map((harness) => [harness, thinkingLevelsForHarness(harness, id)]),
+      HARNESS_IDS.map((harness) => [harness, offeredThinkingLevels(harness, id)]),
     ),
+    ...(equivalents && Object.keys(equivalents).length ? { effortEquivalentsByHarness: { pi: equivalents } } : {}),
   };
 }

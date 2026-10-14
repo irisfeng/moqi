@@ -17,3 +17,9 @@ export function formatMessageTime(ms: number, now = Date.now()): string {
         };
   return `${date.toLocaleDateString([], options)} ${time}`;
 }
+
+export function messageTimeDetail(ms: number): { iso: string; title: string } | null {
+  const date = new Date(ms);
+  if (!Number.isFinite(date.getTime())) return null;
+  return { iso: date.toISOString(), title: date.toLocaleString([], { dateStyle: "long", timeStyle: "short" }) };
+}

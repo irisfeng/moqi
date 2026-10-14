@@ -1,4 +1,5 @@
 import type { AssistantSidebarContext } from "./assistant-sidebar";
+import type { MessageLocation } from "./message-location.ts";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { TemplateResult, nothing } from "lit";
 import type { DensityTier } from "./density";
@@ -7,6 +8,7 @@ import type {
   ApprovalDecision,
   CoreSession,
   PendingApproval,
+  MessageQuote,
   QueuedRun,
   TurnOptions,
   entriesToMessages,
@@ -107,7 +109,10 @@ export interface ChatSurface {
   approvalSummaryView(a: PendingApproval, expanded?: boolean): TemplateResult;
   notePendingSessionOnSend(): void;
   syncPaneState(): void;
-  onDelivery(threadRef: string): void;
+  onDelivery(threadRef: string): Promise<void>;
+  isVisible(): boolean;
+  mountedThreadRef(): string | null;
+  showLatestMessages(target?: MessageLocation, signal?: AbortSignal): Promise<boolean>;
   resumeIfIdle(): void;
   redraw(): void;
   dispose(): void;
@@ -131,8 +136,10 @@ export interface ComposerSurface {
   submit(instruction?: string): Promise<void>;
   restageAttachments(attachments: Attachment[], note: string): void;
   state: ComposerState;
+  submitPresetPrompt(text: string): Promise<void>;
   composerForm(agent: Agent, header?: TemplateResult | typeof nothing): TemplateResult;
   queuedStrip(agent: Agent): TemplateResult | typeof import("lit").nothing;
+  quoteMessage(msg: MessageQuote): void;
   queuedRunsFor(threadRef: string | null): QueuedRun[];
   setQueuedRuns(threadRef: string, runs: QueuedRun[]): void;
   resetComposer(): void;

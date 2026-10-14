@@ -14,6 +14,8 @@ import { scopeId } from "../src/types.ts";
 import { isUnclassifiedWrite } from "../src/api/user-scoped-routes.ts";
 import { signedHeaders } from "../plugins/chassis/src/core-client.ts";
 import { authBrokerRoutes } from "../src/api/routes/auth-broker.ts";
+import { loginPasswordRoutes } from "../src/api/routes/login-password.ts";
+import { signedRequestHeaders } from "../plugins/chassis/src/source-auth-sign.ts";
 
 const SOURCE = "shared-source-auth-secret-for-tests-0001";
 const CAP = "core-only-capability-secret-for-tests-01";
@@ -192,8 +194,28 @@ describe("user-scoped routes require a portal-verified actor when enforcement is
     assert.equal(r.status, 403);
   });
 
+  it("SYSTEM-exempted user-scoped routes accept a source-signed server actor", async () => {
+    const listPath = `/v1/projects?principalId=${encodeURIComponent("U1")}`;
+    const list = await fetch(`${base}${listPath}`, {
+      headers: signedRequestHeaders(SOURCE, "GET", listPath, "") as Record<string, string>,
+    });
+    assert.equal(list.status, 200);
+    const createBody = JSON.stringify({ principalId: "U1", name: "server-side ops project" });
+    const created = await fetch(`${base}/v1/projects`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(signedRequestHeaders(SOURCE, "POST", "/v1/projects", createBody) as Record<string, string>),
+      },
+      body: createBody,
+    });
+    assert.equal(created.status, 201);
+    const stillScoped = await fetch(`${base}/v1/sessions?principalId=U1`);
+    assert.equal(stillScoped.status, 401, "routes outside SYSTEM keep requiring a portal identity");
+  });
+
   it("Project reads and every mutation bind principalId to the portal identity", async () => {
-    assert.equal((await fetch(`${base}/v1/projects?principalId=U1`)).status, 401);
+    assert.equal((await fetch(`${base}/v1/sessions?principalId=U1`)).status, 401);
     assert.equal(
       (await fetch(`${base}/v1/projects?principalId=U2`, { headers: { "x-portal-identity": await token("U1") } }))
         .status,
@@ -396,7 +418,7 @@ describe("user-scoped routes require a portal-verified actor when enforcement is
 
 describe("service-to-service writes are classified", () => {
   it("every auth:source write route is classified, so production gating cannot demand a portal identity from a plugin", () => {
-    const unclassified = authBrokerRoutes
+    const unclassified = [...authBrokerRoutes, ...loginPasswordRoutes]
       .filter((route) => "path" in route && route.auth === "source")
       .map((route) => route as { method: string; path: string })
       .filter((route) => isUnclassifiedWrite(route.method, route.path))

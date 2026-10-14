@@ -135,10 +135,11 @@ export function createProjectStore(
       const outcome: { status: ProjectMutation["status"] } = { status: "not_found" };
       let changed = false;
       const updated = await backing.update(id, (project) => {
+        const leaving = !add && samePerson(memberId, actorId);
         const canChangeRoster = add
           ? project.memberIds.some((member) => samePerson(member, actorId))
-          : samePerson(project.ownerId, actorId);
-        if (!canChangeRoster || !isActiveMember(project.ownerId) || !isActiveMember(actorId)) {
+          : samePerson(project.ownerId, actorId) || leaving;
+        if (!canChangeRoster || (!leaving && !isActiveMember(project.ownerId)) || !isActiveMember(actorId)) {
           outcome.status = "forbidden";
           return project;
         }
@@ -148,8 +149,11 @@ export function createProjectStore(
         }
         outcome.status = "ok";
         const memberIds = add
-          ? [...new Set([...project.memberIds, memberId])]
-          : project.memberIds.filter((member) => member !== memberId);
+          ? [
+              ...project.memberIds,
+              ...(!project.memberIds.some((member) => samePerson(member, memberId)) ? [memberId] : []),
+            ]
+          : project.memberIds.filter((member) => !samePerson(member, memberId));
         if (
           memberIds.length === project.memberIds.length &&
           memberIds.every((member, i) => member === project.memberIds[i])

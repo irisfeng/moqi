@@ -106,6 +106,19 @@ export function effortLevelsForHarness(
   return [EFFORT_LEVELS.find(({ value }) => value === "auto")!, ...levels];
 }
 
+export function equivalentOfferedEffort(
+  harnessId: string,
+  model: Model<Api> | undefined,
+  effort: string | undefined,
+): EffortLevel | undefined {
+  if (!effort) return undefined;
+  const levels = effortLevelsForHarness(harnessId, model);
+  const offered = (level: string | undefined) => levels.find(({ value }) => value === level)?.value;
+  return (
+    offered(effort) ?? offered((model as ModelMetadata | undefined)?.effortEquivalentsByHarness?.[harnessId]?.[effort])
+  );
+}
+
 export function compatibleHarnessOptions<T extends { harnessId: string; model: { id: string } }>(
   options: readonly T[],
   modelId: string,

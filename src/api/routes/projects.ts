@@ -1,3 +1,4 @@
+import { samePerson } from "../../directory/person.ts";
 import { sendJson } from "../http.ts";
 import { isObj } from "./shared.ts";
 import { type ApiCtx, type Route } from "./route.ts";
@@ -84,6 +85,8 @@ async function removeProjectMember(ctx: ApiCtx): Promise<void> {
   const memberId = ctx.params.memberId?.trim() ?? "";
   if (!principalId || !memberId)
     return sendJson(ctx.res, 400, { error: "bad_request", message: "principalId and memberId required" });
+  if (samePerson(memberId, principalId) && (ctx.capability || ctx.actor?.imp !== undefined))
+    return sendJson(ctx.res, 403, { error: "forbidden", message: "only the person themselves can leave a project" });
   return mutationResponse(ctx, await ctx.app.removeProjectMember(ctx.params.id!, principalId, memberId));
 }
 

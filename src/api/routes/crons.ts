@@ -2,6 +2,7 @@ import { isCronRuntime } from "../../cron/runtime.ts";
 import type { Cron } from "../../types.ts";
 import type { CreateCronInput, CronPatch } from "../../cron/cron-store.ts";
 import { describeRunNowRefusal } from "../../cron/scheduler.ts";
+import { findCronRun, safeCronReply } from "../../cron/run-result.ts";
 import { DEFAULT_CRON_TIMEZONE, userScheduleFromBody } from "../../cron/schedule.ts";
 import type { CapabilityClaims } from "../../auth/capability-token.ts";
 import { errMessage } from "../../util/errors.ts";
@@ -261,15 +262,23 @@ async function listCrons(ctx: ApiCtx): Promise<void> {
   }
   const viewer = url.searchParams.get("viewer");
   if (!viewer) return sendJson(res, 200, { crons: (await app.listCrons()).map(withoutFireLog) });
+  res.setHeader("Cache-Control", "private, no-store");
   const { owned, visible } = await app.listCronsForViewer(viewer);
-  const decorate = async (cron: Cron) => ({
+  const manageable = new Map(
+    await Promise.all(
+      [...owned, ...visible].map(async (cron) => [cron.id, await canAdministerCron(app, cron, viewer)] as const),
+    ),
+  );
+  const unread = await app.cronUnreadCounts(
+    [...manageable].filter(([, allowed]) => allowed).map(([id]) => id),
+    viewer,
+  );
+  const decorate = (cron: Cron) => ({
     ...withoutFireLog(cron),
-    permission: (await canAdministerCron(app, cron, viewer)) ? "manage" : "read",
+    permission: manageable.get(cron.id) ? "manage" : "read",
+    ...(manageable.get(cron.id) ? { unreadCount: unread[cron.id] ?? 0 } : {}),
   });
-  return sendJson(res, 200, {
-    crons: await Promise.all(owned.map(decorate)),
-    visible: await Promise.all(visible.map(decorate)),
-  });
+  return sendJson(res, 200, { crons: owned.map(decorate), visible: visible.map(decorate) });
 }
 
 async function disableCron(ctx: ApiCtx): Promise<void> {
@@ -349,8 +358,69 @@ async function cronRuns(ctx: ApiCtx): Promise<void> {
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
     return sendJson(res, 400, { error: "bad_request", message: "limit must be a positive integer" });
   }
-  const { runs, total } = await app.listCronFires(id, limit !== undefined ? { limit } : {});
+  const viewer = url.searchParams.get("principalId");
+  const opts = limit !== undefined ? { limit } : {};
+  if (viewer) res.setHeader("Cache-Control", "private, no-store");
+  const { runs, total } = viewer ? await app.getCronRuns(id, opts, viewer) : await app.listCronFires(id, opts);
   return sendJson(res, 200, { cron: withoutFireLog(cron), runs, total });
+}
+
+async function cronResult(ctx: ApiCtx): Promise<void> {
+  const { res, app, url, deps } = ctx;
+  res.setHeader("Cache-Control", "private, no-store");
+  const viewer = url.searchParams.get("principalId");
+  if (!viewer) return sendJson(res, 400, { error: "principal_required" });
+  const cron = await gateSourceCron(ctx, ctx.params.id!);
+  if (!cron) return;
+  const fire = await app.getCronRun(cron.id, ctx.params.fireKey!);
+  if (!fire) return sendJson(res, 404, { error: "not_found" });
+  const run = deps.runs ? await findCronRun(deps.runs, fire.threadRef, fire.fireKey) : null;
+  const inProgress = run?.status === "running" || run?.status === "pending";
+  const result = inProgress ? null : run?.result;
+  let availability = "unavailable";
+  if (result) availability = "complete";
+  if (inProgress) availability = "in_progress";
+  const attachments = await Promise.all(
+    (result?.attachments ?? []).map(async ({ artifactId, name, mimetype, sizeBytes }) => {
+      const opened = artifactId ? await app.openFileForViewer(artifactId, viewer) : null;
+      opened?.stream.destroy();
+      return { ...(opened ? { artifactId } : {}), name, mimetype, sizeBytes };
+    }),
+  );
+  return sendJson(res, 200, {
+    fire: { ...fire, ...(run ? { runId: run.id } : {}) },
+    availability,
+    result: result
+      ? {
+          status: result.status,
+          reply: safeCronReply(result.reply ?? ""),
+          ...(result.reason ? { reason: result.reason } : {}),
+          attachments,
+        }
+      : null,
+  });
+}
+
+async function markCronResultRead(ctx: ApiCtx): Promise<void> {
+  const { res, app, url, deps, body } = ctx;
+  res.setHeader("Cache-Control", "private, no-store");
+  const viewer = url.searchParams.get("principalId");
+  if (!viewer) return sendJson(res, 400, { error: "principal_required" });
+  if (!isObj(body) || typeof body.version !== "string" || !/^[a-f0-9]{32}$/.test(body.version)) {
+    return sendJson(res, 400, { error: "version_required" });
+  }
+  const cron = await gateSourceCron(ctx, ctx.params.id!);
+  if (!cron) return;
+  const fire = await app.getCronRun(cron.id, ctx.params.fireKey!);
+  if (!fire) return sendJson(res, 404, { error: "not_found" });
+  const run = deps.runs ? await findCronRun(deps.runs, fire.threadRef, fire.fireKey) : null;
+  if (run && (run.status === "pending" || run.status === "running" || !run.result)) {
+    return sendJson(res, 409, { error: "result_not_ready" });
+  }
+  if (!(await app.markCronRunRead(cron.id, fire.fireKey, viewer, body.version))) {
+    return sendJson(res, 409, { error: "result_changed" });
+  }
+  return sendJson(res, 200, { ok: true });
 }
 
 const CRON_PATCH_BAD_REQUEST =
@@ -485,6 +555,8 @@ export const cronRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "POST", path: "/v1/crons/:id/run", auth: "either", handle: runCronNow },
   { method: "POST", path: "/v1/crons/:id/note", auth: "either", handle: noteCron },
   { method: "GET", path: "/v1/crons/:id/runs", auth: "either", handle: cronRuns },
+  { method: "GET", path: "/v1/crons/:id/runs/:fireKey", auth: "source", handle: cronResult },
+  { method: "POST", path: "/v1/crons/:id/runs/:fireKey/read", auth: "source", handle: markCronResultRead },
   {
     match: (m, p) =>
       p.startsWith("/v1/crons/") &&

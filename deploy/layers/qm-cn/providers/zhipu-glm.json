@@ -1,0 +1,118 @@
+{
+  "name": "智谱 GLM（编码套餐端点）",
+  "protocol": "openai",
+  "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+  "validate": false,
+  "models": [
+    {
+      "id": "glm-5.3",
+      "name": "GLM-5.3",
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "thinkingFormat": "zai",
+        "zaiToolStream": true
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": "low",
+        "medium": "high",
+        "high": "high",
+        "max": "max"
+      },
+      "modalities": ["text"]
+    },
+    {
+      "id": "glm-5.3-flash",
+      "name": "GLM-5.3 Flash",
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "thinkingFormat": "zai",
+        "zaiToolStream": true
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": "low",
+        "medium": "high",
+        "high": "high",
+        "max": "max"
+      },
+      "modalities": ["text", "image"]
+    },
+    {
+      "id": "glm-5.2",
+      "name": "GLM-5.2",
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "thinkingFormat": "zai",
+        "zaiToolStream": true
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": "high",
+        "medium": "high",
+        "high": "high",
+        "max": "max"
+      },
+      "modalities": ["text"]
+    },
+    {
+      "id": "glm-5.1",
+      "name": "GLM-5.1",
+      "contextWindow": 200000,
+      "maxTokens": 131072,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "thinkingFormat": "zai",
+        "zaiToolStream": true
+      },
+      "modalities": ["text"]
+    },
+    {
+      "id": "glm-4.7",
+      "name": "GLM-4.7",
+      "contextWindow": 204800,
+      "maxTokens": 131072,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "thinkingFormat": "zai",
+        "zaiToolStream": true
+      },
+      "modalities": ["text"]
+    },
+    {
+      "id": "glm-4.5-air",
+      "name": "GLM-4.5-Air",
+      "contextWindow": 131072,
+      "maxTokens": 98304,
+      "reasoning": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "thinkingFormat": "zai"
+      },
+      "modalities": ["text"]
+    }
+  ]
+}

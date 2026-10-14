@@ -42,7 +42,11 @@ export function openProvider(item: any = null) {
     modelSpecs: item?.models || [],
     models: item
       ? item.models
-          .map((m: any) => [m.id, m.name, m.contextWindow, m.maxTokens, m.reasoning].map((x) => x ?? "").join(" | "))
+          .map((m: any) => {
+            const extras = modelExtrasOf(m);
+            const fields = [m.id, m.name, m.contextWindow, m.maxTokens, m.reasoning].map((x) => x ?? "");
+            return [...fields, ...(extras ? [JSON.stringify(extras)] : [])].join(" | ");
+          })
           .join("\n")
       : "",
     validate: true,
@@ -63,6 +67,41 @@ function closeProvider() {
   provider.draft.key = "";
   redraw();
 }
+const MODEL_EXTRAS_KEYS = [
+  "input",
+  "output",
+  "cacheRead",
+  "cacheWrite",
+  "modalities",
+  "compat",
+  "thinkingLevelMap",
+] as const;
+function modelExtrasOf(model: Record<string, unknown>): Record<string, unknown> | null {
+  const extras = Object.fromEntries(
+    MODEL_EXTRAS_KEYS.filter((key) => model[key] != null).map((key) => [key, model[key]]),
+  );
+  return Object.keys(extras).length ? extras : null;
+}
+function parseModelExtras(raw: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("Model extras must be a JSON object: " + raw);
+  const given = parsed as Record<string, unknown>;
+  const extras: Record<string, unknown> = {};
+  for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
+    if (given[key] != null) extras[key] = Number(given[key]);
+  }
+  if (given.reasoning != null) extras.reasoning = Boolean(given.reasoning);
+  for (const key of ["modalities", "compat", "thinkingLevelMap"]) {
+    if (given[key] != null) extras[key] = given[key];
+  }
+  return extras;
+}
 export function providerBody() {
   const d = provider.draft;
   const models = d.models
@@ -70,7 +109,9 @@ export function providerBody() {
     .map((l: string) => l.trim())
     .filter(Boolean)
     .map((l: string) => {
-      const [id, name, contextWindow, maxTokens, reasoning] = l.split("|").map((p) => p.trim());
+      const [id, name, contextWindow, maxTokens, fifth = "", ...rest] = l.split("|").map((p) => p.trim());
+      const reasoning = fifth.startsWith("{") ? "" : fifth;
+      const extras = (fifth.startsWith("{") ? [fifth, ...rest] : rest).join("|").trim();
       const capability = reasoning === "true" || reasoning === "false" ? reasoning === "true" : reasoning || undefined;
       return {
         ...d.modelSpecs?.find((model: any) => model.id === id),
@@ -79,6 +120,9 @@ export function providerBody() {
         contextWindow: contextWindow ? Number(contextWindow) : undefined,
         maxTokens: maxTokens ? Number(maxTokens) : undefined,
         reasoning: capability,
+        ...(extras
+          ? { ...Object.fromEntries(MODEL_EXTRAS_KEYS.map((key) => [key, undefined])), ...parseModelExtras(extras) }
+          : {}),
       };
     });
   return {
@@ -92,7 +136,15 @@ export function providerBody() {
 }
 async function saveProvider() {
   if (provider.saving) return;
-  const body = providerBody();
+  let body: ReturnType<typeof providerBody>;
+  try {
+    body = providerBody();
+  } catch (error) {
+    provider.message = error instanceof Error ? error.message : "Check the model lines.";
+    provider.error = true;
+    redraw();
+    return;
+  }
   const id = provider.draft.id.trim();
   if (!id || !body.name || !body.baseUrl || !body.models.length) {
     provider.message = "Provider id, name, base URL, and at least one model are required.";
@@ -262,13 +314,14 @@ function template() {
         /></label>
         <label class="custom-provider-models"
           >Models
-          <span class="label-detail">one per line: id | name | context | max tokens | reasoning (true/false)</span
+          <span class="label-detail"
+            >one per line: id | name | context | max tokens | reasoning (true/false) | extras JSON ({} clears)</span
           ><textarea
             id="custom-provider-models"
             .value=${provider.draft.models || ""}
             @input=${(e: Event) => changeProvider("models", (e.target as HTMLInputElement).value)}
             rows="4"
-            placeholder="deepseek-chat | DeepSeek V3.2 | 128000 | 8192 | true"
+            placeholder=${'deepseek-chat | DeepSeek V3.2 | 128000 | 8192 | true | {"input":0.28,"output":0.42}'}
           ></textarea>
         </label>
         <label class="inline custom-provider-validation"

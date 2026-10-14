@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatMessageTime } from "../src/message-time.ts";
+import { formatMessageTime, messageTimeDetail } from "../src/message-time.ts";
 
 const now = new Date(2026, 8, 21, 19, 13).getTime();
 const clock = (date: Date) => date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -40,4 +40,12 @@ test("weekday window uses calendar days across daylight saving changes", () => {
 
 test("invalid timestamps render no label", () => {
   for (const ms of [NaN, Infinity, -Infinity]) assert.equal(formatMessageTime(ms, now), "");
+});
+
+test("a message time carries a full date for hovering and a machine-readable instant", () => {
+  const date = new Date(2026, 8, 20, 9, 5);
+  const detail = messageTimeDetail(date.getTime());
+  assert.equal(detail?.iso, date.toISOString());
+  assert.match(detail?.title ?? "", /2026/);
+  assert.equal(messageTimeDetail(NaN), null);
 });

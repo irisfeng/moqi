@@ -22,7 +22,7 @@ function isMembershipManaged(scopeId: ScopeId): boolean {
 }
 
 export interface AclStore {
-  grant(g: Grant, authoredBy?: string): Promise<void>;
+  grant(g: Grant, authoredBy?: string, sourceRunId?: string): Promise<void>;
   revoke(
     ownerScopeId: ScopeId,
     ref: string,
@@ -70,7 +70,7 @@ export interface AclStoreOptions {
 
 export interface GrantPersistence {
   all(): Promise<Grant[]>;
-  put(g: Grant): Promise<void>;
+  put(g: Grant, sourceRunId?: string): Promise<void>;
   remove(g: Grant): Promise<void>;
   replaceForResourceIfCurrent(
     ownerScopeId: ScopeId,
@@ -174,12 +174,12 @@ export function createAclStore(
     return true;
   }
   return {
-    async grant(g, authoredBy) {
+    async grant(g, authoredBy, sourceRunId) {
       if (!(await canManage(g.ownerScopeId, g.grantedBy, authoredBy))) {
         throw new Error("only a manager of this scope may grant access (no transitive re-share)");
       }
       await validateFileGrant(g);
-      await persist.put(g);
+      await persist.put(g, sourceRunId);
     },
     async revoke(ownerScopeId, ref, granteeScopeId, revokedBy, authoredBy) {
       if (!(await canManage(ownerScopeId, revokedBy, authoredBy))) {

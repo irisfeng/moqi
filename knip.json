@@ -34,6 +34,12 @@
         "superserve/templates/qm-agent.ts",
         "superserve/templates/verify-qm-agent.ts",
         "docs/qa/resource-search-demo.mjs",
+        "deploy/layers/qm-cn/providers/import.mjs",
+        "deploy/layers/qm-cn/providers/provider-key-env.mjs",
+        "deploy/layers/qm-cn/scripts/provider-smoke.mjs",
+        "deploy/layers/qm-cn/scripts/turn-probe.mjs",
+        "deploy/layers/qm-cn/scripts/mcp-register.mjs",
+        "deploy/layers/qm-cn/scripts/apply-webui-home.mjs",
         "src/deploy/vendor/devbar.js"
       ]
     },
@@ -51,6 +57,9 @@
         "src/lazy-hljs.ts",
         "src/hljs-lang-stub.ts",
         "test/**/*.test.ts",
+        "src/scenario-cards.ts",
+        "src/project-collaboration.ts",
+        "src/mobile-workspace.ts",
         "src/app-devbar.ts"
       ],
       "ignoreDependencies": [

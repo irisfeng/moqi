@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { EnqueueInput, EnqueueResult, ReapEvent, Run, RunDeliveryState, RunStore } from "./run-store.ts";
-import { isTerminal, leaseLapsed, releasesDedupKey } from "./run-store.ts";
+import type {
+  EnqueueInput,
+  EnqueueResult,
+  ReapEvent,
+  Run,
+  RunDeliveryState,
+  RunOutcome,
+  RunStore,
+} from "./run-store.ts";
+import { isTerminal, leaseLapsed, releasesDedupKey, runOutcome } from "./run-store.ts";
 import type { LedgerBegin, ToolLedger } from "./tool-ledger.ts";
 
 export interface MemoryRuntime {
@@ -48,7 +56,15 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
   const store: RunStore = {
     ...(Number.isFinite(maxClaims) ? { maxClaims } : {}),
 
-    async enqueue({ sessionId, request, dedupKey, maxAttempts = 3 }: EnqueueInput): Promise<EnqueueResult> {
+    async enqueue({ sessionId, request, dedupKey, webBaseKey, maxAttempts = 3 }: EnqueueInput): Promise<EnqueueResult> {
+      if (webBaseKey) {
+        if (!dedupKey) throw new Error("web send requires a deduplication key");
+        const candidates = [...runs.values()].filter(
+          (run) => run.dedupKey === webBaseKey || run.dedupKey?.startsWith(`${webBaseKey}:project-`),
+        );
+        if (candidates.length)
+          return { run: candidates[0]!, deduped: true, ...(candidates.length > 1 ? { ambiguous: true } : {}) };
+      }
       if (dedupKey) {
         const existingId = byKey.get(dedupKey);
         if (existingId) {
@@ -78,6 +94,12 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       runs.set(run.id, run);
       if (dedupKey) byKey.set(dedupKey, run.id);
       return { run, deduped: false };
+    },
+
+    async findByDedupKeyPrefix(prefix, limit) {
+      return [...runs.values()]
+        .filter((run) => run.dedupKey?.startsWith(prefix))
+        .slice(0, Math.max(1, Math.min(limit, 3)));
     },
 
     async claim(workerId, ttlMs) {
@@ -177,6 +199,15 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
           .sort((a, b) => b.createdAt - a.createdAt)
           .at(0) ?? null
       );
+    },
+    async latestOutcomes(threadRefs) {
+      const outcomes = new Map<string, RunOutcome>();
+      for (const threadRef of new Set(threadRefs)) {
+        const latest = await store.latestForThread(threadRef);
+        const outcome = latest ? runOutcome(latest) : null;
+        if (outcome) outcomes.set(threadRef, outcome);
+      }
+      return outcomes;
     },
     async pendingReturns(limit = 100, afterId = "") {
       const now = Date.now();

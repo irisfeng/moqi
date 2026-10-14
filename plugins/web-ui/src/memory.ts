@@ -1,7 +1,7 @@
 import { html, nothing, render } from "lit";
 import { Clock3, Pencil, Search, Trash2 } from "lucide";
 import { api, ApiError } from "./core-bridge";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error.ts";
 import { icon } from "./ui";
 import { appState, replacePanePreservingFocus } from "./shell";
 import { scopedSession, scopedViewTopbar } from "./session-scope";

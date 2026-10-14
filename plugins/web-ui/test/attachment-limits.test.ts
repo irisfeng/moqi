@@ -34,8 +34,8 @@ test("the client limits mirror core's MAX_BLOB_BYTES and MAX_INBOUND_FILES", () 
   assert.match(blobTransfer, /export const MAX_BLOB_BYTES = 1_000_000_000;/);
   assert.equal(MAX_ATTACHMENT_BYTES, 1_000_000_000);
   const attachments = readFileSync(new URL("../../../src/core/attachments.ts", import.meta.url), "utf8");
-  assert.match(attachments, /export const MAX_INBOUND_FILES = 10;/);
-  assert.equal(MAX_FILES_PER_MESSAGE, 10);
+  assert.match(attachments, /export const MAX_INBOUND_FILES = 20;/);
+  assert.equal(MAX_FILES_PER_MESSAGE, 20);
 });
 
 test("an oversize attachment is skipped before any bytes go out", async () => {
@@ -140,8 +140,8 @@ test("queued turns carry the staged attachments; attachment-only queues are real
   assert.match(fn, /const staged = composerState\.attachments;/);
   assert.match(fn, /if \(\(!text && !staged\.length\) \|\| !threadRef\) return;/);
   assert.match(fn, /await uploadAttachments\(staged\)/);
-  assert.match(fn, /enqueueTurn\(agent, threadRef, text, uploaded, queuedFilesKey\(sendable\)\)/);
-  assert.match(bridge, /attachments: CoreAttachment\[\] = \[\],\n\): Promise<QueuedRun>/);
+  assert.match(fn, /enqueueTurn\(agent, threadRef, text, uploaded, queuedFilesKey\(sendable\), quote \?\? undefined\)/);
+  assert.match(bridge, /attachments: CoreAttachment\[\] = \[\],\n {2}quote\?: MessageQuote,\n\): Promise<QueuedRun>/);
 });
 
 test("Stop pressed before the run id arrives still stops core's run", () => {

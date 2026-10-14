@@ -38,6 +38,8 @@ export interface AuthConfig {
   codeTtlS: number;
   accessTtlS: number;
   requestTtlS: number;
+  loginMode: "email" | "password";
+  allowInsecureHttp: boolean;
   sendWindowS: number;
   sendLimitPerEmail: number;
   sendLimitPerIp: number;
@@ -120,6 +122,8 @@ export function readConfig(env: NodeJS.ProcessEnv): AuthConfig {
     codeTtlS: numberFrom(env.AUTH_CODE_TTL_S, 120),
     accessTtlS: numberFrom(env.AUTH_ACCESS_TTL_S, 120),
     requestTtlS: numberFrom(env.AUTH_REQUEST_TTL_S, 900),
+    loginMode: env.AUTH_LOGIN_MODE?.trim() === "password" ? "password" : "email",
+    allowInsecureHttp: env.AUTH_ALLOW_INSECURE_HTTP === "1" || env.AUTH_ALLOW_INSECURE_HTTP === "true",
     sendWindowS: numberFrom(env.AUTH_SEND_WINDOW_S, 900),
     sendLimitPerEmail: numberFrom(env.AUTH_SEND_LIMIT_PER_EMAIL, 5),
     sendLimitPerIp: numberFrom(env.AUTH_SEND_LIMIT_PER_IP, 20),
@@ -162,11 +166,16 @@ export function parsePasswordUsers(raw: string | undefined): { users: Map<string
   return { users, problems };
 }
 
+export function corePasswords(cfg: AuthConfig): boolean {
+  return cfg.loginMode === "password";
+}
+
 export function passwordConfigured(cfg: AuthConfig): boolean {
-  return cfg.passwordUsers.size > 0;
+  return corePasswords(cfg) || cfg.passwordUsers.size > 0;
 }
 
 export function emailConfigured(cfg: AuthConfig): boolean {
+  if (corePasswords(cfg)) return false;
   const credentials =
     cfg.transport === "resend" ? [cfg.resendApiKey] : [cfg.smtp.host, cfg.smtp.username, cfg.smtp.password];
   return [cfg.emailFrom, ...credentials].every((value) => Boolean(value.trim()));
@@ -191,8 +200,9 @@ export function bootProblems(cfg: AuthConfig, isProd: boolean): string[] {
     if (problem) problems.push(problem);
   };
 
-  push(httpsUrlProblem("AUTH_ISSUER", cfg.issuer, isProd));
-  push(httpsUrlProblem("AUTH_REDIRECT_URI", cfg.redirectUri, isProd));
+  const requireHttps = isProd && !cfg.allowInsecureHttp;
+  push(httpsUrlProblem("AUTH_ISSUER", cfg.issuer, requireHttps));
+  push(httpsUrlProblem("AUTH_REDIRECT_URI", cfg.redirectUri, requireHttps));
   if (isMissingOrPlaceholder(cfg.clientId)) problems.push("AUTH_CLIENT_ID is required and may not be a placeholder");
   if (isMissingOrPlaceholder(cfg.clientSecret))
     problems.push("AUTH_CLIENT_SECRET is required and may not be a placeholder");

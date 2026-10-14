@@ -6,6 +6,8 @@ import type { Destination, SurfaceContextRequest, SurfaceContextResult } from ".
 import { reportFailureAs } from "../util/errors.ts";
 import { adminCronHistoryUrl } from "../util/admin-links.ts";
 import { createMemoryMap } from "../persistence/durable-map.ts";
+import { createMemoryAdvisoryLock } from "../persistence/advisory-lock.ts";
+import { createMemoryCronFireReadStore, cronFireVersion } from "../cron/fire-read-store.ts";
 import { randomUUID } from "node:crypto";
 import {
   reachEnqueue,
@@ -26,7 +28,7 @@ import { assertCronRuntime } from "../cron/runtime.ts";
 import type { Cron } from "../types.ts";
 import { validateUserSchedule } from "../cron/schedule.ts";
 
-import type { App, AppDeps, ReachNowResult } from "./app-types.ts";
+import type { App, AppDeps, DirectorySyncBatch, ReachNowResult } from "./app-types.ts";
 import { CONTEXT_REQUEST_EXPIRY_MS } from "./app-types.ts";
 import type { AppHelpers } from "./app-helpers.ts";
 import type { AmbientHelpers } from "./app-ambient.ts";
@@ -74,6 +76,10 @@ export function createMessagingMethods(
   | "listCronFires"
   | "cronFiresByThreadRefs"
   | "latestCronFireForThread"
+  | "getCronRuns"
+  | "getCronRun"
+  | "markCronRunRead"
+  | "cronUnreadCounts"
   | "setCronDestination"
   | "setCronRuntime"
   | "setCronRecipientConsent"
@@ -131,6 +137,46 @@ export function createMessagingMethods(
   const contextRequests = deps.contextRequests ?? createMemoryMap<SurfaceContextRequest>();
   const contextRequestListeners = new Set<(request: SurfaceContextRequest) => void>();
   const contextRequestTokens = new Map<string, string>();
+  const directorySyncJournal = deps.directorySyncJournal ?? createMemoryMap<DirectorySyncBatch>();
+  const directorySyncLock = deps.advisoryLock ?? createMemoryAdvisoryLock();
+  const cronFireReads = deps.cronFireReads ?? createMemoryCronFireReadStore();
+
+  async function cronFireReadsFor(ids: readonly string[], viewer: string): Promise<Map<string, Map<string, number>>> {
+    const byCron = new Map<string, Map<string, number>>(ids.map((id) => [id, new Map()]));
+    for (const read of await cronFireReads.list(ids, personKey(viewer)))
+      byCron.get(read.cronId)?.set(`${read.fireKey}\n${read.version}`, read.readAt);
+    return byCron;
+  }
+
+  async function cronFire(id: string, fireKey: string) {
+    const fire = (await deps.crons.listFires(id)).runs.find((run) => run.fireKey === fireKey);
+    return fire ? { ...fire, version: cronFireVersion(fire) } : null;
+  }
+
+  async function completeDirectorySync(key: ScopeId): Promise<boolean> {
+    const pending = await directorySyncJournal.get(key);
+    if (!pending) return false;
+    const applied = await deps.directory.replace(pending.members, pending.syncedAt);
+    if (applied) {
+      const present = pending.members.filter((m) => m.type === "internal").map((m) => m.principalId);
+      const outcome = await deps.identity.recordDirectorySync(pending.removedIds, present);
+      for (const [action, ids] of [
+        ["principal.deactivate", outcome.deactivated],
+        ["principal.reactivate", outcome.reactivated],
+      ] as const) {
+        for (const id of ids)
+          deps.auditLog.record({
+            at: Date.now(),
+            principalId: id,
+            action,
+            resource: "directory-sync",
+            scopeLabel: key,
+          });
+      }
+    }
+    await directorySyncJournal.delete(key);
+    return applied;
+  }
   // Principals identity knows about that the Slack directory never sees: the email
   // allow-list, invited external users, and anyone who has signed in. On a Slack-less
   // deployment these are the only members there are.
@@ -203,6 +249,36 @@ export function createMessagingMethods(
     },
     latestCronFireForThread(id, threadRef) {
       return deps.crons.latestFireForThread(id, threadRef);
+    },
+    async getCronRuns(id, opts, viewer) {
+      const [page, reads] = await Promise.all([deps.crons.listFires(id, opts), cronFireReadsFor([id], viewer)]);
+      return {
+        runs: page.runs.map((run) => {
+          const readAt = reads.get(id)?.get(`${run.fireKey}\n${cronFireVersion(run)}`);
+          return readAt === undefined ? run : { ...run, readAt };
+        }),
+        total: page.total,
+      };
+    },
+    getCronRun(id, fireKey) {
+      return cronFire(id, fireKey);
+    },
+    async markCronRunRead(id, fireKey, viewer, version) {
+      const fire = await cronFire(id, fireKey);
+      if (!fire || fire.version !== version) return false;
+      await cronFireReads.mark(personKey(viewer), { cronId: id, fireKey, version, readAt: Date.now() });
+      return true;
+    },
+    async cronUnreadCounts(ids, viewer) {
+      const reads = await cronFireReadsFor(ids, viewer);
+      const counts = await Promise.all(
+        ids.map(async (id) => {
+          const { runs } = await deps.crons.listFires(id);
+          const read = reads.get(id);
+          return [id, runs.filter((run) => !read?.has(`${run.fireKey}\n${cronFireVersion(run)}`)).length] as const;
+        }),
+      );
+      return Object.fromEntries(counts);
     },
     listCrons() {
       return deps.crons.list();
@@ -455,32 +531,15 @@ export function createMessagingMethods(
     },
 
     async upsertDirectory(members, syncedAt) {
-      const previous = await deps.directory.list();
-      if (!(await deps.directory.replace(members, syncedAt))) return false;
-      const present = members.filter((m) => m.type === "internal").map((m) => m.principalId);
-      const presentSet = new Set(present);
-      const removed = previous.map((m) => m.principalId).filter((id) => !presentSet.has(id));
-      const outcome = await deps.identity.recordDirectorySync(removed, present);
-      const orgScope = scopeId("org", orgIdOf());
-      for (const id of outcome.deactivated) {
-        deps.auditLog.record({
-          at: Date.now(),
-          principalId: id,
-          action: "principal.deactivate",
-          resource: "directory-sync",
-          scopeLabel: orgScope,
-        });
-      }
-      for (const id of outcome.reactivated) {
-        deps.auditLog.record({
-          at: Date.now(),
-          principalId: id,
-          action: "principal.reactivate",
-          resource: "directory-sync",
-          scopeLabel: orgScope,
-        });
-      }
-      return true;
+      const key = scopeId("org", orgIdOf());
+      return directorySyncLock.withLock("directory-identity-sync:" + key, async () => {
+        await completeDirectorySync(key);
+        const previous = await deps.directory.list();
+        const present = new Set(members.filter((m) => m.type === "internal").map((m) => personKey(m.principalId)));
+        const removedIds = previous.map((m) => m.principalId).filter((id) => !present.has(personKey(id)));
+        await directorySyncJournal.put(key, { members, removedIds, ...(syncedAt === undefined ? {} : { syncedAt }) });
+        return completeDirectorySync(key);
+      });
     },
     async upsertChannels(channels, channelMembers, syncedAt, channelRosterIds, revocations, partial) {
       const applied = await deps.directory.replaceChannels(

@@ -18,11 +18,12 @@ import {
   reconcileLoadout,
   upsertLoadout,
   effortLevelsForHarness,
+  equivalentOfferedEffort,
   compatibleHarnessOptions,
   type LoadoutEntry,
 } from "./composer-loadout";
 import { modelSupportsFastMode } from "./pi-models";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error.ts";
 
 const INHERIT = "";
 
@@ -112,12 +113,13 @@ function effortLevelsFor(
 }
 
 function selectedEffort(config: RuntimeConfig): string {
+  const model = optionsFor(config).find(
+    (option) => option.value === `${config.effective.harnessId}:${config.effective.modelId}`,
+  )?.model;
   return (
+    equivalentOfferedEffort(config.effective.harnessId, model, config.effective.effortLevel) ??
     config.effective.effortLevel ??
-    defaultEffortForModel(
-      optionsFor(config).find((option) => option.value === `${config.effective.harnessId}:${config.effective.modelId}`)
-        ?.model,
-    )
+    defaultEffortForModel(model)
   );
 }
 
@@ -191,7 +193,7 @@ function contextPicker(scopeId: string) {
     const levels = effortLevelsForHarness(option.harnessId, option.model);
     const normalized = {
       ...entry,
-      effort: levels.some((level) => level.value === entry.effort) ? entry.effort : levels[0]!.value,
+      effort: equivalentOfferedEffort(option.harnessId, option.model, entry.effort) ?? levels[0]!.value,
       fast: entry.fast && harnessSupportsFastMode(option.harnessId) && modelSupportsFastMode(scopeId, option.model.id),
     };
     void choose(scopeId, normalized.value, normalized.effort, normalized.fast);

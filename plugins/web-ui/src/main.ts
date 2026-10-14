@@ -1,5 +1,11 @@
 import "dockview-core/dist/styles/dockview.css";
 import "./shell.css";
+import "./shell-extras.css";
+import "./home-shell.css";
+import "./growth.css";
+import "./home-chat.css";
+import "./scenario-cards.css";
+import { observeMobileViewport } from "./mobile-viewport";
 import { bootSafely, closeUserMenu } from "./shell";
 import { registerChatSearchHotkey } from "./search";
 import { closeFormMenus } from "./ui";
@@ -102,5 +108,6 @@ document.addEventListener(
   { passive: true },
 );
 
+observeMobileViewport();
 registerChatSearchHotkey();
 void bootSafely();

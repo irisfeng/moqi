@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
+import { createHash } from "node:crypto";
 
 // The scenario Bugbot caught on this feature: a surface instance that saw only the QUEUE
 // submission holds the pending run in its local index and nothing else. Core's durable answer
@@ -22,10 +23,10 @@ const core = createServer((req: IncomingMessage, res) => {
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   };
-  if (req.method === "POST" && u.pathname === "/v1/turns") {
+  if (req.method === "POST" && u.pathname === "/v2/turns") {
     let body = "";
     req.on("data", (c) => (body += c));
-    return void req.on("end", () => reply(200, { status: "queued", runId: "run-queued" }));
+    return void req.on("end", () => reply(202, { status: "queued", runId: "run-queued", sendProtocol: 2 }));
   }
   if (req.method === "GET" && u.pathname === "/v1/runs")
     return reply(200, { runId: durableHead, ...(queued.length ? { queued } : {}) });
@@ -61,12 +62,17 @@ test.after(() => {
 test("a pending run this instance remembered never masks core's running head", async () => {
   // Seed the instance-local index with ONLY the queued (pending) run — exactly what an instance
   // that handled the queue submission but not the original send looks like.
-  const seed = await fetch(`${base}/api/turn`, {
+  const logical = { text: "after this", threadRef: THREAD, expectedUser: "alice" };
+  const seed = await fetch(`${base}/api/turn/v2`, {
     method: "POST",
     headers: IDENTITY,
-    body: JSON.stringify({ text: "after this", threadRef: THREAD }),
+    body: JSON.stringify({
+      ...logical,
+      idempotencyKey: "seed-queued",
+      clientRequestFingerprint: createHash("sha256").update(JSON.stringify(logical)).digest("hex"),
+    }),
   });
-  assert.equal(seed.status, 200);
+  assert.equal(seed.status, 202);
   assert.equal(((await seed.json()) as { runId?: string }).runId, "run-queued");
 
   const r = await fetch(`${base}/api/runs/active?threadRef=${encodeURIComponent(THREAD)}`, { headers: IDENTITY });

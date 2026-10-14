@@ -11,6 +11,7 @@ import { jsonbStringify } from "../persistence/durable-map.ts";
 import { jsonbSafeStringify, pgTextSafe } from "../util/text.ts";
 import { reportFailure, reportFailureAs } from "../util/errors.ts";
 import type { Session, SessionEntry, SessionType, ScopeId } from "../types.ts";
+import { requireEntryArtifacts } from "../persistence/artifact-resource.ts";
 import type {
   NewSessionPin,
   SessionPin,
@@ -751,6 +752,32 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         ],
       },
       {
+        id: "zz-qm-cn/sessions/0001-artifact-ids",
+        statements: [
+          `CREATE OR REPLACE FUNCTION session_artifact_ids(t text) RETURNS text[]
+             LANGUAGE plpgsql IMMUTABLE PARALLEL UNSAFE AS $artifact_ids$
+             DECLARE body json;
+             BEGIN
+               body := safe_json(replace(t, '\\u0000', ''));
+               IF json_typeof(body->'attachments') = 'array' THEN
+                 RETURN ARRAY(SELECT a->>'artifactId' FROM json_array_elements(body->'attachments') a
+                              WHERE json_typeof(a->'artifactId') = 'string');
+               END IF;
+               IF body IS NOT NULL THEN RETURN ARRAY[]::text[]; END IF;
+               RETURN ARRAY(SELECT m[1] FROM regexp_matches(t, '[0-9a-f]{32}', 'g') m);
+             EXCEPTION WHEN others THEN
+               RETURN ARRAY(SELECT m[1] FROM regexp_matches(t, '[0-9a-f]{32}', 'g') m);
+             END $artifact_ids$`,
+        ],
+      },
+      {
+        id: "zz-qm-cn/sessions/0002-artifact-ids-index",
+        statements: [
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS session_entries_artifact_ids
+             ON session_entries USING GIN (session_artifact_ids(payload))`,
+        ],
+      },
+      {
         id: "sessions/store/0022-spend-days",
         statements: [
           `SET LOCAL lock_timeout = '3s'`,
@@ -1129,6 +1156,10 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         );
         const firstUser = userTurns[0];
         const lastUser = userTurns[userTurns.length - 1];
+        await requireEntryArtifacts(
+          client,
+          full.map((entry) => entry.payload),
+        );
         await client.query(
           `INSERT INTO session_entries(session_id, seq, parent_seq, type, payload, scope_label, created_at)
            SELECT $1, e.seq, e.parent_seq, e.type, e.payload, e.scope_label, e.created_at

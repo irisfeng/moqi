@@ -92,9 +92,9 @@ async function signIn(cookie = "") {
   assert.equal(login.status, 302);
   const tmpCookie = login.headers
     .getSetCookie()
-    .find((c) => c.startsWith("portal_oidc_tmp="))!
+    .find((c) => c.startsWith("portal_oidc_tmp_") && !c.includes("Max-Age=0"))!
     .split(";")[0]!;
-  const tmp = open(readCookie(tmpCookie, "portal_oidc_tmp"), tmpKey)!;
+  const tmp = open(readCookie(tmpCookie, tmpCookie.slice(0, tmpCookie.indexOf("="))), tmpKey)!;
   nonce = tmp.nonce as string;
   return fetch(`${base}/auth/callback?code=test&state=${tmp.state}`, {
     headers: { cookie: `${tmpCookie}; ${cookie}` },

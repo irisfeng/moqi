@@ -22,7 +22,13 @@ import {
 } from "../auth/source-auth.ts";
 import { verifyCapabilityToken, CONTROL_PLANE_AUD, type CapabilityClaims } from "../auth/capability-token.ts";
 import { verifyPortalIdentity, PORTAL_IDENTITY_HEADER, type PortalIdentity } from "../auth/portal-identity.ts";
-import { isUserScoped, userScopedField, assertedActor, isUnclassifiedWrite } from "./user-scoped-routes.ts";
+import {
+  isUserScoped,
+  isSystemRouted,
+  userScopedField,
+  assertedActor,
+  isUnclassifiedWrite,
+} from "./user-scoped-routes.ts";
 import { errMessage } from "../util/errors.ts";
 import { parseScopeId, scopeId } from "../types.ts";
 import { canonicalPayload } from "../../plugins/chassis/src/source-auth-sign.ts";
@@ -337,12 +343,13 @@ async function gate(
     if (!isPublicRoute && requirePortalIdentity) {
       const webTurn =
         method === "POST" &&
-        pathname === "/v1/turns" &&
+        (pathname === "/v1/turns" || pathname === "/v2/turns" || pathname === "/v1/web-proactive-opener") &&
         body !== null &&
         typeof body === "object" &&
         (body as { surface?: unknown }).surface === "web";
+      const serverOpsCall = !token && isSystemRouted(method, pathname);
       const needsActor =
-        isUserScoped(method, pathname) ||
+        (isUserScoped(method, pathname) && !serverOpsCall) ||
         webTurn ||
         pathname.startsWith("/v1/admin/") ||
         isUnclassifiedWrite(method, pathname);

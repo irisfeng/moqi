@@ -1141,7 +1141,11 @@ export function stableCwd(prefix: string): string {
   return join(tmpdir(), `${prefix}-cwd`);
 }
 
-async function createIsolatedResources(prefix: string, systemPrompt: string): Promise<IsolatedResources> {
+async function createIsolatedResources(
+  prefix: string,
+  systemPrompt: string,
+  settings: Parameters<typeof SettingsManager.inMemory>[0] = {},
+): Promise<IsolatedResources> {
   let cwd = stableCwd(prefix);
   let ephemeralCwd: string | undefined;
   try {
@@ -1153,7 +1157,7 @@ async function createIsolatedResources(prefix: string, systemPrompt: string): Pr
     ephemeralCwd = cwd;
   }
   const agentDir = mkdtempSync(join(tmpdir(), `${prefix}-agent-`));
-  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
+  const settingsManager = SettingsManager.inMemory(settings, { projectTrusted: false });
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -1329,12 +1333,20 @@ export async function oneShot(
   keys: ProviderKeys | string,
   systemPrompt: string,
   prompt: string,
-  opts?: { signal?: AbortSignal; modelGateway?: ModelGatewayTransportConfig; thinkingLevel?: LegacyThinkingLevel },
+  opts?: {
+    signal?: AbortSignal;
+    modelGateway?: ModelGatewayTransportConfig;
+    thinkingLevel?: LegacyThinkingLevel;
+    retry?: false;
+  },
 ): Promise<string | undefined> {
   const modelRuntime = await buildModelRuntime(keys, opts?.modelGateway);
   const { resourceLoader, settingsManager, cwd, agentDir, ephemeralCwd } = await createIsolatedResources(
     prefix,
     systemPrompt,
+    opts?.retry === false
+      ? { retry: { enabled: false, provider: { maxRetries: 0 } }, compaction: { enabled: false } }
+      : {},
   );
   try {
     const { session } = await createAgentSession({

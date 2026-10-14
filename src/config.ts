@@ -54,6 +54,7 @@ export interface Config {
   productAnalytics?: { apiKey: string; host?: string };
   slackContextSource?: SlackContextSource;
   suggestedActivitiesEnabled?: boolean;
+  personalModelAccountsEnabled?: boolean;
   suggestedActivitiesContext?: string;
   swarmsEnabled?: boolean;
   swarmDefaults?: SwarmSettings;
@@ -115,6 +116,7 @@ export interface Config {
   budgetUsdPerWindow?: number;
   orgBudgetUsdPerWindow?: number;
   budgetWindowMs: number;
+  budgetExemptPrincipals?: string[];
   maxContextTokens?: number;
   execTimeoutDefaultMs: number;
   execTimeoutMaxMs: number;
@@ -334,11 +336,15 @@ interface LocalSandboxEnv {
   memoryMb?: number;
   coreContainer?: string;
   defaultTimeoutSec?: number;
+  apiHost?: string;
+  bindHost?: string;
 }
 
 function localSandboxEnv(env: NodeJS.ProcessEnv): LocalSandboxEnv {
   return {
     ...(env.LOCAL_SANDBOX_IMAGE ? { image: env.LOCAL_SANDBOX_IMAGE } : {}),
+    ...(env.LOCAL_SANDBOX_API_HOST ? { apiHost: env.LOCAL_SANDBOX_API_HOST } : {}),
+    ...(env.LOCAL_SANDBOX_BIND_HOST ? { bindHost: env.LOCAL_SANDBOX_BIND_HOST } : {}),
     ...(env.LOCAL_SANDBOX_DOCKER_BIN ? { dockerBin: env.LOCAL_SANDBOX_DOCKER_BIN } : {}),
     ...(numEnvStrict("LOCAL_SANDBOX_CPUS", env.LOCAL_SANDBOX_CPUS) !== undefined
       ? { cpus: numEnvStrict("LOCAL_SANDBOX_CPUS", env.LOCAL_SANDBOX_CPUS) }
@@ -1008,12 +1014,23 @@ function numEnvStrict(name: string, value: string | undefined): number | undefin
   return parsed;
 }
 
+function orgThemeFromEnv(raw: string | undefined): unknown {
+  if (!raw?.trim()) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error('ORG_BRAND_THEME must be JSON of the form {"light":{...},"dark":{...}}');
+  }
+}
+
 function orgBrandingFromEnv(env: NodeJS.ProcessEnv): Config["brandingDefault"] {
   return sanitizeBranding({
     accent: env.ORG_BRAND_ACCENT,
     mark: env.ORG_BRAND_MARK,
+    markUrl: env.ORG_BRAND_MARK_URL,
     selfLabel: env.ORG_BRAND_SELF_LABEL,
     orgName: env.ORG_BRAND_ORG_NAME,
+    theme: orgThemeFromEnv(env.ORG_BRAND_THEME),
   });
 }
 
@@ -1499,6 +1516,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const memoryProviderConfig = parseMemoryProviderConfig(env.MEMORY_PROVIDER_CONFIG, env);
   return {
     suggestedActivitiesEnabled: boolEnvStrict("SUGGESTED_ACTIVITIES_ENABLED", env.SUGGESTED_ACTIVITIES_ENABLED) ?? true,
+    personalModelAccountsEnabled:
+      boolEnvStrict("PERSONAL_MODEL_ACCOUNTS_ENABLED", env.PERSONAL_MODEL_ACCOUNTS_ENABLED) ?? true,
     ...(env.SUGGESTED_ACTIVITIES_CONTEXT
       ? { suggestedActivitiesContext: env.SUGGESTED_ACTIVITIES_CONTEXT.slice(0, 8000) }
       : {}),
@@ -1591,6 +1610,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ? { orgBudgetUsdPerWindow: numEnvStrict("ORG_BUDGET_USD_PER_WINDOW", env.ORG_BUDGET_USD_PER_WINDOW) }
       : {}),
     budgetWindowMs: numEnvStrict("BUDGET_WINDOW_MS", env.BUDGET_WINDOW_MS) ?? CONFIG_DEFAULTS.budgetWindowMs,
+    ...(env.BUDGET_EXEMPT_PRINCIPALS
+      ? {
+          budgetExemptPrincipals: env.BUDGET_EXEMPT_PRINCIPALS.split(",")
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean),
+        }
+      : {}),
     ...(numEnvStrict("MAX_CONTEXT_TOKENS", env.MAX_CONTEXT_TOKENS) !== undefined
       ? { maxContextTokens: numEnvStrict("MAX_CONTEXT_TOKENS", env.MAX_CONTEXT_TOKENS) }
       : {}),

@@ -9,5 +9,6 @@ deploy/stacks/.generated/
 deploy/helm/templates/
 
 .generated/
+plugins/admin/public/adoption.js
 
 src/deploy/vendor/

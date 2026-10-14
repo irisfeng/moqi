@@ -141,11 +141,13 @@ export class Onboarding {
       view = this.context.view();
     const selection = { provider: this.provider, model: this.model, apiKey: this.apiKey };
     void this.loadRegistry().catch(() => {});
-    const [models, slack, catalog, config] = await Promise.all([
+    void this.context.loadCustomProviders().catch(() => {});
+    const [models, slack, catalog, config, customs] = await Promise.all([
       this.context.api("GET", "/api/model-providers?catalog=cached"),
       this.context.api("GET", "/api/slack-installation"),
       this.context.api("GET", "/api/connector-catalog"),
       this.context.api("GET", "/api/scopes/" + encodeURIComponent(this.context.orgScope()) + "?view=onboarding"),
+      this.context.api("GET", "/api/custom-providers"),
     ]);
     if (token !== this.request || view !== this.context.view()) return;
     if (!models.ok || !slack.ok || !catalog.ok || !config.ok) {
@@ -170,7 +172,10 @@ export class Onboarding {
     const status = this.providers.find((row) => row.provider === provider);
     const harnessAuth = models.data.harnessAuth;
     const harnessReady = Boolean(harnessAuth && harnessAuth.provider === provider);
-    const ready = Boolean(baseModel) && (Boolean(status?.configured) || harnessReady);
+    const custom = customs.ok
+      ? (customs.data.providers || []).find((row: Data) => row.id === provider && !row.disabled)
+      : undefined;
+    const ready = Boolean(baseModel) && (Boolean(status?.configured) || harnessReady || Boolean(custom));
     let summary = "No base model is configured yet. Pick a provider and model below.";
     if (baseModel) {
       summary = baseModel + " cannot run until its " + this.label(provider) + " key is configured.";
@@ -178,6 +183,7 @@ export class Onboarding {
         summary = baseModel + " · authenticated by the " + harnessAuth.harnessId + " harness — no API key needed.";
       if (status?.configured)
         summary = baseModel + " · " + (status.source === "admin" ? "admin-managed key" : "deployment key");
+      if (custom) summary = baseModel + " · custom provider " + (custom.name || custom.id);
     }
     this.steps.model = { text: ready ? "Ready" : "Needs a key", tone: ready ? "ok" : "warn", summary };
     if (selection.provider === this.provider && selection.model === this.model && selection.apiKey === this.apiKey) {
@@ -247,7 +253,6 @@ export class Onboarding {
       );
       this.apiKey = "";
       await this.load();
-      await this.context.loadCustomProviders();
       this.providerMessage = selected.ok
         ? "Key and base model saved."
         : "Key saved, but the base model could not be changed.";
@@ -277,7 +282,6 @@ export class Onboarding {
       const response = await this.context.api("DELETE", "/api/model-providers/" + encodeURIComponent(provider));
       if (!response.ok) throw new Error(response.data?.message || "Could not disable this provider.");
       await this.load();
-      await this.context.loadCustomProviders();
       this.providerMessage = "Provider disabled.";
       this.providerTone = "ok";
     } catch (error) {

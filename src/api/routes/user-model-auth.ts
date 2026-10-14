@@ -24,8 +24,16 @@ function connectProvider(raw: unknown): ModelProvider | null {
 async function getStatus(ctx: ApiCtx): Promise<void> {
   const principal = caller(ctx);
   if (!principal) return sendJson(ctx.res, 401, { error: "unauthorized" });
+  if (!ctx.deps.userModelCredentials)
+    return sendJson(ctx.res, 200, {
+      offered: false,
+      individualModelAuth: false,
+      required: false,
+      account: "company",
+      connections: [],
+    });
   const required = (await ctx.deps.config?.getIndividualModelAuthDurable()) ?? false;
-  const connections = (await ctx.deps.userModelCredentials?.connections(principal)) ?? [];
+  const connections = await ctx.deps.userModelCredentials.connections(principal);
   const individualModelAuth = (await ctx.deps.config?.getIndividualModelAuthDurable(principal)) ?? false;
   const account = (await ctx.deps.config?.getModelAccountDurable(principal)) ?? "company";
   return sendJson(ctx.res, 200, { individualModelAuth, required, account, connections });
@@ -108,6 +116,7 @@ const codexDeviceLogin = createCodexDeviceLogin();
 
 async function chatgptStart(ctx: ApiCtx): Promise<void> {
   if (!caller(ctx)) return sendJson(ctx.res, 401, { error: "unauthorized" });
+  if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
   try {
     const prompt = await codexDeviceLogin.start();
     return sendJson(ctx.res, 200, prompt);
@@ -141,6 +150,7 @@ async function chatgptPoll(ctx: ApiCtx): Promise<void> {
 
 async function claudeStart(ctx: ApiCtx): Promise<void> {
   if (!caller(ctx)) return sendJson(ctx.res, 401, { error: "unauthorized" });
+  if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
   return sendJson(ctx.res, 200, startClaudeLogin());
 }
 

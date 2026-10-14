@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createIdentityService, type DeactivationRecord } from "../src/identity/identity-service.ts";
 import type { ExternalMember } from "../src/identity/external-members.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { createLoginPasswordStore, type LoginPasswordRecord } from "../src/auth/login-password-store.ts";
 
 const id = createIdentityService();
 
@@ -156,4 +157,264 @@ test("an overridden principal classifies internal even when flagged guest or dea
   await svc.deactivate("U-CONTRACTOR");
   assert.equal(svc.classify("U-CONTRACTOR").type, "internal");
   assert.equal(svc.classify("U-OTHER", true).type, "guest");
+});
+
+test("revocation failure keeps deactivation durable and prevents reactivation until retry succeeds", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  let failing = true;
+  const svc = createIdentityService(backing, {
+    revokeSessions: async () => {
+      if (failing) throw new Error("revocation unavailable");
+    },
+  });
+  await assert.rejects(svc.deactivate("alice@example.test"), /revocation unavailable/);
+  assert.equal(svc.classify("alice@example.test").type, "guest");
+  assert.ok(await backing.get("alice@example.test"));
+  const reader = createIdentityService(backing);
+  await reader.hydrate();
+  assert.equal(reader.classify("alice@example.test").type, "guest");
+  await assert.rejects(svc.reactivate("alice@example.test"), /revocation unavailable/);
+  assert.ok(await backing.get("alice@example.test"));
+  assert.equal(svc.classify("alice@example.test").type, "guest");
+  failing = false;
+  await svc.reactivate("alice@example.test");
+  assert.equal(await backing.get("alice@example.test"), null);
+  assert.equal(svc.classify("alice@example.test").type, "internal");
+});
+
+test("reactivation revokes preexisting sessions written before lifecycle integration without changing the password", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const passwords = createLoginPasswordStore(createMemoryMap<LoginPasswordRecord>());
+  const principal = "legacy@example.test";
+  await passwords.putInitial({ id: principal, initialPassword: "fixture-initial", updatedBy: "fixture" });
+  await passwords.setNew(principal, "fixture-current", "fixture-initial");
+  const before = (await passwords.get(principal))!;
+  await createIdentityService(backing).deactivate(principal);
+  const restarted = createIdentityService(backing, { revokeSessions: (id) => passwords.revokeAllSessions(id) });
+  await restarted.hydrate();
+  await restarted.reactivate(principal.toUpperCase());
+  const after = (await passwords.get(principal))!;
+  assert.notEqual(after.version, before.version);
+  assert.equal(after.hash, before.hash);
+  assert.equal(after.forceChange, false);
+  assert.deepEqual(after.devices, []);
+  assert.equal((await passwords.verify(principal, "fixture-current")).status, "ok");
+  await restarted.deactivate("no-password@example.test");
+  await restarted.reactivate("no-password@example.test");
+  assert.equal(await passwords.get("no-password@example.test"), null);
+});
+
+test("a stale sibling directory sync cannot downgrade or reactivate a manual deactivation", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const manual = createIdentityService(backing);
+  const directory = createIdentityService(backing);
+  await directory.refresh();
+  await manual.deactivate("alice@example.test");
+  assert.equal(await directory.isActive("alice@example.test"), false);
+  await directory.recordDirectorySync(["alice@example.test"], []);
+  await directory.recordDirectorySync([], ["alice@example.test"]);
+  assert.equal((await backing.get("alice@example.test"))!.source, "manual");
+  assert.equal(await manual.isActive("alice@example.test"), false);
+});
+
+test("a manual deactivation arriving during directory reactivation wins the conditional delete", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const manual = createIdentityService(backing);
+  await manual.deactivate("alice@example.test", "directory-sync");
+  const started = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const directory = createIdentityService(backing, {
+    revokeSessions: async () => {
+      started.resolve();
+      await resume.promise;
+    },
+  });
+  const sync = directory.recordDirectorySync([], ["alice@example.test"]);
+  await started.promise;
+  await manual.deactivate("alice@example.test");
+  resume.resolve();
+  assert.deepEqual(await sync, { deactivated: [], reactivated: [] });
+  assert.equal((await backing.get("alice@example.test"))!.source, "manual");
+  assert.equal(directory.classify("alice@example.test").type, "guest");
+});
+
+for (const action of ["hydrate", "refresh"] as const) {
+  test(`an old ${action} snapshot cannot erase a completed local deactivation`, async () => {
+    const backing = createMemoryMap<DeactivationRecord>();
+    const started = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const svc = createIdentityService({
+      ...backing,
+      async all() {
+        const records = await backing.all();
+        started.resolve();
+        await resume.promise;
+        return records;
+      },
+    });
+    const reading = svc[action]();
+    await started.promise;
+    await svc.deactivate("alice@example.test");
+    resume.resolve();
+    await reading;
+    assert.equal(svc.classify("alice@example.test").type, "guest");
+    assert.ok(await backing.get("alice@example.test"));
+  });
+}
+
+test("deactivation retries a failed durable insertion instead of trusting its provisional cache", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  let fail = true;
+  const svc = createIdentityService({
+    ...backing,
+    async putIfAbsent(key, record) {
+      if (fail) throw new Error("database unavailable");
+      return backing.putIfAbsent(key, record);
+    },
+  });
+  await assert.rejects(svc.deactivate("alice@example.test"), /database unavailable/);
+  assert.equal(await backing.get("alice@example.test"), null);
+  fail = false;
+  await svc.deactivate("alice@example.test");
+  assert.equal(await createIdentityService(backing).isActive("alice@example.test"), false);
+});
+
+test("reactivating an already active principal does not revoke unrelated sessions", async () => {
+  let revocations = 0;
+  const svc = createIdentityService(undefined, {
+    revokeSessions: async () => {
+      revocations++;
+    },
+  });
+  await svc.reactivate("alice@example.test");
+  assert.equal(revocations, 0);
+});
+
+test("pending and failed deactivations remain blocked across principal and full-store reads", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const started = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  let fail = true;
+  const svc = createIdentityService({
+    ...backing,
+    async putIfAbsent(key, record) {
+      if (fail) {
+        started.resolve();
+        await resume.promise;
+        throw new Error("database unavailable");
+      }
+      return backing.putIfAbsent(key, record);
+    },
+  });
+  const writing = assert.rejects(svc.deactivate("alice@example.test"), /database unavailable/);
+  await started.promise;
+  assert.equal(await svc.isActive("alice@example.test"), false);
+  await svc.refresh();
+  assert.equal(svc.classify("alice@example.test").type, "guest");
+  resume.resolve();
+  await writing;
+  await svc.refresh();
+  assert.equal(await svc.isActive("alice@example.test"), false);
+  assert.equal(svc.classify("alice@example.test").type, "guest");
+  fail = false;
+  await svc.deactivate("alice@example.test");
+  await svc.reactivate("alice@example.test");
+  assert.equal(await svc.isActive("alice@example.test"), true);
+});
+
+test("a sign-in check observes a peer deactivation inside the refresh window", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const reader = createIdentityService(backing);
+  const writer = createIdentityService(backing);
+  await reader.refresh();
+  await writer.deactivate("alice@example.test");
+  await reader.refresh();
+  assert.equal(reader.classify("alice@example.test").type, "internal");
+  assert.equal(await reader.isActive("alice@example.test"), false);
+  assert.equal(reader.classify("alice@example.test").type, "guest");
+});
+
+test("reactivation clears a block left by a deactivation that never reached the store", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const svc = createIdentityService({
+    ...backing,
+    async putIfAbsent() {
+      throw new Error("database unavailable");
+    },
+  });
+  await assert.rejects(svc.deactivate("alice@example.test"), /database unavailable/);
+  assert.equal(await svc.isActive("alice@example.test"), false);
+  await svc.reactivate("alice@example.test");
+  assert.equal(await svc.isActive("alice@example.test"), true);
+});
+
+test("an overridden principal stays active for sign-in while deactivated", async () => {
+  const svc = createIdentityService(createMemoryMap<DeactivationRecord>(), {
+    isOverridden: (id) => id === "owner@example.test",
+  });
+  await svc.deactivate("owner@example.test");
+  assert.equal(await svc.isActive("owner@example.test"), true);
+});
+
+test("a precommit snapshot cannot unblock identity while session revocation is pending or failed", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const writeStarted = Promise.withResolvers<void>();
+  const writeResume = Promise.withResolvers<void>();
+  const readStarted = Promise.withResolvers<void>();
+  const readResume = Promise.withResolvers<void>();
+  const revokeStarted = Promise.withResolvers<void>();
+  const revokeResume = Promise.withResolvers<void>();
+  const svc = createIdentityService(
+    {
+      ...backing,
+      async putIfAbsent(key, record) {
+        writeStarted.resolve();
+        await writeResume.promise;
+        return backing.putIfAbsent(key, record);
+      },
+      async all() {
+        const snapshot = await backing.all();
+        readStarted.resolve();
+        await readResume.promise;
+        return snapshot;
+      },
+    },
+    {
+      revokeSessions: async () => {
+        revokeStarted.resolve();
+        await revokeResume.promise;
+        throw new Error("revocation unavailable");
+      },
+    },
+  );
+  const writing = assert.rejects(svc.deactivate("alice@example.test"), /revocation unavailable/);
+  await writeStarted.promise;
+  const reading = svc.refresh();
+  await readStarted.promise;
+  writeResume.resolve();
+  await revokeStarted.promise;
+  readResume.resolve();
+  await reading;
+  assert.ok(await backing.get("alice@example.test"));
+  assert.equal(svc.classify("alice@example.test").type, "guest");
+  revokeResume.resolve();
+  await writing;
+  assert.equal(svc.classify("alice@example.test").type, "guest");
+  assert.equal(await svc.isActive("alice@example.test"), false);
+});
+
+test("a peer can finish revocation and reactivate after a durable local revocation failure", async () => {
+  const backing = createMemoryMap<DeactivationRecord>();
+  const failed = createIdentityService(backing, {
+    revokeSessions: async () => {
+      throw new Error("revocation unavailable");
+    },
+  });
+  const peer = createIdentityService(backing);
+  await assert.rejects(failed.deactivate("alice@example.test", "directory-sync"), /revocation unavailable/);
+  await peer.recordDirectorySync(["alice@example.test"], []);
+  await peer.recordDirectorySync([], ["alice@example.test"]);
+  assert.equal(await failed.isActive("alice@example.test"), true);
+  await failed.refresh();
+  assert.equal(failed.classify("alice@example.test").type, "internal");
 });

@@ -25,6 +25,8 @@ import type { OutgoingAttachment } from "../types.ts";
 import type { SecurityScreenProbe } from "../security/security-screener.ts";
 import type { Readable } from "node:stream";
 import { type FileArtifact, type FileArtifactStore, type ListOwnedOptions } from "../files/file-artifact-store.ts";
+import { isArtifactPath } from "../persistence/artifact-resource.ts";
+import type { FileOriginStore } from "../files/file-origin-store.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { SessionStore, TranscriptEntry } from "../sessions/session-store.ts";
 import { type Sandbox } from "../sandbox/sandbox.ts";
@@ -58,6 +60,8 @@ import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import { type AdminService } from "../admin/admin-service.ts";
 import type { CronStore, CreateCronInput, CronPatch } from "../cron/cron-store.ts";
 import type { CronFireRecord } from "../cron/fire-store.ts";
+import type { CronFireDetail, CronFirePage, CronFireReadStore } from "../cron/fire-read-store.ts";
+import type { ProjectJoinStore } from "../projects/project-join-store.ts";
 import type { WebhookStore, WebhookEvent, CreateWebhookInput } from "../webhooks/webhook-store.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type {
@@ -112,6 +116,7 @@ import type { Environment, EnvironmentAttachment, EnvironmentStore } from "../en
 import type { ModelProviderAvailability } from "../model/pi-models.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
 import { type ReachOpts, type ReachResolution, type ReachTarget } from "../reach/reach.ts";
+import type { ProjectCollaborationStore } from "../projects/project-collaboration.ts";
 import { type Project, type ProjectStore } from "../projects/project-store.ts";
 import type { SearchHit } from "../search/core-search.ts";
 
@@ -207,6 +212,10 @@ export type ProjectView = Project & {
   scopeId: ScopeId;
   members: Array<{ principalId: string; displayName: string; viaChannel?: boolean }>;
 };
+
+type ProjectMemberPreview =
+  | { status: "ok"; members: Array<{ principalId: string; displayName: string }>; alreadyIn: number }
+  | { status: "not_found" | "forbidden" };
 
 type ProjectViewMutation =
   | { status: "ok"; project: ProjectView; changed: boolean }
@@ -313,6 +322,19 @@ export interface App {
   } | null>;
   getRunToolEntries(runId: string, viewer?: string, afterSeq?: number): Promise<SessionEntry[]>;
   stopConversation(threadRef: string, viewer?: string): Promise<boolean>;
+  webRunForOperationKey(
+    idempotencyKey: string,
+    viewer: string,
+  ): Promise<
+    | {
+        runId: string;
+        status: Run["status"];
+        threadRef: string;
+        verifiedRequestFingerprint?: string;
+      }
+    | { conflict: true }
+    | null
+  >;
   activeRunForThread(
     threadRef: string,
     viewer?: string,
@@ -379,6 +401,11 @@ export interface App {
   listProjects(principalId: string): Promise<ProjectView[]>;
   createProject(principalId: string, name: string): Promise<ProjectView | null>;
   addProjectMember(id: string, principalId: string, memberId: string): Promise<ProjectViewMutation>;
+  previewProjectMembers(
+    id: string,
+    principalId: string,
+    candidates: ReadonlyArray<{ principalId: string; displayName: string }>,
+  ): Promise<ProjectMemberPreview>;
   removeProjectMember(id: string, principalId: string, memberId: string): Promise<ProjectViewMutation>;
   setProjectSlackChannel(id: string, principalId: string, channel: string | null): Promise<ProjectViewMutation>;
   renameProject(id: string, principalId: string, name: string): Promise<ProjectViewMutation>;
@@ -401,8 +428,10 @@ export interface App {
   forkSession(
     sessionId: string,
     principalId: string,
-    opts?: { upToSeq?: number },
+    opts?: { upToSeq?: number; targetScopeId?: ScopeId },
   ): Promise<{ session: Session; entries: SessionEntry[] } | null>;
+  listTrashedFilesForViewer(principalId: string, opts?: ListOwnedOptions): Promise<FileListPage>;
+  setPersonalFileTrashed(id: string, principalId: string, trashed: boolean): Promise<boolean>;
   listFilesForViewer(principalId: string, opts?: ListOwnedOptions, inScope?: ScopeId): Promise<FileListPage>;
   uploadFileForViewer(
     principalId: string,
@@ -451,6 +480,10 @@ export interface App {
   listCronFires(id: string, opts?: { limit?: number }): Promise<{ runs: CronFireLogEntry[]; total: number }>;
   cronFiresByThreadRefs(threadRefs: readonly string[]): Promise<CronFireRecord[]>;
   latestCronFireForThread(id: string, threadRef: string): Promise<CronFireLogEntry | undefined>;
+  getCronRuns(id: string, opts: { limit?: number }, viewer: string): Promise<CronFirePage>;
+  getCronRun(id: string, fireKey: string): Promise<CronFireDetail | null>;
+  markCronRunRead(id: string, fireKey: string, viewer: string, version: string): Promise<boolean>;
+  cronUnreadCounts(ids: readonly string[], viewer: string): Promise<Record<string, number>>;
   setCronRuntime(id: string, runtime: Exclude<Cron["runtime"], undefined>): Promise<Cron | null>;
   setCronDestination(id: string, destination: Destination | undefined): Promise<Cron | null>;
   setCronRecipientConsent(id: string, recipientConsent: RecipientConsent): Promise<void>;
@@ -618,6 +651,12 @@ export interface App {
   attachScope(input: { scopeId: ScopeId; environmentId: string; actorId: string }): Promise<void>;
 }
 
+export interface DirectorySyncBatch {
+  members: DirectoryMember[];
+  removedIds: string[];
+  syncedAt?: number;
+}
+
 export interface AppDeps {
   externalSlackPolicies?: ExternalSlackPolicies;
   admittedWork?: AdmittedWork;
@@ -659,16 +698,21 @@ export interface AppDeps {
   auditLog: AuditLog;
   config: ScopedConfigStore;
   crons: CronStore;
+  cronFireReads?: CronFireReadStore;
+  projectJoins?: ProjectJoinStore;
   webhooks: WebhookStore;
   deliveries: DeliveryStore;
   directory: DirectoryStore;
+  directorySyncJournal?: DurableMap<DirectorySyncBatch>;
   teams?: Pick<TeamStore, "isMember">;
   emailAuthMembers?: DirectoryMember[];
   projects?: ProjectStore;
+  projectCollaboration?: ProjectCollaborationStore;
   deploy: DeployService;
   deployAppsDomain?: string;
   deploymentLayer?: DeploymentLayerRuntime;
   files: FileArtifactStore;
+  fileOrigins?: FileOriginStore;
   approvals?: DurableMap<PendingApprovalRecord>;
   sessionStateBus?: SessionStateBus;
   ledgerEventBus?: LedgerEventBus;
@@ -712,6 +756,9 @@ interface FileListItem {
   createdAt: number;
   createdInScope?: ScopeId;
   openable: boolean;
+  delivered: boolean;
+  canTrash?: boolean;
+  session?: { id: string; title: string | null };
 }
 
 export interface FileListPage {
@@ -762,6 +809,7 @@ export function toFileItem(a: FileArtifact): FileListItem {
     createdAt: a.createdAt,
     ...(a.createdInScope ? { createdInScope: a.createdInScope } : {}),
     openable: a.blobKey != null,
+    delivered: a.direction === "out" && isArtifactPath(a.path),
   };
 }
 

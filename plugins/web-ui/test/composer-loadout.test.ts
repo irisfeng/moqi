@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   compatibleHarnessOptions,
   effortLevelsForHarness,
+  equivalentOfferedEffort,
   loadoutModelId,
   modelLoadoutOptions,
   parseLoadout,
@@ -250,4 +251,18 @@ test("Astra speed variants share a preset and preserve a saved tier", () => {
   assert.deepEqual(modelLoadoutOptions([base, ultra], [saved], "pi"), [ultra]);
   assert.deepEqual(modelLoadoutOptions([ultra], [], "pi"), [ultra]);
   assert.deepEqual(upsertLoadout([entry(base.value)], saved), [saved]);
+});
+
+test("a saved effort outside the menu maps to the offered level that sends the same value", () => {
+  const model = {
+    ...option("pi:glm").model,
+    effortLevelsByHarness: { pi: ["auto", "low", "high", "max"] },
+    effortEquivalentsByHarness: { pi: { medium: "high", xhigh: "max", ultracode: "max" } },
+  };
+  assert.equal(equivalentOfferedEffort("pi", model, "high"), "high");
+  assert.equal(equivalentOfferedEffort("pi", model, "xhigh"), "max");
+  assert.equal(equivalentOfferedEffort("pi", model, "medium"), "high");
+  assert.equal(equivalentOfferedEffort("pi", model, "adaptive"), undefined);
+  assert.equal(equivalentOfferedEffort("pi", model, undefined), undefined);
+  assert.equal(equivalentOfferedEffort("codex", model, "max"), undefined);
 });

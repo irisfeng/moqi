@@ -19,6 +19,7 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  MonitorSmartphone,
   PanelLeft,
   Plus,
   Repeat,
@@ -45,17 +46,50 @@ import {
   type TranscriptPage,
 } from "./core-bridge";
 import { seedRuntimeConfig } from "./runtime-config-store";
-import { errMessage, swallow } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error.ts";
+import { swallow } from "../../chassis/src/errors";
 import { brandMark, brandName, icon } from "./ui";
 import { PHONE_MAX_WIDTH, trackVisualViewport } from "./viewport";
-import { markConnectorConnected } from "./chat";
+import { markConnectorConnected, suppressProactiveOpener } from "./chat";
 import { clearSkillsCache, resyncModelSelection } from "./composer";
-import { allConversations, ensureDeliveryStream, mainConversation, onExitCanvas } from "./conversations";
-import { clearAllDrafts, newChatDraftKey, saveDraft, storedDraft } from "./drafts";
+import {
+  allConversations,
+  ensureDeliveryStream,
+  mainConversation,
+  mountNotifications,
+  onExitCanvas,
+  resetNotifications,
+} from "./conversations";
+import {
+  clearAllDrafts,
+  DRAFTS_EPOCH_KEY,
+  flushDrafts,
+  newChatDraftKey,
+  resumeDraftsAfterSignIn,
+  saveDraft,
+  setRemoteDraftSignOutHandler,
+  storedDraft,
+} from "./drafts";
+import { renderEmbeddedView } from "./embedded-view";
+import { ensureWebuiHome, NEUTRAL_HOME, reportHomeEvent, webuiHome } from "./home-config";
+import { loadProjectSummaries } from "./project-collaboration";
+import { mountAnnouncementBanner, unmountAnnouncementBanner } from "./banner";
+import { invalidateGuideActions, renderGuidePage } from "./guide";
+import { renderPeoplePage, resetPeoplePage } from "./people";
+import { resetRatings } from "./answer-ratings";
+import {
+  currentGrowthSnapshot,
+  growthErrorMessage,
+  startGrowthPolling,
+  submitGrowthAction,
+  subscribeGrowth,
+  type GrowthTaskView,
+} from "./growth";
 import { deepLinkPath, isPlainLeftClick, parseDeepLink, sessionLinkTarget, UI_BASE } from "./deep-link";
 import {
   adoptRemoteSplit,
   beginPaneKindDrag,
+  canvasToast,
   drawCanvas,
   endPaneDrag,
   exitSplitIfActive,
@@ -70,6 +104,8 @@ import {
 import { activityOf } from "./session-list";
 import { replaceChildrenPreservingFocus } from "./pane-focus";
 import {
+  addPendingSession,
+  cancelOpeningSession,
   openSession,
   closeOpenSessionMenu,
   refreshSessions,
@@ -136,9 +172,25 @@ function signOutFromMenu(): void {
   void signOut();
 }
 
+function openDevicesFromMenu(): void {
+  userMenuOpen = false;
+  renderSidebarFooter();
+  window.open("/auth/devices", "_blank", "noopener");
+}
+
 let authMode: AuthMode = "portal";
 let shellMounted = false;
 let pendingCanvasRestore: Promise<void> | null = null;
+
+function handleRemoteDraftSignOut(): void {
+  if (!appState.me) return;
+  renderAuthGate(authMode === "portal" ? { kind: "portal" } : { kind: "dev" });
+}
+
+setRemoteDraftSignOutHandler(handleRemoteDraftSignOut);
+window.addEventListener("storage", (event) => {
+  if (event.key === DRAFTS_EPOCH_KEY && event.oldValue !== event.newValue) handleRemoteDraftSignOut();
+});
 
 setSigninRequiredHandler((detail) => {
   authMode = detail.mode ?? authMode;
@@ -214,6 +266,158 @@ function resetSidebarWidth(): void {
   localStorage.removeItem(SIDEBAR_W_KEY);
 }
 
+function loadHomeConfig(): void {
+  void ensureWebuiHome().then((config) => {
+    if (config && appState.me && appState.currentView === "guide") renderGuideSurface(false);
+  });
+}
+
+interface AttachmentNavigationConversation {
+  composer: { state: { attachments: readonly unknown[]; processingFiles: boolean } };
+}
+
+export function attachmentNavigationMessage(
+  conversations: readonly AttachmentNavigationConversation[] = allConversations(),
+): string {
+  if (conversations.some((conversation) => conversation.composer.state.processingFiles)) {
+    return "Files are still being processed. Wait for them to finish before leaving this chat.";
+  }
+  if (conversations.some((conversation) => conversation.composer.state.attachments.length > 0)) {
+    return "You have attachments that were not sent. Send or remove them before leaving this chat.";
+  }
+  return "";
+}
+
+export function blockUnsentAttachmentNavigation(
+  conversations: readonly AttachmentNavigationConversation[] = allConversations(),
+): boolean {
+  const message = attachmentNavigationMessage(conversations);
+  if (!message) return false;
+  try {
+    window.alert(message);
+  } catch {
+    canvasToast(message);
+  }
+  return true;
+}
+
+function fillComposerWithPrompt(prompt: string): void {
+  const user = appState.me?.user;
+  if (!user || blockUnsentAttachmentNavigation()) return;
+  setScopedSession(null);
+  saveDraft(newChatDraftKey(user), prompt);
+  startNewChat();
+}
+
+export async function openGrowthChat(task: GrowthTaskView, prompt?: string): Promise<void> {
+  const participation = task.participation;
+  if (!participation) return;
+  if (blockUnsentAttachmentNavigation()) return;
+  void flushDrafts();
+  setScopedSession(null);
+  const threadRef = participation.threadRef;
+  if (prompt?.trim() && !storedDraft(threadRef).trim()) saveDraft(threadRef, prompt);
+  const view = appState.currentView;
+  const viewSeq = appState.viewRenderSeq;
+  const generation = sessionsState.openGeneration;
+  const stillCurrent = (): boolean =>
+    appState.currentView === view && appState.viewRenderSeq === viewSeq && sessionsState.openGeneration === generation;
+  const listed = (): CoreSession | null =>
+    sessionsState.list.find((candidate) => candidate.threadRef === threadRef) ?? null;
+  let session = listed();
+  if (!session?.id && task.sessionId) {
+    await refreshSessions({ silent: true });
+    if (!stillCurrent()) return;
+    session = listed();
+    if (!session?.id) {
+      try {
+        session = (await api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(task.sessionId)}`)).session;
+      } catch {
+        void 0;
+      }
+      if (!stillCurrent()) return;
+    }
+  }
+  if (!session) {
+    addPendingSession(threadRef, null, null);
+    suppressProactiveOpener(threadRef);
+    session = listed();
+  }
+  if (session) await openSession(session);
+}
+
+function renderGuideSurface(recordOpen = true): void {
+  if (!appState.mainEl) return;
+  if (recordOpen) reportHomeEvent("guide_page_open", "");
+  renderGuidePage(webuiHome() ?? NEUTRAL_HOME, appState.mainEl, {
+    isActive: () => appState.currentView === "guide",
+    tryTip: (tip) => {
+      reportHomeEvent("guide_try_click", tip.id);
+      fillComposerWithPrompt(tip.prompt);
+    },
+    openGrowthChat,
+  });
+}
+
+let growthSidebarUnsubscribe: (() => void) | null = null;
+let growthReminderBusy = false;
+
+async function skipGrowthReminder(): Promise<void> {
+  const reminder = currentGrowthSnapshot()?.reminder;
+  if (!reminder || growthReminderBusy) return;
+  growthReminderBusy = true;
+  renderSidebarTop();
+  try {
+    await submitGrowthAction({ action: "skip", key: reminder.key });
+  } catch (error) {
+    reportHomeEvent("growth_reminder_skip_error", growthErrorMessage(error));
+  } finally {
+    growthReminderBusy = false;
+    renderSidebarTop();
+  }
+}
+
+function growthSidebarEntry(): TemplateResult | typeof nothing {
+  const snapshot = currentGrowthSnapshot();
+  if (!snapshot) return nothing;
+  const reminder = snapshot.reminder;
+  if (!reminder && snapshot.onboarding.status === "complete")
+    return html`<button class="home-growth-entry home-growth-compact" type="button" @click=${() => switchView("guide")}>
+      <span>Guide</span><span class="home-growth-level">${snapshot.level} · ${snapshot.points} pts</span>
+    </button>`;
+  let title = "Finish your first piece of work";
+  if (reminder) title = reminder.title;
+  let subtitle = "You have reached the current level";
+  if (reminder) subtitle = "Finish one real task today to earn 10 points";
+  else if (snapshot.nextLevelAt !== null)
+    subtitle = `${Math.max(0, snapshot.nextLevelAt - snapshot.points)} points to the next level`;
+  return html`
+    <div class="home-growth-entry ${reminder ? "has-reminder" : ""}">
+      <div class="home-growth-entry-head">
+        <span>${reminder ? "Today's challenge" : "Guide"}</span>
+        <span class="home-growth-level">${snapshot.level} · ${snapshot.points} pts</span>
+      </div>
+      <strong>${title}</strong>
+      <p>${subtitle}</p>
+      <div class="home-growth-entry-actions">
+        <button class="home-growth-open" type="button" @click=${() => switchView("guide")}>Open guide</button>
+        ${
+          reminder
+            ? html`<button
+                class="home-growth-skip"
+                type="button"
+                ?disabled=${growthReminderBusy}
+                @click=${() => void skipGrowthReminder()}
+              >
+                ${growthReminderBusy ? "Working…" : "Skip today"}
+              </button>`
+            : nothing
+        }
+      </div>
+    </div>
+  `;
+}
+
 const ICON = {
   newChat: Plus,
   inbox: InboxGlyph,
@@ -232,32 +436,45 @@ const ICON = {
   browse: LayoutGrid,
 };
 
-export async function signOut(): Promise<void> {
-  stopAnalytics();
-  stopBrowserErrors();
-  const portal = authMode === "portal";
-  if (!portal) {
-    try {
-      await api("/signout", { method: "POST" });
-    } catch {
-      void 0;
-    }
-  }
+function clearUserState(): void {
+  resetNotifications();
+  resetRatings();
+  resetPeoplePage();
   appState.me = null;
   closeBrowse();
   resetInboxState();
-  clearAllDrafts();
+  for (const conv of allConversations()) {
+    conv.resetChatState();
+    conv.composer.resetComposer();
+  }
   exitSplitIfActive();
-  mainConversation().resetChatState();
   resetSessionsState();
   appState.currentView = "chats";
   clearSkillsCache();
   resetMemoryState();
   resetContextsState();
   resetKeychainState();
-  mainConversation().composer.resetComposer();
   updateDocumentTitle();
+}
+
+let logoutNotice = "";
+
+export async function signOut(): Promise<void> {
+  if (blockUnsentAttachmentNavigation()) return;
+  if (!clearAllDrafts()) {
+    window.alert(
+      "Drafts saved on this device could not be fully cleared. After signing out, close other tabs and clear this site's browser data.",
+    );
+  }
+  logoutNotice = "";
+  const portal = authMode === "portal";
+  renderAuthGate(portal ? { kind: "portal" } : { kind: "dev" });
   if (!portal) {
+    try {
+      await api("/signout", { method: "POST" });
+    } catch {
+      void 0;
+    }
     renderAuthGate({ kind: "dev" });
     return;
   }
@@ -266,11 +483,19 @@ export async function signOut(): Promise<void> {
   try {
     const r = await fetch("/auth/logout", { method: "POST", headers: { accept: "application/json" } });
     endedSession = r.ok;
+    if (!r.ok) {
+      const data = (await r.json().catch(() => ({}))) as { message?: string };
+      logoutNotice =
+        data.message || "The server has not confirmed the sign-out. Sign in again and check your signed-in devices.";
+    }
     if (r.ok) redirectTo = ((await r.json()) as { redirectTo?: string }).redirectTo ?? "/";
   } catch {
     endedSession = false;
   }
   if (!endedSession) {
+    logoutNotice ||=
+      "The connection dropped before the server confirmed the sign-out. Reconnect, sign in again and check your signed-in devices.";
+    clearPortalAttempt();
     renderAuthGate({ kind: "portal" });
     return;
   }
@@ -279,6 +504,7 @@ export async function signOut(): Promise<void> {
 }
 
 export async function exitImpersonation(): Promise<void> {
+  if (blockUnsentAttachmentNavigation()) return;
   try {
     await fetch("/auth/impersonate/stop", { method: "POST", headers: { accept: "application/json" } });
   } catch {
@@ -365,7 +591,9 @@ function portalGate() {
     `);
   return gateShell(html`
     <h1>Your session ended</h1>
-    <p class="signin-body">You've been signed out. Sign in again and you'll come back to this page.</p>
+    <p class="signin-body">
+      ${logoutNotice || "You've been signed out. Sign in again and you'll come back to this page."}
+    </p>
     <button class="btn primary" type="button" @click=${signInWithPortal}>Sign in</button>
   `);
 }
@@ -456,6 +684,9 @@ export type AuthGate =
 export function renderAuthGate(gate: AuthGate): void {
   stopAnalytics();
   stopBrowserErrors();
+  if (gate.kind === "unreachable") resetNotifications();
+  else clearUserState();
+  unmountAnnouncementBanner();
   shellMounted = false;
   const body = (() => {
     switch (gate.kind) {
@@ -495,6 +726,7 @@ export function mountShell(): void {
         >
           <div class="brand">
             <div class="brand-lockup">${brandMark()}<span class="brand-name">${brandName()}</span></div>
+            <div class="notification-slot"></div>
             <button
               class="icon-btn sidebar-toggle sidebar-collapse-toggle"
               type="button"
@@ -526,9 +758,13 @@ export function mountShell(): void {
         >
           ${icon(Menu, 20)}
         </button>
-        <section class="main" id="main" tabindex="-1">
-          <div class="empty">Pick a conversation, or start a new chat.</div>
-        </section>
+        <div class="main-col">
+          <div class="notification-region" id="notification-region"></div>
+          <div class="home-banner" id="home-banner" hidden></div>
+          <section class="main" id="main" tabindex="-1">
+            <div class="empty">Pick a conversation, or start a new chat.</div>
+          </section>
+        </div>
       </div>
     `,
     appEl as HTMLElement,
@@ -537,6 +773,8 @@ export function mountShell(): void {
   appState.listEl = (appEl as HTMLElement).querySelector("#sidebar-body");
   appState.mainEl = (appEl as HTMLElement).querySelector("#main");
   footerEl = (appEl as HTMLElement).querySelector("#sidebar-footer");
+  for (const slot of (appEl as HTMLElement).querySelectorAll<HTMLElement>(".notification-slot"))
+    mountNotifications(slot);
   renderSidebarFooter();
   renderSidebarTop();
   updateSidebarToggleLabels();
@@ -578,6 +816,18 @@ export function renderSidebarFooter(): void {
         ${
           userMenuOpen
             ? html`<div class="session-menu-popover user-menu-popover" role="menu">
+                ${
+                  authMode === "portal"
+                    ? html`<button
+                        class="session-menu-option"
+                        type="button"
+                        role="menuitem"
+                        @click=${openDevicesFromMenu}
+                      >
+                        ${icon(MonitorSmartphone, 15)}<span>Signed-in devices</span>
+                      </button>`
+                    : nothing
+                }
                 <button class="session-menu-option" type="button" role="menuitem" @click=${signOutFromMenu}>
                   ${icon(LogOut, 15)}<span>Sign out</span>
                 </button>
@@ -604,7 +854,7 @@ export function renderSidebarTop(): void {
   syncDocumentTitle();
   if (!appState.topEl) return;
   const highlighted = (v: View) => v !== "chats" && appState.currentView === v;
-  const navRow = (v: View, glyph: IconNode, label: string) =>
+  const navRow = (v: View, glyph: IconNode, label: string, chip: TemplateResult | typeof nothing = nothing) =>
     html`<a
       class="navrow ${highlighted(v) ? "active" : ""}"
       href=${deepLinkPath(UI_BASE, v, null)}
@@ -612,7 +862,7 @@ export function renderSidebarTop(): void {
       aria-label=${label}
       ${tip(sidebarOpen ? "" : label)}
     >
-      ${icon(glyph, 17)}<span>${label}</span>
+      ${icon(glyph, 17)}<span>${label}</span>${chip}
     </a>`;
   const actionRow = (glyph: IconNode, label: string, run: () => void) =>
     html`<button
@@ -648,7 +898,7 @@ export function renderSidebarTop(): void {
           startNewChatInLastScope();
         })}
       </div>
-      ${sessionSelectionBar() ?? nothing}
+      ${growthSidebarEntry()} ${sessionSelectionBar() ?? nothing}
     `,
     appState.topEl,
   );
@@ -682,12 +932,30 @@ function onNavClick(e: Event): void {
   if (e instanceof MouseEvent && !isPlainLeftClick(e)) return;
   e.preventDefault();
   setScopedSession(null);
-  switchView(view);
+  if (view === "chats") startNewChat();
+  else switchView(view);
   closeSidebarOnNarrowView();
+}
+
+function restoreLastConversation(): boolean {
+  const state = mainConversation().state;
+  if (state.rememberedSessionId) {
+    const session = sessionsState.list.find((s) => s.id === state.rememberedSessionId);
+    if (!session) return false;
+    void openSession(session);
+    return true;
+  }
+  if (!state.rememberedThreadRef) return false;
+  const pending = sessionsState.list.find((s) => !s.id && s.threadRef === state.rememberedThreadRef);
+  if (pending) void openSession(pending);
+  else startNewChat(state.rememberedScopeId, state.rememberedContextName);
+  return true;
 }
 
 export function switchView(v: View): void {
   if (!canView(v)) v = "chats";
+  if (v !== "chats" && blockUnsentAttachmentNavigation()) return;
+  invalidateGuideActions();
   closeSidebarOnNarrowView();
   if (appState.currentView === v) {
     refreshActiveView(v);
@@ -699,6 +967,8 @@ export function switchView(v: View): void {
   sessionsState.openMenuId = null;
   sessionsState.renamingId = null;
   if (v !== "chats") {
+    cancelOpeningSession();
+    void flushDrafts();
     mainConversation().teardown();
     mainConversation().composer.resetComposer();
   }
@@ -711,7 +981,7 @@ export function switchView(v: View): void {
       const showChats = () => {
         if (appState.currentView !== "chats" || appState.viewRenderSeq !== seq) return;
         if (mountRestoredCanvas()) drawCanvas();
-        else void renderChatsPage();
+        else if (!restoreLastConversation()) void renderChatsPage();
         renderList();
       };
       if (pendingCanvasRestore) {
@@ -742,6 +1012,16 @@ export function switchView(v: View): void {
       break;
     case "files":
       void renderFiles();
+      break;
+    case "docs":
+    case "pm":
+      renderEmbeddedView(v);
+      break;
+    case "people":
+      void renderPeoplePage();
+      break;
+    case "guide":
+      renderGuideSurface();
       break;
     case "keychain":
       void renderConnectors();
@@ -810,6 +1090,16 @@ function refreshActiveView(v: View): void {
     case "files":
       void renderFiles();
       break;
+    case "docs":
+    case "pm":
+      renderEmbeddedView(v);
+      break;
+    case "people":
+      void renderPeoplePage();
+      break;
+    case "guide":
+      renderGuideSurface();
+      break;
     case "keychain":
       clearConnectorNotice();
       void renderConnectors();
@@ -830,6 +1120,7 @@ function refreshActiveView(v: View): void {
 }
 
 export function showMainEmpty(text: string): void {
+  if (blockUnsentAttachmentNavigation()) return;
   exitSplitIfActive();
   mainConversation().state.host = null;
   if (appState.mainEl)
@@ -916,7 +1207,9 @@ narrowViewport.addEventListener("change", (event) => {
 function setSidebarOpen(open: boolean, moveFocus = true): void {
   if (open && narrowViewport.matches) document.dispatchEvent(new CustomEvent("qm:close-overlays"));
   sidebarOpen = open;
-  (appEl as HTMLElement).querySelector(".layout")?.classList.toggle("sidebar-closed", !sidebarOpen);
+  const layout = (appEl as HTMLElement).querySelector(".layout");
+  layout?.classList.add("brand-motion");
+  layout?.classList.toggle("sidebar-closed", !sidebarOpen);
   (appEl as HTMLElement).querySelector(".sidebar")?.setAttribute("data-tip-placement", open ? "top" : "right");
   updateSidebarToggleLabels();
   renderSidebarTop();
@@ -926,7 +1219,7 @@ function setSidebarOpen(open: boolean, moveFocus = true): void {
 function syncSidebarAccessibility(moveFocus: boolean): void {
   const root = appEl as HTMLElement;
   const sidebar = root.querySelector<HTMLElement>(".sidebar");
-  const main = root.querySelector<HTMLElement>(".main");
+  const main = root.querySelector<HTMLElement>(".main-col");
   const scrim = root.querySelector<HTMLButtonElement>(".sidebar-scrim");
   const modal = narrowViewport.matches && sidebarOpen;
   if (!sidebar || !main || !scrim) return;
@@ -1109,6 +1402,7 @@ export async function boot(): Promise<void> {
   }
   resetKeychainState();
   appState.me = (await r.json()) as Me;
+  resumeDraftsAfterSignIn(appState.me.user);
   void initializeBrowserErrors(appState.me);
   void initializeAnalytics(appState.me, isView(wanted) && canView(wanted) ? wanted : "chats");
   authMode = appState.me.mode ?? "portal";
@@ -1130,6 +1424,16 @@ export async function boot(): Promise<void> {
   mountShell();
   renderList();
   shellMounted = true;
+  loadHomeConfig();
+  void loadProjectSummaries().then(renderList, () => undefined);
+  growthSidebarUnsubscribe ??= subscribeGrowth(() => {
+    if (appState.topEl) renderSidebarTop();
+  });
+  startGrowthPolling();
+  mountAnnouncementBanner({
+    userKey: appState.me.user,
+    mount: (appEl as HTMLElement).querySelector<HTMLElement>("#home-banner"),
+  });
   ensureDeliveryStream();
   warmDeferredChunks();
   void refreshInbox({ silent: true });

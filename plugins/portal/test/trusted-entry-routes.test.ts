@@ -131,7 +131,7 @@ test("primary login still selects the original provider", async () => {
   const url = new URL(response.headers.get("location")!);
   assert.equal(url.origin, "https://primary.example.test");
   assert.equal(url.searchParams.get("client_id"), "primary-client");
-  assert.match(response.headers.getSetCookie()[0]!, /^portal_oidc_tmp=/);
+  assert.match(response.headers.getSetCookie()[0]!, /^portal_oidc_tmp_[a-f0-9]{64}=/);
   assert.equal(adminRequests, before);
 });
 

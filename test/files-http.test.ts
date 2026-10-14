@@ -221,6 +221,38 @@ test("uploadFileForViewer stores a personal inbound file", async () => {
   assert.deepEqual(await drain((await app.openFileForViewer(file!.id, "U1"))!.stream), Buffer.from("hello"));
 });
 
+test("a personal file moves to the recycle bin and back, and only its owner can move it", async () => {
+  const files = createMemoryFileArtifactStore(createMemoryDurableByteStore());
+  const app = makeUploadApp(files, createAclStore());
+  const file = await app.uploadFileForViewer("U1", {
+    name: "notes.txt",
+    mimetype: "text/plain",
+    data: chunks(Buffer.from("hello")),
+  });
+  assert.ok(file);
+  assert.equal((await app.listFilesForViewer("U1")).owned[0]!.canTrash, true);
+  assert.deepEqual((await app.listTrashedFilesForViewer("U1")).owned, []);
+
+  assert.equal(await app.setPersonalFileTrashed(file!.id, "U2", true), false);
+  assert.equal(await app.setPersonalFileTrashed(file!.id, "U1", true), true);
+  assert.deepEqual((await app.listFilesForViewer("U1")).owned, []);
+  assert.equal(await app.openFileForViewer(file!.id, "U1"), null);
+  const trashed = await app.listTrashedFilesForViewer("U1");
+  assert.deepEqual(
+    trashed.owned.map((f) => [f.id, f.canTrash, f.openable]),
+    [[file!.id, true, false]],
+  );
+  assert.deepEqual((await app.listTrashedFilesForViewer("U2")).owned, []);
+
+  assert.equal(await app.setPersonalFileTrashed(file!.id, "U1", false), true);
+  assert.deepEqual((await app.listTrashedFilesForViewer("U1")).owned, []);
+  assert.deepEqual(
+    (await app.listFilesForViewer("U1")).owned.map((f) => f.id),
+    [file!.id],
+  );
+  assert.deepEqual(await drain((await app.openFileForViewer(file!.id, "U1"))!.stream), Buffer.from("hello"));
+});
+
 test("uploadFileForViewer to a shared context is visible to another context member", async () => {
   const files = createMemoryFileArtifactStore(createMemoryDurableByteStore());
   const acl = createAclStore(undefined, { resolveFiles: (refs) => files.resolveByIds(refs) });

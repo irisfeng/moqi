@@ -1,8 +1,8 @@
-import { deriveKey, seal } from "../src/session.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
+import { deriveKey, seal } from "../src/session.ts";
 
 const seen: Array<{ url: string; method: string; headers: Record<string, unknown>; body: string }> = [];
 const broker = createServer((req: IncomingMessage, res) => {
@@ -58,8 +58,19 @@ test.after(() => {
   surface.close();
 });
 
+function brokerCookie(): string {
+  const now = Math.floor(Date.now() / 1000);
+  const value = seal(
+    { k: "tmp", state: "s", nonce: "n", pkceVerifier: "v", returnTo: "/", iat: now, exp: now + 600 },
+    deriveKey("broker-proxy-test-portal-secret", "portal.tmp.v1"),
+  );
+  return `portal_oidc_tmp=${value}`;
+}
+
 test("the broker's sign-in pages are reachable without a session", async () => {
-  const page = await fetch(`${base}/idp/authorize?client_id=qm-portal&state=s`);
+  const page = await fetch(`${base}/idp/authorize?client_id=qm-portal&state=s`, {
+    headers: { cookie: brokerCookie() },
+  });
   assert.equal(page.status, 200);
   assert.equal(await page.text(), "<form>broker</form>");
   assert.equal(
@@ -78,15 +89,15 @@ test("the verify redirect is relayed back to the browser", async () => {
 });
 
 test("the submit form posts through, same-origin only", async () => {
-  const posted = await fetch(`${base}/idp/authorize`, {
+  const posted = await fetch(`${base}/idp/authorize?state=s`, {
     method: "POST",
-    headers: { origin: PUBLIC, "content-type": "application/x-www-form-urlencoded" },
+    headers: { cookie: brokerCookie(), origin: PUBLIC, "content-type": "application/x-www-form-urlencoded" },
     body: "email=admin%40example.com&request=tok",
   });
   assert.equal(posted.status, 200);
   assert.equal(seen.at(-1)!.body, "email=admin%40example.com&request=tok");
 
-  const crossOrigin = await fetch(`${base}/idp/authorize`, {
+  const crossOrigin = await fetch(`${base}/idp/authorize?state=s`, {
     method: "POST",
     headers: { origin: "https://evil.test", "content-type": "application/x-www-form-urlencoded" },
     body: "email=admin%40example.com",
@@ -96,9 +107,9 @@ test("the submit form posts through, same-origin only", async () => {
 
 test("a same-origin form POST is accepted even though no-referrer makes the browser send Origin: null", async () => {
   const post = (headers: Record<string, string>): Promise<Response> =>
-    fetch(`${base}/idp/authorize`, {
+    fetch(`${base}/idp/authorize?state=s`, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+      headers: { cookie: brokerCookie(), "content-type": "application/x-www-form-urlencoded", ...headers },
       body: "email=admin%40example.com&request=tok",
     });
   assert.equal((await post({ origin: "null", "sec-fetch-site": "same-origin" })).status, 200);
@@ -116,12 +127,16 @@ test("a same-origin form POST is accepted even though no-referrer makes the brow
 });
 
 test("the portal stamps the client address and refuses to relay a spoofed one", async () => {
-  await fetch(`${base}/idp/authorize?x=1`, { headers: { "x-qm-client-ip": "9.9.9.9" } });
+  await fetch(`${base}/idp/authorize?x=1&state=s`, {
+    headers: { cookie: brokerCookie(), "x-qm-client-ip": "9.9.9.9" },
+  });
   const relayed = seen.at(-1)!.headers["x-qm-client-ip"];
   assert.notEqual(relayed, "9.9.9.9", "a client-supplied address must never become the rate-limit key");
   assert.equal(typeof relayed, "string");
 
-  await fetch(`${base}/idp/authorize?x=2`, { headers: { "fly-client-ip": "203.0.113.7" } });
+  await fetch(`${base}/idp/authorize?x=2&state=s`, {
+    headers: { cookie: brokerCookie(), "fly-client-ip": "203.0.113.7" },
+  });
   assert.notEqual(
     seen.at(-1)!.headers["x-qm-client-ip"],
     "203.0.113.7",
@@ -146,7 +161,7 @@ test("only the browser-facing broker routes are exposed", async () => {
 test("confirming a sign-in posts through, same-origin only", async () => {
   const confirmed = await fetch(`${base}/idp/verify`, {
     method: "POST",
-    headers: { origin: PUBLIC, "content-type": "application/x-www-form-urlencoded" },
+    headers: { cookie: brokerCookie(), origin: PUBLIC, "content-type": "application/x-www-form-urlencoded" },
     body: "token=abc",
     redirect: "manual",
   });
@@ -166,10 +181,26 @@ test("brokerRouteFor matches only the exact public routes", () => {
   assert.equal(brokerRouteFor("GET", "/idp/authorize"), "/authorize");
   assert.equal(brokerRouteFor("POST", "/idp/authorize"), "/authorize");
   assert.equal(brokerRouteFor("GET", "/idp/verify"), "/verify");
+  assert.equal(brokerRouteFor("POST", "/idp/change-password"), "/change-password");
+  assert.equal(brokerRouteFor("GET", "/idp/forgot"), "/forgot");
+  assert.equal(brokerRouteFor("POST", "/idp/forgot"), null);
   for (const path of ["/idp/authorize/extra", "/idpauthorize", "/idp/", "/idp", "/idp/token", "/authorize"]) {
     assert.equal(brokerRouteFor("GET", path), null, path);
   }
   assert.equal(brokerRouteFor("DELETE", "/idp/authorize"), null);
+});
+
+test("initial-password reset submissions never reach the broker", async () => {
+  const before = seen.length;
+  const response = await fetch(`${base}/idp/forgot`, {
+    method: "POST",
+    headers: { origin: PUBLIC, "content-type": "application/x-www-form-urlencoded" },
+    body: "email=admin%40example.com&initial=old-password",
+    redirect: "manual",
+  });
+  assert.equal(response.status, 401);
+  assert.equal(seen.length, before);
+  await response.text();
 });
 
 test("clientIpOf ignores a Fly edge header when the portal is not running on Fly", () => {
@@ -218,8 +249,8 @@ test("isPrivateNetworkUrl admits only unroutable hosts", () => {
 
 test("only broker cookies reach the broker", async () => {
   const token = `${"a".repeat(43)}.${"b".repeat(43)}`;
-  await fetch(`${base}/idp/authorize`, {
-    headers: { cookie: `portal_session=secret; qm_idp_session=${token}; unrelated=secret` },
+  await fetch(`${base}/idp/authorize?state=s`, {
+    headers: { cookie: `portal_session=secret; qm_idp_session=${token}; unrelated=secret; ${brokerCookie()}` },
   });
   assert.equal(seen.at(-1)!.headers.cookie, `qm_idp_session=${token}`);
 });
@@ -236,9 +267,9 @@ test("logout clears the remembered cookie and everywhere requires an authenticat
   );
   const unsigned = await fetch(`${base}/auth/logout?everywhere=1`, { method: "POST", headers: { origin: PUBLIC } });
   assert.equal(unsigned.status, 401);
-  const now = Date.now();
+  const now = Math.floor(Date.now() / 1000);
   const cookie = seal(
-    { k: "session", sub: "user@example.com", org: "acme", iat: now, exp: now + 60000 },
+    { k: "session", sub: "user@example.com", org: "acme", iat: now, exp: now + 60 },
     deriveKey(process.env.PORTAL_SESSION_SECRET!, "portal.session.v1"),
   );
   const signed = await fetch(`${base}/auth/logout?everywhere=1`, {

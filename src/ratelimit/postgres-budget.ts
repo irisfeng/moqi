@@ -5,11 +5,12 @@ import { reportFailure } from "../util/errors.ts";
 
 export function createPostgresBudgetTracker(
   connectionString: string,
-  opts: { limitUsd?: number; orgLimitUsd?: number; windowMs?: number } = {},
+  opts: { limitUsd?: number; orgLimitUsd?: number; windowMs?: number; exempt?: ReadonlySet<string> } = {},
 ): BudgetTracker {
   const limitUsd = opts.limitUsd ?? Infinity;
   const orgLimitUsd = opts.orgLimitUsd ?? Infinity;
   const windowMs = opts.windowMs ?? DEFAULT_BUDGET_WINDOW_MS;
+  const exempt = opts.exempt;
   const orgKey = "@org";
   const { q } = createPgPool(connectionString, "ratelimit/budget/0001", [
     `CREATE TABLE IF NOT EXISTS budget_spend(
@@ -23,6 +24,7 @@ export function createPostgresBudgetTracker(
 
   return {
     async check(principalId, now = Date.now()) {
+      if (exempt?.has(principalId)) return { allowed: true, spentUsd: 0, limitUsd: Infinity };
       const rows = await q(
         "SELECT COALESCE(SUM(usd), 0) AS spent FROM budget_spend WHERE principal_id = $1 AND at >= $2",
         [principalId, now - windowMs],
@@ -38,7 +40,7 @@ export function createPostgresBudgetTracker(
     },
     async record(principalId, costUsd, now = Date.now()) {
       try {
-        for (const key of [principalId, orgKey]) {
+        for (const key of exempt?.has(principalId) ? [principalId] : [principalId, orgKey]) {
           await q(
             `WITH ins AS (INSERT INTO budget_spend(principal_id, at, usd) VALUES ($1, $2, $3))
              DELETE FROM budget_spend WHERE principal_id = $1 AND at < $4`,

@@ -45,6 +45,10 @@ await built.config.hydrate?.();
 await built.refreshCustomProviders();
 await built.identity.hydrate();
 await built.deploymentLayerReady;
+await built.adoption
+  ?.prepare()
+  .catch(reportFailureAs("adoption: unavailable until its source database is consistent", undefined));
+await built.notifications?.prepare();
 built.deploymentLayerRefresh.start();
 built.runtime.start();
 

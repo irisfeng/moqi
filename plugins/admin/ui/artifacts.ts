@@ -1,7 +1,7 @@
 import { html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { ifDefined } from "lit/directives/if-defined.js";
-import { card, bareCard, table, renderer } from "./shared.ts";
+import { card, bareCard, pager, table, renderer } from "./shared.ts";
 import { mountPacks, skillDetail, removeSkill } from "./artifacts-skills.ts";
 export type Data = Record<string, any>;
 export type Context = Record<string, any>;
@@ -476,6 +476,13 @@ function memoryIndex(root: HTMLElement, d: Data, c: Context) {
   });
   draw("");
 }
+const SKILLS_PAGE_SIZE = 20;
+type SkillSource = "pack" | "builtin" | "own";
+let skillsSource: SkillSource | "all" = "all";
+export function skillSourceOf(s: Data): SkillSource {
+  if (s.pack) return "pack";
+  return String(s.createdBy || "").startsWith("system:") ? "builtin" : "own";
+}
 export function skills(root: HTMLElement, d: Data, c: Context) {
   const render = renderer(root);
   const lastUse = (s: Data) => s.lastUsedAt || s.updatedAt || s.createdAt || 0;
@@ -498,11 +505,34 @@ export function skills(root: HTMLElement, d: Data, c: Context) {
     );
   const pending = new Set<string>();
   let query = "";
+  let page = 1;
+  const sourceCounts = { pack: 0, builtin: 0, own: 0 };
+  for (const s of items) sourceCounts[skillSourceOf(s)] += 1;
+  if (skillsSource !== "all" && !sourceCounts[skillsSource]) skillsSource = "all";
+  const sourceOption = (value: SkillSource | "all", label: string, total: number) =>
+    html`<button
+      type="button"
+      class=${"seg" + (skillsSource === value ? " active" : "")}
+      @click=${() => {
+        if (skillsSource === value) return;
+        skillsSource = value;
+        page = 1;
+        draw();
+      }}
+    >
+      ${label} ${total}
+    </button>`;
   const draw = (q = query) => {
+    if (q !== query) page = 1;
     query = q;
-    const shown = items.filter(
-      (s: Data) => !q || ((s.name || s.id) + " " + (s.description || "")).toLowerCase().includes(q),
+    const matching = items.filter(
+      (s: Data) =>
+        (skillsSource === "all" || skillSourceOf(s) === skillsSource) &&
+        (!q || ((s.name || s.id) + " " + (s.description || "")).toLowerCase().includes(q)),
     );
+    page = Math.min(page, Math.max(1, Math.ceil(matching.length / SKILLS_PAGE_SIZE)));
+    const offset = (page - 1) * SKILLS_PAGE_SIZE;
+    const shown = matching.slice(offset, offset + SKILLS_PAGE_SIZE);
     const rows = shown.map((s: Data) => [
       {
         node: html`<div>
@@ -548,6 +578,17 @@ export function skills(root: HTMLElement, d: Data, c: Context) {
         "",
         html`${c.index ? html`<div class=${q ? "hidden" : ""}>${scopeList(all, c, "skill", lastUse, "No skills yet.")}</div>` : nothing}
           <div class=${c.index && !q ? "hidden" : ""}>
+            ${
+              sourceCounts.pack + sourceCounts.builtin + sourceCounts.own > 0 &&
+              [sourceCounts.pack, sourceCounts.builtin, sourceCounts.own].filter(Boolean).length > 1
+                ? html`<div class="segmented" id="skills-source">
+                    ${sourceOption("all", "All", items.length)}
+                    ${sourceCounts.pack ? sourceOption("pack", "Skill packs", sourceCounts.pack) : nothing}
+                    ${sourceCounts.builtin ? sourceOption("builtin", "Built-in", sourceCounts.builtin) : nothing}
+                    ${sourceCounts.own ? sourceOption("own", "Own", sourceCounts.own) : nothing}
+                  </div>`
+                : nothing
+            }
             ${table(
               ["Skill", ...(c.index ? ["Scope"] : []), "Status", "Created by", "Last used", ""],
               rows,
@@ -558,6 +599,10 @@ export function skills(root: HTMLElement, d: Data, c: Context) {
               (i: number) => open(shown[i]),
               { className: "skills-table" },
             )}
+            ${pager(matching.length, SKILLS_PAGE_SIZE, offset, (next) => {
+              page = next;
+              draw();
+            })}
           </div>`,
       )}${detail}`,
     );

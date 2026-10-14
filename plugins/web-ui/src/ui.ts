@@ -4,14 +4,14 @@ import { html, nothing, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
 import { tip } from "./tooltip.ts";
 import { Check, ChevronDown, Download, createElement, type IconNode } from "lucide";
+import { brandName } from "./brand-name.ts";
 
-export function brandName(): string {
-  if (typeof document === "undefined") return "QM";
-  return document.querySelector<HTMLMetaElement>('meta[name="brand-self-label"]')?.content || "QM";
-}
+export { brandName };
 
 export function brandMark(): TemplateResult {
-  return html`<span class="brand-mark" aria-hidden="true"></span>`;
+  return html`<span class="brand-mark" aria-hidden="true"
+    ><span class="brand-mark-half"></span><span class="brand-mark-half"></span
+  ></span>`;
 }
 
 const SWELL_PATH =
@@ -378,9 +378,18 @@ export function menuSelect(props: {
 
 export function initials(s: string): string {
   const base = (s.split("@")[0] || s).trim();
+  if (/\p{Script=Han}/u.test(base)) return [...base][0] ?? "?";
   const parts = base.split(/[.\-_ ]+/).filter(Boolean);
   const two = parts.length >= 2 ? (parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "") : base.slice(0, 2);
   return (two || "?").toUpperCase();
+}
+
+const AVATAR_PALETTE_SIZE = 8;
+
+export function avatarClass(name: string): string {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + (ch.codePointAt(0) ?? 0)) >>> 0;
+  return `av-${h % AVATAR_PALETTE_SIZE}`;
 }
 
 export function relTime(ms: number): string {

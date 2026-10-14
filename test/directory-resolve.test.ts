@@ -110,6 +110,21 @@ describe("GET /v1/directory/resolve (agent looks up a teammate's mention id)", a
     assert.ok(matches.every((m) => m.principalId));
   });
 
+  it("resolves an id substring to every matching member", async () => {
+    const res = await get("/v1/directory/resolve?q=acme.com");
+    assert.equal(res.status, 200);
+    const { matches } = (await res.json()) as { matches: Array<{ principalId: string }> };
+    assert.equal(matches.length, 4, "an id substring matches all four fixture members");
+  });
+
+  it("resolves a unique email local-part prefix to a single match", async () => {
+    const res = await get("/v1/directory/resolve?q=carol@acm");
+    assert.equal(res.status, 200);
+    const { matches } = (await res.json()) as { matches: Array<{ principalId: string }> };
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0]!.principalId, "carol@acme.com");
+  });
+
   it("returns an empty match set for an unknown name (agent falls back to plain text)", async () => {
     const res = await get("/v1/directory/resolve?q=nobody-here");
     assert.equal(res.status, 200);

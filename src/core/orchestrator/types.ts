@@ -63,6 +63,7 @@ import type { OAuthClientResolver } from "../../connectors/oauth.ts";
 import type { SkillBundleStore } from "../../skills/skill-bundle-store.ts";
 import type { BrokeredLayerTool, DeploymentLayerRuntime } from "../../deployment/load-layer.ts";
 import type { FileArtifactStore } from "../../files/file-artifact-store.ts";
+import type { FileOriginStore } from "../../files/file-origin-store.ts";
 import type { DeployService } from "../../deploy/deploy-service.ts";
 import type { AclStore } from "../../acl/acl-store.ts";
 import type { SwarmService, SwarmTurn } from "../../swarms/swarm-service.ts";
@@ -108,6 +109,9 @@ export interface OrchestratorInput extends Omit<
   sessionParticipantIds?: readonly string[];
   scopeVersion?: string;
   swarm?: SwarmTurn;
+  quoteSeq?: number;
+  quoteText?: string;
+  quoteAuthor?: string;
 }
 
 export interface OrchestratorDeps {
@@ -129,6 +133,8 @@ export interface OrchestratorDeps {
   sessionSyscalls?: SessionSyscallsFactory;
   workspace: WorkspaceStore;
   files: FileArtifactStore;
+  fileOrigins?: FileOriginStore;
+  durableInboundRuns?: boolean;
   sandbox: Sandbox;
   sandboxResources?: SandboxResources;
   modelGateway: ModelGateway;

@@ -208,15 +208,18 @@ export function createPostgresDirectoryStore(connectionString: string): Director
     if (exact.length > 1) return { kind: "ambiguous", items: exact.slice(0, MAX_CANDIDATES).map(map) };
 
     const esc = likeEscape(qn);
-    let pool2 = await q(
-      `SELECT ${cols} ${from} AND ${labelLcCol} LIKE $2 ESCAPE '\\' ORDER BY ${labelLcCol}, ${idCol} LIMIT ${MAX_CANDIDATES + 1}`,
-      [orgId, `${esc}%`],
-    );
-    if (!pool2.length) {
+    let pool2: Record<string, unknown>[] = [];
+    for (const [match, pattern] of [
+      [labelLcCol, `${esc}%`],
+      [`lower(${idCol})`, `${esc}%`],
+      [labelLcCol, `%${esc}%`],
+      [`lower(${idCol})`, `%${esc}%`],
+    ] as const) {
       pool2 = await q(
-        `SELECT ${cols} ${from} AND ${labelLcCol} LIKE $2 ESCAPE '\\' ORDER BY ${labelLcCol}, ${idCol} LIMIT ${MAX_CANDIDATES + 1}`,
-        [orgId, `%${esc}%`],
+        `SELECT ${cols} ${from} AND ${match} LIKE $2 ESCAPE '\\' ORDER BY ${labelLcCol}, ${idCol} LIMIT ${MAX_CANDIDATES + 1}`,
+        [orgId, pattern],
       );
+      if (pool2.length) break;
     }
     if (!pool2.length) return { kind: "none" };
     if (pool2.length === 1) return { kind: "one", item: map(pool2[0]!) };

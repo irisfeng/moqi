@@ -12,7 +12,7 @@
     "build": "vite build",
     "serve": "node --env-file-if-exists=.env server/index.ts",
     "start": "npm run build && npm run serve",
-    "test": "NODE_ENV=test ALLOW_UNSIGNED_TEST_IDENTITY=1 node --test \"test/**/*.test.ts\"",
+    "test": "NODE_ENV=test QM_LOCALE=en ALLOW_UNSIGNED_TEST_IDENTITY=1 node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {

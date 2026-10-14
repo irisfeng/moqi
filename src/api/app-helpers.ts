@@ -298,13 +298,29 @@ export function createAppHelpers(deps: AppDeps, app: App) {
         ),
       ),
     );
-    return sessions.filter((session) => allowed.get(session.scopeId) !== false);
+    return withProjectPins(
+      principalId,
+      sessions.filter((session) => allowed.get(session.scopeId) !== false),
+    );
   }
 
   async function sessionForViewer(sessionId: string, principalId: string): Promise<Session | null> {
     const session = await deps.sessions.getForParticipant(sessionId, principalId);
     if (!session) return null;
-    return (await managedProjectMembership(session.scopeId, principalId)) === false ? null : session;
+    if ((await managedProjectMembership(session.scopeId, principalId)) === false) return null;
+    return (await withProjectPins(principalId, [session]))[0] ?? null;
+  }
+
+  async function withProjectPins(principalId: string, sessions: Session[]): Promise<Session[]> {
+    const inProject = (session: Session) => {
+      const { kind, ref } = parseScopeId(session.scopeId);
+      return kind === "group" && projectIdFromGroupRef(ref) !== null;
+    };
+    if (!deps.projectCollaboration || !sessions.some(inProject)) return sessions;
+    const pinned = new Set((await deps.projectCollaboration.pinnedIds(principalId)).map(projectScopeId));
+    return sessions.map((session) =>
+      inProject(session) ? { ...session, pinned: pinned.has(session.scopeId) } : session,
+    );
   }
 
   async function contextsFor(principalId: string): Promise<ContextSummary[]> {
@@ -373,7 +389,9 @@ export function createAppHelpers(deps: AppDeps, app: App) {
       },
     );
     return {
-      owned: page.files.filter((f) => myScopes.includes(f.ownerScopeId)).map(toFileItem),
+      owned: page.files
+        .filter((f) => myScopes.includes(f.ownerScopeId))
+        .map((file) => ({ ...toFileItem(file), canTrash: file.ownerScopeId === scopeId("personal", principalId) })),
       shared: page.files.filter((f) => !myScopes.includes(f.ownerScopeId)).map(toFileItem),
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
     };

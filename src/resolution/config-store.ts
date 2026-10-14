@@ -119,12 +119,17 @@ export interface PersistedPeopleDirectoryUrl {
   scopeId: ScopeId;
   url: string;
 }
+export interface OrgTheme {
+  light?: Record<string, string>;
+  dark?: Record<string, string>;
+}
 export interface OrgBranding {
   accent?: string;
   mark?: string;
   markUrl?: string;
   selfLabel?: string;
   orgName?: string;
+  theme?: OrgTheme;
 }
 export interface PersistedBranding {
   scopeId: ScopeId;
@@ -278,6 +283,7 @@ export interface ScopedConfigStore {
 export function createMemoryConfigStore(
   orgId: string,
   opts: {
+    personalModelAccounts?: boolean;
     connectorClients?: DurableMap<StoredConnectorClient>;
     souls?: DurableMap<PersistedSoul>;
     soulHistory?: DurableMap<PersistedSoulRevision>;
@@ -1010,12 +1016,14 @@ export function createMemoryConfigStore(
       );
     },
     async getIndividualModelAuthDurable(principalId) {
+      if (opts.personalModelAccounts === false) return false;
       if ((await individualModelAuthStore.get(org))?.on) return true;
       return principalId
         ? ((await individualModelAuthStore.get(scopeId("personal", principalId)))?.on ?? false)
         : false;
     },
     async getModelAccountDurable(principalId) {
+      if (opts.personalModelAccounts === false) return "company";
       const row = await individualModelAuthStore.get(scopeId("personal", principalId));
       if (row?.on) return row.provider ?? "personal";
       return (await individualModelAuthStore.get(org))?.on ? "personal" : "company";

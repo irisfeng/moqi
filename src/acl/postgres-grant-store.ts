@@ -1,3 +1,8 @@
+import {
+  lockGrantResource,
+  requireActiveArtifactRun,
+  requireArtifactResource,
+} from "../persistence/artifact-resource.ts";
 import { createPgPool } from "../persistence/pg-pool.ts";
 import type { Grant, Permission, ScopeId } from "../types.ts";
 import type { GrantPersistence } from "./acl-store.ts";
@@ -80,6 +85,10 @@ export function createPostgresGrantStore(connectionString: string): GrantPersist
       $migrate$`,
       ],
     },
+    {
+      id: "zz-qm-cn/acl-grants/0001-source-run",
+      statements: ["ALTER TABLE acl_grants ADD COLUMN IF NOT EXISTS source_run_id TEXT"],
+    },
   ]);
   const { q } = db;
   let cache: { v: string; grants: readonly Grant[] } | null = null;
@@ -96,17 +105,28 @@ export function createPostgresGrantStore(connectionString: string): GrantPersist
       cache = version === null ? null : { v: version, grants };
       return [...grants];
     },
-    async put(g) {
+    async put(g, sourceRunId) {
       const client = await (await db.pool()).connect();
       try {
         await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`acl-grants:${g.ownerScopeId}\n${g.ref}`]);
+        if (sourceRunId) await requireActiveArtifactRun(client, sourceRunId);
+        await lockGrantResource(client, g.ownerScopeId, g.ref);
+        await requireArtifactResource(client, g.ownerScopeId, g.ref);
+        if (sourceRunId) {
+          const registered = await client.query(
+            `SELECT 1 FROM inbound_artifact_cleanup c JOIN file_artifacts f ON f.id = c.artifact_id
+             WHERE c.run_id = $1 AND f.owner_scope_id = $2 AND f.id = $3 AND f.created_by = $4`,
+            [sourceRunId, g.ownerScopeId, g.ref, g.grantedBy],
+          );
+          if (!registered.rowCount || g.permission !== "read") throw new Error("invalid inbound artifact grant");
+        }
         await client.query(
-          `INSERT INTO acl_grants (owner_scope_id, path, grantee_scope_id, permission, granted_by)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO acl_grants (owner_scope_id, path, grantee_scope_id, permission, granted_by, source_run_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (owner_scope_id, path, grantee_scope_id, permission)
-           DO UPDATE SET granted_by = EXCLUDED.granted_by`,
-          [g.ownerScopeId, g.ref, g.granteeScopeId, g.permission, g.grantedBy],
+           DO UPDATE SET granted_by = EXCLUDED.granted_by, source_run_id = EXCLUDED.source_run_id
+           WHERE EXCLUDED.source_run_id IS NULL OR acl_grants.source_run_id = EXCLUDED.source_run_id`,
+          [g.ownerScopeId, g.ref, g.granteeScopeId, g.permission, g.grantedBy, sourceRunId ?? null],
         );
         await client.query("COMMIT");
       } catch (error) {
@@ -120,7 +140,7 @@ export function createPostgresGrantStore(connectionString: string): GrantPersist
       const client = await (await db.pool()).connect();
       try {
         await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`acl-grants:${g.ownerScopeId}\n${g.ref}`]);
+        await lockGrantResource(client, g.ownerScopeId, g.ref);
         await client.query(
           "DELETE FROM acl_grants WHERE owner_scope_id = $1 AND path = $2 AND grantee_scope_id = $3 AND permission = $4",
           [g.ownerScopeId, g.ref, g.granteeScopeId, g.permission],
@@ -137,7 +157,7 @@ export function createPostgresGrantStore(connectionString: string): GrantPersist
       const client = await (await db.pool()).connect();
       try {
         await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`acl-grants:${ownerScopeId}\n${ref}`]);
+        await lockGrantResource(client, ownerScopeId, ref);
         const selected = await client.query(
           "SELECT owner_scope_id, path, grantee_scope_id, permission, granted_by FROM acl_grants WHERE owner_scope_id = $1 AND path = $2 FOR UPDATE",
           [ownerScopeId, ref],
@@ -157,6 +177,7 @@ export function createPostgresGrantStore(connectionString: string): GrantPersist
           return false;
         }
         await client.query("DELETE FROM acl_grants WHERE owner_scope_id = $1 AND path = $2", [ownerScopeId, ref]);
+        if (replacement.length) await requireArtifactResource(client, ownerScopeId, ref);
         for (const grant of replacement) {
           await client.query(
             "INSERT INTO acl_grants (owner_scope_id, path, grantee_scope_id, permission, granted_by) VALUES ($1, $2, $3, $4, $5)",

@@ -3,6 +3,7 @@ import "./support/auto-fake-sprites.ts";
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,6 +47,24 @@ function asUser(user: string, init: RequestInit = {}): RequestInit {
   };
 }
 
+function sendAs(user: string, fields: { text: string; threadRef: string; scopeId?: string; channelName?: string }) {
+  const body = {
+    text: fields.text,
+    threadRef: fields.threadRef,
+    expectedUser: user,
+    ...(fields.scopeId ? { scopeId: fields.scopeId } : {}),
+    ...(fields.channelName ? { channelName: fields.channelName } : {}),
+  };
+  const clientRequestFingerprint = createHash("sha256").update(JSON.stringify(body)).digest("hex");
+  return fetch(
+    `${webBase}/api/turn/v2`,
+    asUser(user, {
+      method: "POST",
+      body: JSON.stringify({ ...body, idempotencyKey: randomUUID(), clientRequestFingerprint }),
+    }),
+  );
+}
+
 interface SessionRow {
   id: string;
   threadRef: string;
@@ -87,29 +106,17 @@ test("a channel member can continue a teammate's shared web thread; outsiders an
     ],
   );
 
-  const aliceTurn = await fetch(
-    `${webBase}/api/turn`,
-    asUser("alice", {
-      method: "POST",
-      body: JSON.stringify({
-        text: "kick off",
-        threadRef: "web:alice:s1",
-        scopeId: "channel:C2",
-        channelName: "sekrit",
-      }),
-    }),
-  );
+  const aliceTurn = await sendAs("alice", {
+    text: "kick off",
+    threadRef: "web:alice:s1",
+    scopeId: "channel:C2",
+    channelName: "sekrit",
+  });
   assert.ok(aliceTurn.status < 300, `alice's turn should be accepted (got ${aliceTurn.status})`);
   const session = await waitForSession("alice", "web:alice:s1");
   assert.equal(session.scopeId, "channel:C2");
 
-  const bobTurn = await fetch(
-    `${webBase}/api/turn`,
-    asUser("bob", {
-      method: "POST",
-      body: JSON.stringify({ text: "me too", threadRef: "web:alice:s1", scopeId: "channel:C2" }),
-    }),
-  );
+  const bobTurn = await sendAs("bob", { text: "me too", threadRef: "web:alice:s1", scopeId: "channel:C2" });
   assert.ok(bobTurn.status < 300, `bob's continuation should be accepted (got ${bobTurn.status})`);
   await waitForSession("bob", "web:alice:s1");
 
@@ -122,19 +129,10 @@ test("a channel member can continue a teammate's shared web thread; outsiders an
     404,
   );
 
-  const personalClaim = await fetch(
-    `${webBase}/api/turn`,
-    asUser("bob", { method: "POST", body: JSON.stringify({ text: "sneak", threadRef: "web:alice:s1" }) }),
-  );
+  const personalClaim = await sendAs("bob", { text: "sneak", threadRef: "web:alice:s1" });
   assert.equal(personalClaim.status, 403);
   assert.equal(((await personalClaim.json()) as { error: string }).error, "forbidden_thread");
 
-  const outsider = await fetch(
-    `${webBase}/api/turn`,
-    asUser("mallory", {
-      method: "POST",
-      body: JSON.stringify({ text: "sneak", threadRef: "web:alice:s1", scopeId: "channel:C2" }),
-    }),
-  );
+  const outsider = await sendAs("mallory", { text: "sneak", threadRef: "web:alice:s1", scopeId: "channel:C2" });
   assert.equal(outsider.status, 403);
 });

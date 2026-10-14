@@ -1,7 +1,7 @@
 import { html, nothing, render, type TemplateResult } from "lit";
 import { api, type CoreContext } from "./core-bridge";
 import type { SkillItem } from "./composer";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error";
 import { fieldSelect } from "./ui";
 import { appState } from "./shell";
 import { skillActions } from "./skill-actions";
@@ -96,8 +96,16 @@ export function routeSkillsHistory(skillId: string | null): void {
   else drawSkills();
 }
 
+const SKILL_SCOPE_LABELS: Record<string, string> = {
+  personal: "Personal",
+  channel: "Channel",
+  group: "Group",
+  team: "Team",
+  org: "Org",
+};
+
 function scopeLabel(scope: string): string {
-  return scope ? scope.charAt(0).toUpperCase() + scope.slice(1) : "";
+  return SKILL_SCOPE_LABELS[scope] ?? scope;
 }
 
 function editAudience(scopeId: string | undefined): string {

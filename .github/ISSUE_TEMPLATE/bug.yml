@@ -1,0 +1,26 @@
+name: 问题报告 · Bug report
+description: 哪里不对 · Something does not work
+labels: [needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        中文或英文都可以。安全问题请不要在这里报告，见 SECURITY.md。
+        Chinese or English are both fine. Do not report security issues here; see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 · What happened
+      description: 你做了什么、看到了什么、期望看到什么 · What you did, what you saw, what you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 · Version
+      description: 设置 → 版本 · Settings → Version
+  - type: textarea
+    id: more
+    attributes:
+      label: 其他信息 · Anything else
+      description: 截图或日志，请先去掉密钥和个人信息 · Screenshots or logs, with keys and personal data removed

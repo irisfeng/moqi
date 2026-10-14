@@ -25,6 +25,14 @@ export const CONFIRM_PAGE_CSP = PAGE_CSP.replace(
   `default-src 'none'; script-src '${CONFIRM_SCRIPT_HASH}';`,
 );
 
+const RESUME_SCRIPT = `addEventListener("pageshow",function(event){if(event.persisted)location.reload();});`;
+const RESUME_SCRIPT_HASH = `sha256-${createHash("sha256").update(RESUME_SCRIPT, "utf8").digest("base64")}`;
+
+export const SIGNIN_PAGE_CSP = PAGE_CSP.replace(
+  "default-src 'none';",
+  `default-src 'none'; script-src '${RESUME_SCRIPT_HASH}';`,
+);
+
 const STYLE = `<style>
   :root{
     --bg:#ffffff; --surface:#ffffff; --text:#0a0a0a; --muted:#737373;
@@ -72,6 +80,9 @@ const STYLE = `<style>
   .divider::before,.divider::after{ content:""; flex:1; height:1px; background:var(--border); }
   .help{ color:var(--muted); font-size:12.5px; margin:20px 0 0; }
   .note{ color:var(--muted); font-size:12px; margin:8px 0 0; text-align:left; }
+  .note a{ color:inherit; }
+  .check{ display:flex; align-items:center; gap:8px; margin:6px 0; font-weight:400; }
+  .check input{ margin:0; }
   .who{ display:block; margin:0 auto 22px; font-size:13px; color:var(--text); background:var(--secondary);
     border:1px solid var(--border); border-radius:var(--radius-md); padding:11px 14px; word-break:break-word; }
 </style>`;
@@ -123,6 +134,9 @@ export function signInPage(o: {
   requestToken: string;
   emailLink: boolean;
   password: boolean;
+  managedPasswords?: boolean;
+  forgotUrl?: string;
+  remember?: boolean;
   email?: string;
   problem?: string;
   passwordProblem?: string;
@@ -151,8 +165,10 @@ export function signInPage(o: {
           spellcheck="false" maxlength="254" placeholder="you@example.com" value="${escapeHtml(o.email ?? "")}">
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+        ${o.managedPasswords ? `<label class="check"><input name="remember" type="checkbox" value="1"${o.remember ? " checked" : ""}>Keep me signed in on this device for 30 days</label>` : ""}
         <button class="btn${o.trustedSignInLabel ? " alternative" : ""}" type="submit">Sign in with password</button>
-        <p class="note">Password sign-in is meant for getting started. Once ${escapeHtml(o.brandName)} is set up, your administrator should switch to email links or an identity provider.</p>
+        ${o.forgotUrl ? `<p class="note"><a href="${escapeHtml(o.forgotUrl)}">Forgot your password?</a></p>` : ""}
+        ${o.managedPasswords ? "" : `<p class="note">Password sign-in is meant for getting started. Once ${escapeHtml(o.brandName)} is set up, your administrator should switch to email links or an identity provider.</p>`}
       </form>`
     : "";
   let msg = "Enter your work email and we'll send you a one-time sign-in link.";
@@ -165,10 +181,48 @@ export function signInPage(o: {
     icon: o.trustedSignInLabel || o.password ? LOCK_ICON : MAIL_ICON,
     heading: `Sign in to ${o.brandName}`,
     msg,
-    body: `${trusted}${passwordForm}${o.password && o.emailLink ? `<div class="divider">OR</div>` : ""}${emailForm}`,
+    body: `${trusted}${passwordForm}${o.password && o.emailLink ? `<div class="divider">OR</div>` : ""}${emailForm}<script>${RESUME_SCRIPT}</script>`,
     help: o.emailLink
       ? "For email sign-in, use an address your administrator has allowed."
       : "Use the account your administrator has allowed.",
+  });
+}
+
+export function changePasswordPage(o: {
+  brandName: string;
+  action: string;
+  changeToken: string;
+  email: string;
+  problem?: string;
+}): string {
+  return page({
+    title: "Set a new password",
+    brandName: o.brandName,
+    icon: LOCK_ICON,
+    heading: "Set a new password",
+    msg: "Before your first sign-in, and after a reset, you choose a password of your own.",
+    body: `${o.problem ? `<p class="reason"><strong>Try again</strong>${escapeHtml(o.problem)}</p>` : ""}<form method="post" action="${escapeHtml(o.action)}">
+        <input type="hidden" name="change" value="${escapeHtml(o.changeToken)}">
+        <p class="who">${escapeHtml(o.email)}</p>
+        <label for="next">New password (at least 8 characters)</label>
+        <input id="next" name="next" type="password" autocomplete="new-password" required minlength="8" maxlength="128" autofocus>
+        <label for="confirm">Confirm the new password</label>
+        <input id="confirm" name="confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128">
+        <button class="btn" type="submit">Save and sign in</button>
+      </form>`,
+    help: "The new password must differ from the initial one.",
+  });
+}
+
+export function forgotPasswordPage(o: { brandName: string; signInUrl?: string }): string {
+  return page({
+    title: "Recover your account",
+    brandName: o.brandName,
+    icon: ALERT_ICON,
+    heading: "Ask your administrator to recover your account",
+    msg: "Contact your administrator through a channel your organization trusts. They verify who you are and then reset your sign-in.",
+    body: `${o.signInUrl ? `<a class="btn" href="${escapeHtml(o.signInUrl)}">Back to sign-in</a>` : ""}`,
+    help: "An initial password cannot recover a password you have changed. Never send your current password to anyone.",
   });
 }
 
@@ -218,7 +272,7 @@ export function problemPage(o: {
   retryUrl?: string;
 }): string {
   const detail = o.detail ? `<p class="reason"><strong>Details</strong>${escapeHtml(o.detail)}</p>` : "";
-  const retry = o.retryUrl ? `<a class="btn" href="${escapeHtml(o.retryUrl)}">Request a new sign-in link</a>` : "";
+  const retry = o.retryUrl ? `<a class="btn" href="${escapeHtml(o.retryUrl)}">Sign in again</a>` : "";
   const body = `${detail}${retry}`;
   return page({
     title: "Sign-in problem",

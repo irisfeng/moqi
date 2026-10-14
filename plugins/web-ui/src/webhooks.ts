@@ -1,7 +1,8 @@
+import { userErrorMessage } from "./user-error.ts";
 import { html, nothing, render, type TemplateResult } from "lit";
 import { Check, ChevronDown, Plus } from "lucide";
 import { api } from "./core-bridge";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error.ts";
 import { actionSnippet, closeFormMenus, copyText, icon, relTime, setFormMenuValue, toggleFormMenu } from "./ui";
 import { listBackLink, listPageTpl } from "./list-page";
 import { ensureContexts, scopeChip } from "./contexts";
@@ -279,7 +280,7 @@ function openWebhook(w: WebhookView, opts: { push?: boolean } = {}): void {
           w.lastError
             ? html`<div class="field">
                 <label>Last error</label>
-                <div class="value" style="color:var(--destructive,#c00)">${w.lastError}</div>
+                <div class="value" style="color:var(--destructive,#c00)">${userErrorMessage(w.lastError)}</div>
               </div>`
             : ""
         }

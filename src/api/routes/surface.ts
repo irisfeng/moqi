@@ -16,10 +16,11 @@ import {
   fastModeModelIds,
 } from "../../model/pi-models.ts";
 import { builtInModelCatalog, selectableCatalogForHarness, selectableModelCatalog } from "../../model/model-catalog.ts";
+import { customModelCatalog } from "../../model/custom-providers.ts";
 import { errMessage } from "../../util/errors.ts";
 import { renderAgentApis } from "../agent-api-catalog.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS } from "../../auth/capability-token.ts";
-import { contentTypeWithUtf8Charset, pipeToResponse, sendJson } from "../http.ts";
+import { contentDispositionAttachment, contentTypeWithUtf8Charset, pipeToResponse, sendJson } from "../http.ts";
 import { resolveBranding } from "../../resolution/branding.ts";
 import { audit, isObj, orgScope } from "./shared.ts";
 import {
@@ -96,14 +97,21 @@ async function adoptSession(ctx: ApiCtx): Promise<void> {
 async function forkSession(ctx: ApiCtx): Promise<void> {
   const { res, app, body } = ctx;
   const id = ctx.params.id!;
-  const b = body as { principalId?: unknown; upToSeq?: unknown };
+  const b = body as { principalId?: unknown; upToSeq?: unknown; targetScopeId?: unknown };
   if (typeof b.principalId !== "string" || !b.principalId) {
     return sendJson(res, 400, { error: "bad_request", message: "principalId required" });
+  }
+  if (b.targetScopeId !== undefined && (typeof b.targetScopeId !== "string" || !b.targetScopeId)) {
+    return sendJson(res, 400, { error: "bad_request", message: "targetScopeId must be a scope id" });
   }
   if (b.upToSeq !== undefined && (typeof b.upToSeq !== "number" || !Number.isInteger(b.upToSeq) || b.upToSeq < 0)) {
     return sendJson(res, 400, { error: "bad_request", message: "upToSeq must be a non-negative integer" });
   }
-  const out = await app.forkSession(id, b.principalId, b.upToSeq !== undefined ? { upToSeq: b.upToSeq } : undefined);
+  const forkOpts = {
+    ...(b.upToSeq !== undefined ? { upToSeq: b.upToSeq } : {}),
+    ...(b.targetScopeId !== undefined ? { targetScopeId: b.targetScopeId as ScopeId } : {}),
+  };
+  const out = await app.forkSession(id, b.principalId, Object.keys(forkOpts).length ? forkOpts : undefined);
   if (!out) return sendJson(res, 404, { error: "not_found" });
   return sendJson(res, 200, out);
 }
@@ -260,16 +268,21 @@ async function getSessionBackgroundOutput(ctx: ApiCtx): Promise<void> {
 }
 
 async function getFileContent(ctx: ApiCtx): Promise<void> {
-  const { res, app, capability, actor } = ctx;
+  const { res, app, url, capability, actor } = ctx;
   const id = ctx.params.id!;
   const viewer = capability?.actorId ?? actor?.p;
   if (!viewer) return sendJson(res, 401, { error: "capability_required" });
   const opened = await app.openFileForViewer(id, viewer);
   if (!opened) return sendJson(res, 404, { error: "not_found" });
+  const download = url.searchParams.get("download") === "1";
   res.writeHead(200, {
-    "content-type": contentTypeWithUtf8Charset(opened.mimetype || "application/octet-stream"),
+    "content-type": download
+      ? "application/octet-stream"
+      : contentTypeWithUtf8Charset(opened.mimetype || "application/octet-stream"),
     "content-length": String(opened.sizeBytes),
-    "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(opened.name)}`,
+    "content-disposition": download
+      ? contentDispositionAttachment(opened.name)
+      : `inline; filename*=UTF-8''${encodeURIComponent(opened.name)}`,
   });
   pipeToResponse(res, opened.stream, "file read failed");
   return;
@@ -291,6 +304,29 @@ async function listFiles(ctx: ApiCtx): Promise<void> {
     scope ? (scope as ScopeId) : undefined,
   );
   return sendJson(res, 200, page);
+}
+
+async function listTrashedFiles(ctx: ApiCtx): Promise<void> {
+  const { res, app, url, capability, actor } = ctx;
+  const viewer = capability?.actorId ?? actor?.p;
+  if (!viewer) return sendJson(res, 401, { error: "capability_required" });
+  return sendJson(
+    res,
+    200,
+    await app.listTrashedFilesForViewer(viewer, {
+      limit: Number(url.searchParams.get("limit") ?? "60"),
+      cursor: url.searchParams.get("cursor") ?? undefined,
+    }),
+  );
+}
+
+async function setFileTrashed(ctx: ApiCtx): Promise<void> {
+  const { res, app, capability, actor, req } = ctx;
+  const viewer = capability?.actorId ?? actor?.p;
+  if (!viewer) return sendJson(res, 401, { error: "capability_required" });
+  if (!(await app.setPersonalFileTrashed(ctx.params.id!, viewer, req.method === "DELETE")))
+    return sendJson(res, 404, { error: "not_found" });
+  return sendJson(res, 200, { ok: true });
 }
 
 async function uploadFile(ctx: ApiCtx): Promise<void> {
@@ -1147,6 +1183,7 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
     ...(branding.mark ? { mark: branding.mark } : {}),
     ...(branding.markUrl ? { markUrl: branding.markUrl } : {}),
     ...(branding.selfLabel ? { selfLabel: branding.selfLabel } : {}),
+    ...(branding.theme ? { theme: branding.theme } : {}),
   };
   return sendJson(res, 200, {
     webuiModels: webuiModels != null ? configuredPicker : allowed,
@@ -1158,6 +1195,7 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
         providerStatus.openai ||
         providerStatus.openrouter ||
         providerStatus.modelIds?.size ||
+        customModelCatalog().length ||
         deps.harnessCarriedModelAuth,
       ),
     }),
@@ -1362,6 +1400,9 @@ export const surfaceRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "GET", path: "/v1/sessions/:id", auth: "source", handle: getSession },
   { method: "GET", path: "/v1/files/:id/content", auth: "either", handle: getFileContent },
   { method: "POST", path: "/v1/files/upload", auth: "source", handle: uploadFile },
+  { method: "GET", path: "/v1/files/trash", auth: "source", handle: listTrashedFiles },
+  { method: "DELETE", path: "/v1/files/:id", auth: "source", handle: setFileTrashed },
+  { method: "POST", path: "/v1/files/:id/restore", auth: "source", handle: setFileTrashed },
   { method: "GET", path: "/v1/files", auth: "either", handle: listFiles },
   { method: "POST", path: "/v1/sessions/:id", auth: "source", handle: patchSession },
   { method: "GET", path: "/v1/sessions", auth: "source", handle: listSessions },

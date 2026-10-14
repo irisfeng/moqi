@@ -1,0 +1,14 @@
+Moqi
+Copyright (c) 2026 the Moqi authors
+
+Moqi is a distribution of QM (https://github.com/yc-software/qm),
+Copyright (c) 2026 QM contributors, released under the MIT License in the
+LICENSE file. Moqi's own changes are released under the same licence.
+
+Skills bundled under deploy/layers/qm-cn/skills/ keep their own licences,
+each in the LICENSE file of its directory:
+
+- agent-reach: MIT, translated and adapted from https://github.com/Panniantong/Agent-Reach
+- frontend-slides: MIT, translated and adapted from https://github.com/zarazhangrui/frontend-slides
+- ppt-master: MIT, from https://github.com/hugohe3/ppt-master
+- ponytail: MIT, translated from https://github.com/DietrichGebert/ponytail

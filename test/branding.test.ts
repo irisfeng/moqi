@@ -61,3 +61,34 @@ test("resolveBranding sanitizes stored values that predate write-side sanitizati
   const config = { getBrandingDurable: async () => ({ selfLabel: "{{legacy}}", orgName: "Acme <{Corp}>" }) };
   assert.deepEqual(await resolveBranding(config, ORG), { selfLabel: "legacy", orgName: "Acme Corp" });
 });
+
+test("sanitizeBranding keeps only theme tokens and colors that cannot break out of a declaration", () => {
+  const branding = sanitizeBranding({
+    theme: {
+      light: {
+        background: "#f7f5ef",
+        foreground: "oklch(0.22 0.02 250)",
+        "Bad Name": "#fff",
+        accent: "red; } body { display: none",
+        border: "url(https://example.com/x)",
+      },
+      dark: { background: "rgb(20 22 28 / 90%)" },
+      other: { background: "#000" },
+    },
+  });
+  assert.deepEqual(branding?.theme, {
+    light: { background: "#f7f5ef", foreground: "oklch(0.22 0.02 250)" },
+    dark: { background: "rgb(20 22 28 / 90%)" },
+  });
+  assert.equal(sanitizeBranding({ theme: { light: { background: "nonsense" } } }), undefined);
+  assert.equal(sanitizeBranding({ theme: "dark" }), undefined);
+});
+
+test("resolveBranding takes the theme from the store when it has one and from the default otherwise", async () => {
+  const dflt = { theme: { light: { background: "#ffffff" } } };
+  const stored = { theme: { dark: { background: "#101010" } } };
+  const empty = { getBrandingDurable: async () => null };
+  const saved = { getBrandingDurable: async () => stored };
+  assert.deepEqual((await resolveBranding(empty, scopeId("org", "acme"), dflt)).theme, dflt.theme);
+  assert.deepEqual((await resolveBranding(saved, scopeId("org", "acme"), dflt)).theme, stored.theme);
+});

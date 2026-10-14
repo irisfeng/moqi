@@ -1,8 +1,64 @@
+<div align="center">
+
+# Moqi · 默契
+
+### A self-hosted AI coworker for teams that work in Chinese
+
+[简体中文](./README.zh-CN.md) · English
+
+</div>
+
+Moqi is a distribution of [QM](https://github.com/yc-software/qm), the multiplayer agent harness for work. It keeps QM's core (scoped memory, files, sandboxes, projects and the web UI) and adapts it for organisations in mainland China that run their own models and sign in with their own accounts.
+
+## What it adds to QM
+
+- A Chinese interface, applied at build time from a line catalog, with English kept as the source.
+- Provider templates for DeepSeek, Qwen, Zhipu GLM, Moonshot Kimi and Volcengine Ark, so the agent can run on providers reachable from the mainland.
+- Work features for a whole team: a people directory with contact details, department documents, project boards, a Files recycle bin, palettes for each person, a growth handbook for new users, and adoption reports for administrators.
+- Release notes in the product, under Settings → Version.
+
+## Deploy Moqi
+
+Moqi is deployed from this source tree. The `@yc-software/qm` package and the images it pulls are QM's own releases, so deploying the package deploys QM, not Moqi.
+
+You need Linux with Docker, Node.js 24.15.0 or later with npm 11.10.0 or later on the machine you deploy from, and credentials for at least one model provider.
+
+1. Complete the provider setup in [deployment.md](./deployment.md), then follow [Customize and run your source](#customize-and-run-your-source) below, always with `--build-from .` so every image is built from this tree. [`deploy/layers/qm-cn/deploy/qm.config.jsonc.example`](./deploy/layers/qm-cn/deploy/qm.config.jsonc.example) is a single-host Docker configuration to start from, and [`deploy/layers/qm-cn/providers/`](./deploy/layers/qm-cn/providers/) holds the provider templates.
+2. Before the web UI image is built, stamp the version, its release notes and the palettes into the page:
+
+   ```bash
+   python3 deploy/layers/qm-cn/scripts/stamp-product-version.py plugins/web-ui/index.html
+   ```
+
+3. Copy the layer's [`skills/`](./deploy/layers/qm-cn/skills/) into `<deployment-dir>/sandbox/skills`. The docker target mounts that directory at `/layer` and sets `DEPLOYMENT_LAYER` for you, and the core installs the skills at start. On other targets, set `DEPLOYMENT_LAYER` to a directory that holds `skills/`. See [`deploy/layers/README.md`](./deploy/layers/README.md) for the layout.
+4. The office and slide skills need the sandbox image described in [`deploy/layers/qm-cn/sandbox/README.md`](./deploy/layers/qm-cn/sandbox/README.md).
+5. Optional:
+   - Set the home page's scenes with `node deploy/layers/qm-cn/scripts/apply-webui-home.mjs <deployment-dir>` once the core is running. It reads `CORE_SIGNING_SECRET` from that directory's `.env`.
+   - Start the organisation's soul from [`deploy/layers/qm-cn/soul/org-soul.zh.md`](./deploy/layers/qm-cn/soul/org-soul.zh.md) in the admin console.
+
+Keep your own configuration, runbooks and anything private in `deploy/layers/qm-cn/private/`, which is ignored, or in a separate private repository.
+
+## How this repository works
+
+Each Moqi release is published here as one commit on top of QM's history, so `git log` shows upstream's work and one entry per Moqi release. Development happens elsewhere.
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](./CONTRIBUTING.md). It governs contributions to Moqi; the contributing section in QM's README below applies to QM itself. Report security problems privately, as described in [SECURITY.md](./SECURITY.md).
+
+## Licence
+
+MIT. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Thanks to QM and its contributors.
+
+The rest of this page is QM's own README. It describes the core Moqi is built on; where it says QM, Moqi behaves the same way.
+
+---
+
 <p align="center">
   <img src="docs/images/qm-logo.png" alt="QM" width="120">
 </p>
 
 <div align="center">
+
+English · [简体中文](./README.zh-CN.md)
 
 **A multiplayer agent harness for work. In Slack and on the web.**<br>
 Run it in your own cloud, with your own models and keys.

@@ -129,7 +129,7 @@ export function mimeFromName(name: string): string {
 
 export const MAX_OUTBOUND_FILES = 20;
 
-export const MAX_INBOUND_FILES = 10;
+export const MAX_INBOUND_FILES = 20;
 
 export const MAX_SHARED_FILES_LISTED = 25;
 
@@ -141,6 +141,8 @@ export interface ArtifactRegistration {
   seed: string;
   onRegistered?: (a: { id: string; path: string; ownerScopeId: ScopeId; direction: FileDirection }) => Promise<void>;
   onError?: (e: unknown) => void;
+  runId?: string;
+  failClosed?: boolean;
 }
 
 async function registerArtifact(
@@ -165,6 +167,7 @@ async function registerArtifact(
       mimetype,
       data: bytes,
       direction,
+      ...(direction === "in" && reg.runId ? { inboundRunId: reg.runId } : {}),
       ...(reg.createdInScope ? { createdInScope: reg.createdInScope } : {}),
       maxBytes: MAX_ATTACHMENT_BYTES,
     });
@@ -173,6 +176,7 @@ async function registerArtifact(
     return registered;
   } catch (e) {
     reg.onError?.(e);
+    if (reg.failClosed) throw e;
     return undefined;
   }
 }
@@ -337,12 +341,15 @@ export async function materializeInbound(
   const blocked: string[] = [];
   const unscreened: string[] = [];
   const usedNames = new Set<string>();
-  for (const a of attachments) {
+  for (const [position, a] of attachments.entries()) {
     if (metas.length >= MAX_INBOUND_FILES) {
       tooMany.push(safeAttachmentName(a.name));
       continue;
     }
-    const blob = await transfer.open(a.blobId);
+    const saved = register?.runId
+      ? await register.store.open(fileArtifactId(register.seed, "in", position)).catch(() => null)
+      : null;
+    const blob = saved ?? (await transfer.open(a.blobId));
     if (!blob) {
       unavailable.push(safeAttachmentName(a.name));
       continue;
@@ -362,9 +369,7 @@ export async function materializeInbound(
     }
     const box = await computer();
     if (box) await sandbox.writeFileBytes(box, `${inboxDir}/${name}`, bytes);
-    const registered = register
-      ? await registerArtifact(register, "in", metas.length, name, mimetype, bytes)
-      : undefined;
+    const registered = register ? await registerArtifact(register, "in", position, name, mimetype, bytes) : undefined;
     if (!box) {
       if (!registered) {
         unavailable.push(name);

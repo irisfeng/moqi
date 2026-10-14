@@ -61,3 +61,12 @@ test("sandbox markdown download stays unavailable when no visible file matches",
   });
   assert.equal(response.status, 404);
 });
+
+test("sandbox markdown download forwards the download intent through the redirect", async () => {
+  const response = await fetch(`${base}/api/files/by-name/content?name=interview-list.csv&download=1`, {
+    headers: { cookie: "webuiuser=alice" },
+    redirect: "manual",
+  });
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("location"), "/api/files/artifact-1/content?download=1");
+});

@@ -1,3 +1,9 @@
+import {
+  artifactIsGranted,
+  artifactIsReferenced,
+  lockGrantResource,
+  requireActiveArtifactRun,
+} from "../persistence/artifact-resource.ts";
 import { likeContains } from "../persistence/like.ts";
 import { createPgPool, withPgTransaction } from "../persistence/pg-pool.ts";
 import type { ScopeId } from "../types.ts";
@@ -75,6 +81,21 @@ export function createPostgresFileArtifactStore(
         "CREATE TABLE IF NOT EXISTS file_artifact_deletions(id TEXT PRIMARY KEY, deleted_at BIGINT NOT NULL)",
       ],
     },
+    {
+      id: "zz-qm-cn/files/0001-inbound-cleanup",
+      statements: [
+        `CREATE TABLE IF NOT EXISTS inbound_artifact_cleanup (
+          artifact_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          created_at BIGINT NOT NULL,
+          next_attempt_at BIGINT NOT NULL DEFAULT 0
+        )`,
+        `ALTER TABLE inbound_artifact_cleanup ADD COLUMN IF NOT EXISTS next_attempt_at BIGINT NOT NULL DEFAULT 0`,
+        `CREATE INDEX IF NOT EXISTS inbound_artifact_cleanup_next
+          ON inbound_artifact_cleanup(next_attempt_at, created_at, artifact_id)`,
+        `CREATE INDEX IF NOT EXISTS inbound_artifact_cleanup_run ON inbound_artifact_cleanup(run_id)`,
+      ],
+    },
   ]);
 
   async function getRow(id: string): Promise<FileArtifact | null> {
@@ -100,7 +121,8 @@ export function createPostgresFileArtifactStore(
       access = `(${access} OR (enabled = TRUE AND (owner_scope_id, id) IN (SELECT * FROM unnest($2::text[], $3::text[]))))`;
     }
     const filters = [access];
-    if (!opts?.includeDisabled) filters.push("enabled = TRUE");
+    if (opts?.disabledOnly) filters.push("enabled = FALSE");
+    else if (!opts?.includeDisabled) filters.push("enabled = TRUE");
     if (opts?.createdInScope != null) {
       params.push(opts.createdInScope);
       filters.push(`created_in_scope = $${params.length}::text`);
@@ -138,12 +160,11 @@ export function createPostgresFileArtifactStore(
   return {
     async put(input) {
       const existing = await getRow(input.id);
-      if (existing) return { artifact: existing, created: false };
+      if (existing && !input.inboundRunId) return { artifact: existing, created: false };
 
-      const { blobKey, sizeBytes, sha256 } = await byteStore.put(
-        input.data,
-        input.maxBytes != null ? { maxBytes: input.maxBytes } : {},
-      );
+      const { blobKey, sizeBytes, sha256 } = existing?.blobKey
+        ? { blobKey: existing.blobKey, sizeBytes: existing.sizeBytes, sha256: existing.sha256 }
+        : await byteStore.put(input.data, input.maxBytes != null ? { maxBytes: input.maxBytes } : {});
       return this.publish({ ...input, blobKey, sizeBytes, sha256 });
     },
 
@@ -164,6 +185,11 @@ export function createPostgresFileArtifactStore(
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`file-artifact:${input.id}`]);
         const deleted = await client.query("SELECT id FROM file_artifact_deletions WHERE id=$1", [input.id]);
         if (deleted.rows.length) throw new FileArtifactDeletedError();
+        if (input.inboundRunId) {
+          if (input.direction !== "in") throw new Error("only inbound files may register a run");
+          await requireActiveArtifactRun(client, input.inboundRunId);
+        }
+        await lockGrantResource(client, input.ownerScopeId, input.id);
         const ins = await client.query(
           `INSERT INTO file_artifacts
            (id, kind, owner_scope_id, path, name, mimetype, size_bytes, blob_key, sha256,
@@ -186,7 +212,31 @@ export function createPostgresFileArtifactStore(
           ],
         );
         const result = await client.query("SELECT * FROM file_artifacts WHERE id=$1", [input.id]);
-        return { artifact: rowToArtifact(result.rows[0]), created: (ins.rowCount ?? 0) > 0 };
+        const artifact = rowToArtifact(result.rows[0]);
+        if (input.inboundRunId) {
+          if (
+            artifact.ownerScopeId !== input.ownerScopeId ||
+            artifact.path !== input.path ||
+            artifact.createdBy !== input.createdBy
+          ) {
+            throw new Error("inbound artifact registration identity mismatch");
+          }
+          const previous = await client.query("SELECT run_id FROM inbound_artifact_cleanup WHERE artifact_id = $1", [
+            input.id,
+          ]);
+          if (!ins.rowCount && !previous.rowCount) throw new Error("existing inbound artifact has no registered run");
+          await client.query(
+            "INSERT INTO inbound_artifact_cleanup(artifact_id, run_id, created_at) VALUES ($1,$2,$3) ON CONFLICT (artifact_id) DO NOTHING",
+            [input.id, input.inboundRunId, Date.now()],
+          );
+          const registration = await client.query(
+            "SELECT run_id FROM inbound_artifact_cleanup WHERE artifact_id = $1",
+            [input.id],
+          );
+          if (registration.rows[0].run_id !== input.inboundRunId)
+            throw new Error("inbound artifact belongs to another run");
+        }
+        return { artifact, created: (ins.rowCount ?? 0) > 0 };
       });
     },
 
@@ -227,8 +277,15 @@ export function createPostgresFileArtifactStore(
     },
 
     async delete(id) {
+      const artifact = await getRow(id);
       await withPgTransaction(await pool(), async (client) => {
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`file-artifact:${id}`]);
+        if (artifact) {
+          await lockGrantResource(client, artifact.ownerScopeId, artifact.id);
+          if (await artifactIsReferenced(client, id)) return;
+          if (artifact.direction === "in" && (await artifactIsGranted(client, artifact.ownerScopeId, artifact.id)))
+            return;
+        }
         await client.query(
           "INSERT INTO file_artifact_deletions(id,deleted_at) VALUES($1,$2) ON CONFLICT(id) DO NOTHING",
           [id, Date.now()],

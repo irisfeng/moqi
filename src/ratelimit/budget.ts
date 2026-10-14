@@ -17,11 +17,12 @@ export function estimateCostUsd(inputTokens: number, usdPerMTok = DEFAULT_AGENT_
 }
 
 export function createBudgetTracker(
-  opts: { limitUsd?: number; orgLimitUsd?: number; windowMs?: number } = {},
+  opts: { limitUsd?: number; orgLimitUsd?: number; windowMs?: number; exempt?: ReadonlySet<string> } = {},
 ): BudgetTracker {
   const limitUsd = opts.limitUsd ?? Infinity;
   const orgLimitUsd = opts.orgLimitUsd ?? Infinity;
   const windowMs = opts.windowMs ?? DEFAULT_BUDGET_WINDOW_MS;
+  const exempt = opts.exempt;
   const spend = new Map<string, Array<{ at: number; usd: number }>>();
   const orgKey = "@org";
 
@@ -34,13 +35,14 @@ export function createBudgetTracker(
 
   return {
     async check(principalId, now = Date.now()) {
+      if (exempt?.has(principalId)) return { allowed: true, spentUsd: 0, limitUsd: Infinity };
       const spentUsd = spentIn(principalId, now);
       if (spentUsd >= limitUsd) return { allowed: false, spentUsd, limitUsd };
       const orgSpent = spentIn(orgKey, now);
       return { allowed: orgSpent < orgLimitUsd, spentUsd: orgSpent, limitUsd: orgLimitUsd };
     },
     async record(principalId, costUsd, now = Date.now()) {
-      for (const key of [principalId, orgKey]) {
+      for (const key of exempt?.has(principalId) ? [principalId] : [principalId, orgKey]) {
         const list = spend.get(key) ?? [];
         list.push({ at: now, usd: costUsd });
         spend.set(key, list);

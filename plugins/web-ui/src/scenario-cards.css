@@ -1,0 +1,438 @@
+.custom-chat-shell:has(> .home-launch) {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.custom-chat-shell.in-pane:has(> .home-launch) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.home-launch {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: clamp(32px, 8vh, 112px) max(24px, env(safe-area-inset-right)) max(36px, env(safe-area-inset-bottom))
+    max(24px, env(safe-area-inset-left));
+}
+
+.home-launch-inner {
+  width: min(100%, 880px);
+  margin-inline: auto;
+}
+
+.home-launch-heading {
+  margin-bottom: 24px;
+}
+
+.home-launch-heading .home-headline {
+  font-size: clamp(26px, 2.5vw, 34px);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.home-launch-heading .home-subline {
+  margin-top: 8px;
+}
+
+.home-launch .composer-wrap {
+  width: 100%;
+  margin: 0 0 28px;
+  box-sizing: border-box;
+}
+
+.home-launch .menu-popover,
+.home-launch .slash-popover {
+  top: calc(100% + 8px);
+  bottom: auto;
+  max-height: min(320px, 40dvh);
+}
+
+.home-launch .home-welcome,
+.home-launch .home-scenarios {
+  max-width: none;
+  margin: 0;
+}
+
+@container chat (max-width: 720px) {
+  .home-launch {
+    padding: 24px max(14px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom))
+      max(14px, env(safe-area-inset-left));
+  }
+  .home-launch .composer-wrap {
+    margin: 0 0 20px;
+  }
+}
+
+.home-welcome,
+.home-scenarios {
+  padding-top: 6px;
+  padding-bottom: 16px;
+}
+
+.home-scenario-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.home-scenario-heading-copy {
+  min-width: 0;
+}
+
+.home-scenario-shuffle {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.home-scenario-eyebrow {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.home-scenario-hint {
+  margin: 3px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+}
+
+.scenario-category-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.scenario-chip,
+.scenario-card-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  box-sizing: border-box;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 16%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--foreground) 6%, var(--background));
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.scenario-chip {
+  min-height: 36px;
+  cursor: pointer;
+}
+
+.scenario-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--foreground) 34%, var(--border));
+  background: color-mix(in srgb, var(--foreground) 12%, var(--background));
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.scenario-chip:hover {
+  border-color: color-mix(in srgb, var(--foreground) 30%, var(--border));
+  color: var(--foreground);
+}
+
+.home-cards.scenario {
+  grid-auto-rows: 1fr;
+  gap: 16px;
+}
+
+.scenario-card-shell {
+  display: flex;
+  min-width: 0;
+}
+
+.scenario-card-shell .home-card {
+  width: 100%;
+  height: 100%;
+  min-height: 44px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--background) 92%, var(--secondary));
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.scenario-card-shell .home-card:hover {
+  border-color: color-mix(in srgb, var(--foreground) 30%, var(--border));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 9%, transparent);
+  transform: translateY(-2px);
+}
+
+.scenario-card-shell .home-card:focus-visible,
+.scenario-dialog-close:focus-visible,
+.scenario-dialog-cancel:focus-visible,
+.scenario-dialog-use:focus-visible,
+.home-scenario-shuffle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--foreground) 65%, var(--foreground));
+  outline-offset: 2px;
+}
+
+.scenario-card-visual {
+  display: block;
+  aspect-ratio: 2 / 1;
+  overflow: hidden;
+  background: #fff;
+  flex-shrink: 0;
+}
+
+.scenario-card-visual img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.scenario-card-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  flex: 1;
+  padding: 16px;
+  text-align: left;
+}
+
+.scenario-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.scenario-card-open {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.scenario-card-body .home-card-title {
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 24px;
+  white-space: normal;
+  min-height: 48px;
+}
+
+.scenario-card-body .home-card-sub {
+  display: -webkit-box;
+  min-height: 40px;
+  margin-top: 6px;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 20px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.scenario-category-chips + .home-cards {
+  margin-top: 16px;
+}
+
+.home-scenario-shuffle {
+  min-height: 44px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.home-scenario-shuffle:hover {
+  border-color: color-mix(in srgb, var(--foreground) 28%, var(--border));
+  color: var(--foreground);
+}
+
+.scenario-card-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 22px 70px color-mix(in srgb, var(--foreground) 24%, transparent);
+}
+
+.scenario-card-dialog::backdrop {
+  background: color-mix(in srgb, var(--foreground) 26%, transparent);
+}
+
+.scenario-dialog-form {
+  display: grid;
+  gap: 0;
+  max-height: inherit;
+  padding: 22px;
+  overflow-y: auto;
+}
+
+.scenario-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.scenario-dialog-close {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.scenario-dialog-close:hover {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.scenario-card-dialog h2 {
+  margin: 14px 0 4px;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.scenario-dialog-description,
+.scenario-dialog-note {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.scenario-dialog-note {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.scenario-dialog-field {
+  display: grid;
+  gap: 7px;
+  margin-top: 18px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.scenario-dialog-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 150px;
+  padding: 10px 11px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+.scenario-dialog-prompt:focus {
+  border-color: color-mix(in srgb, var(--foreground) 42%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--foreground) 12%, transparent);
+}
+
+.scenario-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.scenario-dialog-cancel,
+.scenario-dialog-use {
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.scenario-dialog-cancel {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.scenario-dialog-cancel:hover {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.scenario-dialog-use {
+  border-color: var(--foreground);
+  background: var(--foreground);
+  color: var(--background);
+  font-weight: 600;
+}
+
+.scenario-dialog-use:hover {
+  opacity: 0.88;
+}
+
+@container chat (max-width: 720px) {
+  .home-scenario-heading {
+    align-items: flex-start;
+  }
+
+  .home-cards.scenario {
+    grid-template-columns: 1fr;
+  }
+
+  .scenario-chip {
+    min-height: 44px;
+  }
+
+  .scenario-card-open {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scenario-card-shell .home-card {
+    transition: none;
+  }
+}
+
+.scenario-dialog-brief {
+  margin: 16px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.scenario-dialog-brief dt {
+  margin-top: 10px;
+  font-weight: 600;
+}
+
+.scenario-dialog-brief dd {
+  margin: 4px 0 0;
+  color: var(--muted-foreground);
+}

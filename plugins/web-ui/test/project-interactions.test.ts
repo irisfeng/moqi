@@ -71,6 +71,7 @@ test("project interactions preserve focus and successful local mutations", async
       }
       return Response.json({ contexts: [personal] });
     }
+    if (path === "/api/project-collaboration") return Response.json({ projects: [] });
     if (path === "/api/sessions") return Response.json({ sessions: [] });
     if (path === "/api/projects" && init?.method === "POST") {
       projectCreated();

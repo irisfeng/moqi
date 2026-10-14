@@ -4,13 +4,14 @@ import { flushErrorReporting, reportBackendError } from "../../chassis/src/error
 import { appEditSlug } from "../src/app-edit.ts";
 import { composioCallbackUrl } from "./composio-return.ts";
 import { sharedSessionHtml } from "./shared-session.ts";
+import type { MessageLocation } from "../src/message-location.ts";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Readable } from "node:stream";
+import { Readable, pipeline } from "node:stream";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, normalize } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { LRUCache } from "lru-cache";
 import {
   fetchCoreText,
@@ -30,7 +31,7 @@ import {
   serveFavicon,
 } from "../../chassis/src/http.ts";
 import { verifyPortalIdentity, PORTAL_IDENTITY_HEADER } from "../../chassis/src/portal-identity.ts";
-import { createBrandingCache, injectBranding } from "../../chassis/src/branding.ts";
+import { createBrandingCache, injectBranding, type OrgTheme } from "../../chassis/src/branding.ts";
 import { parseSuggestedActivities } from "../../chassis/src/suggested-activities.ts";
 import { principalInAllowlist } from "../../chassis/src/principal-allowlist.ts";
 
@@ -45,6 +46,10 @@ import {
 const SUBAGENT_THREAD_PREFIX = "agent:main:subagent:";
 const PORT = portFromEnv(8096);
 const welcomeCohort = process.env.WEB_UI_WELCOME_COHORT?.trim().slice(0, 40) || undefined;
+const destinations = (process.env.WEB_UI_DESTINATIONS ?? "apps")
+  .split(",")
+  .map((name) => name.trim())
+  .filter((name) => name === "docs" || name === "pm" || name === "apps");
 const suggestedActivities = parseSuggestedActivities(process.env.WEB_UI_SUGGESTED_ACTIVITIES);
 const PUBLIC_URL = (process.env.WEB_UI_PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, "");
 const WEB_UI_DEV = process.env.WEB_UI_DEV === "1";
@@ -92,6 +97,7 @@ const brandingCache = createBrandingCache(async () => {
     ...(typeof b?.mark === "string" ? { mark: b.mark } : {}),
     ...(typeof b?.markUrl === "string" ? { markUrl: b.markUrl } : {}),
     ...(typeof b?.selfLabel === "string" ? { selfLabel: b.selfLabel } : {}),
+    ...(b?.theme && typeof b.theme === "object" ? { theme: b.theme as OrgTheme } : {}),
   };
 });
 
@@ -122,7 +128,7 @@ async function serveWebManifest(res: ServerResponse): Promise<void> {
 
 async function brandIndexHtml(html: string): Promise<string> {
   const branding = await brandingCache.forRender();
-  return injectBranding(html, branding, { titleSuffix: "· Web" });
+  return injectBranding(html, branding, { titleSuffix: "· Web", keepIcon: Boolean(process.env.WEB_UI_FAVICON_SVG) });
 }
 
 const portalTokenStore = new AsyncLocalStorage<string | undefined>();
@@ -270,7 +276,12 @@ interface ViteDevServer {
 type CreateViteServer = (opts: Record<string, unknown>) => Promise<ViteDevServer>;
 
 function relay(res: ServerResponse, r: { status: number; text: string }): void {
-  sendBuffered(res, r.status, { "content-type": "application/json", "x-content-type-options": "nosniff" }, r.text);
+  sendBuffered(
+    res,
+    r.status,
+    { "content-type": "application/json", "x-content-type-options": "nosniff", "cache-control": "private, no-store" },
+    r.text,
+  );
 }
 
 function sendHtml(res: ServerResponse, status: number, html: string): void {
@@ -517,7 +528,92 @@ let deliveriesPollInFlight = false;
 interface PendingWebDelivery {
   id: string;
   createdAt: number;
-  destination?: { target?: string };
+  provenance?: { sourceThreadRef?: string; sourceAssistantEntrySeq?: number };
+  destination?: { target?: string; audienceScopeId?: string };
+}
+
+const MENTION_TOKEN_BODY = /^[\p{L}\p{N}_.·-]+/u;
+
+function mentionTokensOf(text: string): string[] {
+  const tokens = new Set<string>();
+  let i = text.indexOf("@");
+  while (i !== -1) {
+    const prev = i > 0 ? text[i - 1]! : "";
+    const m = text.slice(i + 1).match(MENTION_TOKEN_BODY);
+    if (m && m[0] && !/[A-Za-z0-9]/.test(prev)) tokens.add(m[0]);
+    i = text.indexOf("@", i + 1);
+  }
+  return [...tokens].slice(0, 5);
+}
+
+function pushThreadEvent(user: string, threadRef: string, target: MessageLocation): void {
+  const conns = deliveryClients.get(user);
+  if (!conns || !conns.size) return;
+  for (const res of conns) {
+    sseEvent(res, "delivery", { threadRef, ...target });
+    sseEvent(res, "session_state", { threadRef, state: "idle", at: Date.now() });
+  }
+}
+
+const WEB_PROJECT_SCOPE = "group:web-project-";
+
+async function projectMemberIds(projectId: string, viewer: string): Promise<string[]> {
+  const r = await coreFetch("GET", `/v1/projects?principalId=${encodeURIComponent(viewer)}`);
+  if (r.status !== 200) return [];
+  const parsed = JSON.parse(r.text) as { projects?: Array<{ id?: string; memberIds?: string[] }> };
+  return (parsed.projects ?? []).find((p) => p.id === projectId)?.memberIds ?? [];
+}
+
+async function broadcastProjectThread(
+  projectId: string,
+  owner: string,
+  threadRef: string,
+  target: MessageLocation,
+): Promise<void> {
+  try {
+    for (const member of await projectMemberIds(projectId, owner)) {
+      if (member === owner) continue;
+      pushThreadEvent(member, threadRef, target);
+    }
+  } catch {
+    void 0;
+  }
+}
+
+async function notifyMentions(
+  text: string,
+  threadRef: string,
+  senderId: string,
+  runId: string,
+  scope: string,
+): Promise<void> {
+  if (!scope.startsWith(WEB_PROJECT_SCOPE)) return;
+  const members = await projectMemberIds(scope.slice(WEB_PROJECT_SCOPE.length), senderId).catch((): string[] => []);
+  for (const token of mentionTokensOf(text)) {
+    const candidates = token.length > 3 ? [token, token.slice(0, 3), token.slice(0, 2)] : [token];
+    for (const candidate of candidates) {
+      try {
+        const r = await coreFetch("GET", `/v1/directory/resolve?q=${encodeURIComponent(candidate)}`);
+        if (r.status !== 200) continue;
+        const parsed = JSON.parse(r.text) as {
+          matches?: Array<{ principalId: string; displayName?: string; type?: string }>;
+        };
+        const exact = (parsed.matches ?? []).filter(
+          (m) =>
+            m.type === "internal" &&
+            m.principalId !== senderId &&
+            members.includes(m.principalId) &&
+            (m.displayName ?? "").trim().toLowerCase() === candidate.toLowerCase(),
+        );
+        if (exact.length === 1) {
+          pushThreadEvent(exact[0]!.principalId, threadRef, { runId });
+          break;
+        }
+      } catch {
+        void 0;
+      }
+    }
+  }
 }
 
 async function drainWebDeliveries(): Promise<void> {
@@ -535,9 +631,17 @@ async function drainWebDeliveries(): Promise<void> {
     const now = Date.now();
     for (const d of pending) {
       const target = d.destination?.target ?? "";
+      const seq = d.provenance?.sourceThreadRef === target ? d.provenance.sourceAssistantEntrySeq : undefined;
+      const location: MessageLocation = Number.isSafeInteger(seq) && seq! >= 0 ? { seq } : { deliveryId: d.id };
+      const audienceScopeId = d.destination?.audienceScopeId ?? "";
+      if (audienceScopeId.startsWith(WEB_PROJECT_SCOPE)) {
+        const owner = ownerOfWebThread(target) ?? "";
+        const projectId = audienceScopeId.slice(WEB_PROJECT_SCOPE.length);
+        void broadcastProjectThread(projectId, owner, target, location);
+      }
       const conns = deliveryClients.get(ownerOfWebThread(target) ?? "");
       if (conns && conns.size) {
-        for (const res of conns) sseEvent(res, "delivery", { threadRef: target });
+        for (const res of conns) sseEvent(res, "delivery", { threadRef: target, ...location });
       } else if (now - (d.createdAt ?? 0) < WEB_DELIVERY_GIVEUP_MS) {
         continue;
       }
@@ -1119,8 +1223,9 @@ async function serveInboxItemImage(c: WebCtx): Promise<unknown> {
 async function serveFileContent(c: WebCtx, playground = false): Promise<unknown> {
   const { res, user, url } = c;
   const id = c.params.id!;
+  const download = !playground && url.searchParams.get("download") === "1" ? "&download=1" : "";
   const corePath = withSourceAuthNonce(
-    `/v1/files/${encodeURIComponent(id)}/content?viewer=${encodeURIComponent(user)}`,
+    `/v1/files/${encodeURIComponent(id)}/content?viewer=${encodeURIComponent(user)}${download}`,
     CORE_SIGNING_SECRET,
   );
   const portalTok = portalTokenStore.getStore();
@@ -1164,7 +1269,205 @@ async function serveFileContent(c: WebCtx, playground = false): Promise<unknown>
   return Readable.fromWeb(r.body as Parameters<typeof Readable.fromWeb>[0]).pipe(res);
 }
 
+function verifiedSendAttachments(value: unknown): CoreAttachment[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) return null;
+  const attachments: CoreAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const attachment = item as Record<string, unknown>;
+    if (
+      Object.keys(attachment).some((key) => !["name", "mimetype", "sizeBytes", "blobId"].includes(key)) ||
+      typeof attachment.name !== "string" ||
+      !attachment.name ||
+      attachment.name !== attachment.name.trim() ||
+      attachment.name.length > 255 ||
+      attachment.name === "." ||
+      attachment.name === ".." ||
+      /[/\\\x00-\x1f]/.test(attachment.name) ||
+      typeof attachment.mimetype !== "string" ||
+      !attachment.mimetype.includes("/") ||
+      attachment.mimetype.length > 127 ||
+      /[^\x20-\x7e]/.test(attachment.mimetype) ||
+      !Number.isSafeInteger(attachment.sizeBytes) ||
+      (attachment.sizeBytes as number) <= 0 ||
+      (attachment.sizeBytes as number) > 1_000_000_000 ||
+      typeof attachment.blobId !== "string" ||
+      !/^[0-9a-f]{32}$/.test(attachment.blobId)
+    )
+      return null;
+    attachments.push(attachment as unknown as CoreAttachment);
+  }
+  return attachments;
+}
+
+interface VerifiedBrowserSend {
+  text: string;
+  turnFields: Record<string, unknown>;
+  key: string;
+  fingerprint: string;
+  threadRef: string;
+  scope?: string;
+  channelName?: string;
+}
+
+function verifiedBrowserSend(raw: Record<string, unknown>, user: string): VerifiedBrowserSend | null {
+  if (Array.isArray(raw) || raw.approval !== undefined || raw.proactiveOpener !== undefined) return null;
+  const attachments = raw.attachments === undefined ? [] : verifiedSendAttachments(raw.attachments);
+  if (!attachments) return null;
+  const quoted = raw.quoteSeq !== undefined || raw.quoteText !== undefined || raw.quoteAuthor !== undefined;
+  if (
+    quoted &&
+    (typeof raw.quoteText !== "string" ||
+      !raw.quoteText ||
+      raw.quoteText !== raw.quoteText.trim() ||
+      raw.quoteText.length > 300 ||
+      (raw.quoteSeq !== undefined &&
+        (typeof raw.quoteSeq !== "number" || !Number.isSafeInteger(raw.quoteSeq) || raw.quoteSeq < 0)) ||
+      (raw.quoteAuthor !== undefined &&
+        (typeof raw.quoteAuthor !== "string" ||
+          !raw.quoteAuthor ||
+          raw.quoteAuthor !== raw.quoteAuthor.trim() ||
+          raw.quoteAuthor.length > 50)))
+  )
+    return null;
+  if (typeof raw.text !== "string" || (!raw.text.trim() && attachments.length === 0)) return null;
+  if (raw.expectedUser !== user) return null;
+  if (typeof raw.idempotencyKey !== "string" || !SEND_KEY_PATTERN.test(raw.idempotencyKey)) return null;
+  const threadRef =
+    typeof raw.threadRef === "string" && raw.threadRef.startsWith("web:") ? raw.threadRef : `web:${user}:default`;
+  const scope = typeof raw.scopeId === "string" && raw.scopeId ? raw.scopeId : undefined;
+  const channelName =
+    typeof raw.channelName === "string" && raw.channelName.trim() ? raw.channelName.trim().slice(0, 200) : undefined;
+  const options: Record<string, unknown> = {
+    ...(raw.quoteSeq !== undefined ? { quoteSeq: raw.quoteSeq } : {}),
+    ...(quoted ? { quoteText: raw.quoteText } : {}),
+    ...(raw.quoteAuthor !== undefined ? { quoteAuthor: raw.quoteAuthor } : {}),
+    ...(typeof raw.harness === "string" && raw.harness ? { harness: raw.harness } : {}),
+    ...(typeof raw.model === "string" && raw.model ? { model: raw.model } : {}),
+    ...(typeof raw.thinkingLevel === "string" && raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
+    ...(typeof raw.fastMode === "boolean" ? { fastMode: raw.fastMode } : {}),
+    ...(typeof raw.timezone === "string" && raw.timezone.trim() ? { timezone: raw.timezone.trim().slice(0, 64) } : {}),
+  };
+  const sent = attachments.length ? { attachments } : {};
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        text: raw.text,
+        threadRef,
+        expectedUser: user,
+        ...options,
+        ...(scope ? { scopeId: scope } : {}),
+        ...(channelName ? { channelName } : {}),
+        ...sent,
+      }),
+    )
+    .digest("hex");
+  if (raw.clientRequestFingerprint !== fingerprint) return null;
+  return {
+    text: raw.text,
+    turnFields: { ...options, ...sent },
+    key: `web:${encodeURIComponent(user)}:${raw.idempotencyKey}`,
+    fingerprint,
+    threadRef,
+    ...(scope ? { scope } : {}),
+    ...(channelName ? { channelName } : {}),
+  };
+}
+
+async function postBrowserTurnV2(c: WebCtx): Promise<void> {
+  const { req, res, user } = c;
+  const raw = await readJson<Record<string, unknown>>(req, res, false);
+  if (!raw) return;
+  const checked = verifiedBrowserSend(raw, user);
+  if (!checked) return json(res, 400, { error: "invalid_request", message: "A verified text send is required." });
+  const resolved = await resolveWebConversation(user, checked.threadRef, checked.scope, checked.channelName);
+  if ("error" in resolved) return json(res, 403, resolved);
+  const turn = {
+    ...(await webTurnBase(req, user, resolved.conversation, checked.threadRef, checked.text)),
+    ...checked.turnFields,
+    ...(resolveIdentity(req)?.impersonator ? { analyticsSuppressed: true } : {}),
+    idempotencyKey: checked.key,
+    verifiedRequestFingerprint: checked.fingerprint,
+  };
+  const response = await coreFetch("POST", "/v2/turns?async=1", JSON.stringify(turn));
+  if (response.status === 404)
+    return json(res, 503, { error: "unsupported_send_protocol", message: "Refresh after the send service updates." });
+  if (response.status >= 200 && response.status < 300) {
+    let result: { runId?: unknown; sendProtocol?: unknown; status?: unknown };
+    try {
+      result = JSON.parse(response.text) as typeof result;
+    } catch {
+      return json(res, 502, { error: "bad_core_response" });
+    }
+    if (result.sendProtocol !== 2) return json(res, 503, { error: "unsupported_send_protocol" });
+    if (result.status === "pending_approval")
+      return json(res, 409, {
+        error: "approval_pending",
+        sendProtocol: 2,
+        message: "This conversation has an approval waiting. Answer it first, then check your draft and send again.",
+      });
+    if (typeof result.runId !== "string" || !result.runId)
+      return json(res, 503, { error: "unsupported_send_protocol" });
+    rememberRun(result.runId, user, checked.threadRef);
+    if (checked.scope && !checked.scope.startsWith("personal:") && checked.text.includes("@"))
+      void notifyMentions(checked.text, checked.threadRef, user, result.runId, checked.scope);
+  }
+  return relay(res, response);
+}
+
+async function postBrowserReceiptV2(c: WebCtx): Promise<void> {
+  const { req, res, user } = c;
+  const raw = await readJson<Record<string, unknown>>(req, res, false);
+  if (!raw) return;
+  const checked = verifiedBrowserSend(raw, user);
+  if (!checked) return json(res, 400, { error: "invalid_request" });
+  const resolved = await resolveWebConversation(user, checked.threadRef, checked.scope, checked.channelName);
+  if ("error" in resolved) return json(res, 403, resolved);
+  res.setHeader("cache-control", "no-store");
+  const response = await coreFetch(
+    "GET",
+    `/v2/turns/receipt?key=${encodeURIComponent(checked.key)}&viewer=${encodeURIComponent(user)}`,
+  );
+  if (response.status === 404) {
+    try {
+      const missing = JSON.parse(response.text) as { error?: unknown; sendProtocol?: unknown };
+      if (missing.error === "not_found" && missing.sendProtocol === 2) return relay(res, response);
+    } catch {
+      return json(res, 503, { error: "unsupported_send_protocol" });
+    }
+    return json(res, 503, { error: "unsupported_send_protocol" });
+  }
+  if (response.status !== 200) return relay(res, response);
+  let receipt: { runId?: unknown; threadRef?: unknown; verifiedRequestFingerprint?: unknown; sendProtocol?: unknown };
+  try {
+    receipt = JSON.parse(response.text) as typeof receipt;
+  } catch {
+    return json(res, 502, { error: "bad_core_response" });
+  }
+  if (receipt.sendProtocol !== 2) return json(res, 503, { error: "unsupported_send_protocol" });
+  if (receipt.threadRef !== checked.threadRef || receipt.verifiedRequestFingerprint !== checked.fingerprint)
+    return json(res, 409, { error: "different_request" });
+  if (typeof receipt.runId !== "string" || !receipt.runId) return json(res, 502, { error: "bad_core_response" });
+  return relay(res, response);
+}
+
+function crossSiteWrite(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (typeof origin === "string") {
+    try {
+      const parsed = new URL(origin);
+      const requestHost = new URL(`http://${req.headers.host}`).hostname;
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.hostname !== requestHost) return true;
+    } catch {
+      return true;
+    }
+  }
+  return req.headers["sec-fetch-site"] === "cross-site";
+}
+
 const apiRoutes: readonly WebRoute[] = [
+  { method: "POST", path: "/api/turn/v2/receipt", handle: postBrowserReceiptV2 },
+  { method: "POST", path: "/api/turn/v2", handle: postBrowserTurnV2 },
   {
     method: "GET",
     path: "/api/files/by-name/content",
@@ -1198,7 +1501,8 @@ const apiRoutes: readonly WebRoute[] = [
         if (!cursor) break;
       }
       if (!match) return json(res, 404, { error: "not_found" });
-      res.writeHead(302, { location: `/api/files/${encodeURIComponent(match.id)}/content` });
+      const download = url.searchParams.get("download") === "1" ? "?download=1" : "";
+      res.writeHead(302, { location: `/api/files/${encodeURIComponent(match.id)}/content${download}` });
       return res.end();
     },
   },
@@ -1388,6 +1692,7 @@ const apiRoutes: readonly WebRoute[] = [
         });
       }
       const parsed = JSON.parse(authStatus.text) as {
+        offered?: boolean;
         individualModelAuth?: boolean;
         account?: string;
         connections?: { provider: string }[];
@@ -1406,6 +1711,7 @@ const apiRoutes: readonly WebRoute[] = [
         mode: AUTH_MODE,
         slackWorkspaceUrl: workspaceUrl,
         individualModelAuth: parsed.individualModelAuth === true,
+        personalModelAccounts: parsed.offered !== false,
         modelAuthConnected:
           parsed.connections?.some(
             (c) => !parsed.account || parsed.account === "personal" || parsed.account === c.provider,
@@ -1413,6 +1719,8 @@ const apiRoutes: readonly WebRoute[] = [
         impersonatedBy: resolveIdentity(req)?.impersonator ?? null,
         displayName: resolveIdentity(req)?.name ?? null,
         ...(welcomeCohort ? { welcomeCohort } : {}),
+        destinations,
+        verifiedSends: true,
         ...(suggestedActivities.length ? { suggestedActivities } : {}),
         ...(activityConfig ? { suggestedActivitiesGeneration: true } : {}),
         permissions,
@@ -1524,6 +1832,36 @@ const apiRoutes: readonly WebRoute[] = [
     },
   },
   {
+    method: "GET",
+    path: "/api/project-collaboration",
+    handle: async ({ res, user }) =>
+      relayCore(res, "GET", `/v1/project-collaboration?principalId=${encodeURIComponent(user)}`),
+  },
+  {
+    method: "GET",
+    path: "/api/project-collaboration/:id",
+    handle: async ({ res, user, params }) =>
+      relayCore(
+        res,
+        "GET",
+        `/v1/project-collaboration/${encodeURIComponent(params.id!)}?principalId=${encodeURIComponent(user)}`,
+      ),
+  },
+  {
+    method: "PUT",
+    path: "/api/project-collaboration/:id",
+    handle: async ({ req, res, user, params }) => {
+      const body = await readJson<{ command?: unknown }>(req, res);
+      if (!body) return;
+      return relayCore(
+        res,
+        "PUT",
+        `/v1/project-collaboration/${encodeURIComponent(params.id!)}`,
+        JSON.stringify({ principalId: user, command: body.command }),
+      );
+    },
+  },
+  {
     method: "POST",
     path: "/api/projects",
     handle: async (c) => {
@@ -1568,6 +1906,52 @@ const apiRoutes: readonly WebRoute[] = [
         "POST",
         `/v1/projects/${encodeURIComponent(id)}/members`,
         JSON.stringify({ principalId: user, memberId }),
+      );
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/directory/people",
+    handle: async ({ res, user }) =>
+      relayCore(res, "GET", `/v1/directory/people?principalId=${encodeURIComponent(user)}`),
+  },
+  {
+    method: "GET",
+    path: "/api/me/contact",
+    handle: async ({ res, user }) => relayCore(res, "GET", `/v1/me/contact?principalId=${encodeURIComponent(user)}`),
+  },
+  {
+    method: "PUT",
+    path: "/api/me/contact",
+    handle: async (c) => {
+      if (resolveIdentity(c.req)?.impersonator !== null) return json(c.res, 403, { error: "impersonation_forbidden" });
+      const body = await readJson<{ phone?: unknown }>(c.req, c.res, false);
+      if (!body) return;
+      return relayCore(c.res, "PUT", "/v1/me/contact", JSON.stringify({ phone: body.phone, principalId: c.user }));
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/projects/:id/departments",
+    handle: async ({ res, user, params, url }) => {
+      const qs = new URLSearchParams({ principalId: user });
+      const department = url.searchParams.get("department");
+      if (department) qs.set("department", department);
+      return relayCore(res, "GET", `/v1/projects/${encodeURIComponent(params.id!)}/departments?${qs.toString()}`);
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/projects/:id/members/department",
+    handle: async (c) => {
+      const { req, res, user } = c;
+      const p = await readJson<{ department?: unknown; memberIds?: unknown }>(req, res);
+      if (!p) return;
+      return relayCore(
+        res,
+        "POST",
+        `/v1/projects/${encodeURIComponent(c.params.id!)}/members/department`,
+        JSON.stringify({ principalId: user, department: p.department, memberIds: p.memberIds }),
       );
     },
   },
@@ -1810,6 +2194,193 @@ const apiRoutes: readonly WebRoute[] = [
   },
   {
     method: "GET",
+    path: "/api/home-config",
+    handle: async (c) => relayCore(c.res, "GET", "/v1/webui-home"),
+  },
+  {
+    method: "GET",
+    path: "/api/ratings",
+    handle: async ({ res, user, url }) =>
+      relayCore(
+        res,
+        "GET",
+        `/v1/ratings?principalId=${encodeURIComponent(user)}&sessionId=${encodeURIComponent(url.searchParams.get("sessionId") ?? "")}`,
+      ),
+  },
+  {
+    method: "PUT",
+    path: "/api/ratings",
+    handle: async ({ req, res, user }) => {
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
+      const p = await readJson<Record<string, unknown>>(req, res, false);
+      if (!p) return;
+      return relayCore(
+        res,
+        "PUT",
+        `/v1/ratings?principalId=${encodeURIComponent(user)}`,
+        JSON.stringify({ sessionId: p.sessionId, seq: p.seq, fileId: p.fileId, value: p.value, reason: p.reason }),
+      );
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/notifications",
+    handle: async ({ res, user, url }) => {
+      const cursor = url.searchParams.get("cursor");
+      return relayCore(
+        res,
+        "GET",
+        `/v1/notifications?principalId=${encodeURIComponent(user)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      );
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/notifications/:id/result",
+    handle: async ({ res, user, params }) =>
+      relayCore(
+        res,
+        "GET",
+        `/v1/notifications/${encodeURIComponent(params.id!)}/result?principalId=${encodeURIComponent(user)}`,
+      ),
+  },
+  {
+    method: "GET",
+    path: "/api/notification-preferences",
+    handle: async ({ res, user }) =>
+      relayCore(res, "GET", `/v1/notification-preferences?principalId=${encodeURIComponent(user)}`),
+  },
+  {
+    method: "PUT",
+    path: "/api/notification-preferences",
+    handle: async ({ req, res, user }) => {
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
+      const p = await readJson<{ muteCompletions?: unknown }>(req, res, false);
+      if (!p) return;
+      return relayCore(
+        res,
+        "PUT",
+        `/v1/notification-preferences?principalId=${encodeURIComponent(user)}`,
+        JSON.stringify({ muteCompletions: p.muteCompletions }),
+      );
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/notifications/read-all",
+    handle: async ({ req, res, user }) => {
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
+      return relayCore(res, "POST", `/v1/notifications/read-all?principalId=${encodeURIComponent(user)}`, "{}");
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/notifications/:id/read",
+    handle: async ({ req, res, user, params }) => {
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
+      return relayCore(
+        res,
+        "POST",
+        `/v1/notifications/${encodeURIComponent(params.id!)}/read?principalId=${encodeURIComponent(user)}`,
+        "{}",
+      );
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/announcement-images/:id",
+    handle: async ({ res, params }) => {
+      const corePath = withSourceAuthNonce(
+        `/v1/announcement-images/${encodeURIComponent(params.id!)}`,
+        CORE_SIGNING_SECRET,
+      );
+      const portalToken = portalTokenStore.getStore();
+      const response = await fetch(`${CORE}${corePath}`, {
+        headers: {
+          ...signedHeaders(CORE_SIGNING_SECRET, "GET", corePath, ""),
+          ...(portalToken ? { [PORTAL_IDENTITY_HEADER]: portalToken } : {}),
+        },
+        redirect: "manual",
+      });
+      if (!response.ok || !response.body) return json(res, response.status, { error: "image_unavailable" });
+      res.writeHead(response.status, {
+        "content-type": response.headers.get("content-type") ?? "application/octet-stream",
+        "cache-control": "private, no-cache",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; sandbox",
+      });
+      return pipeline(Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]), res, () => {});
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/announcements",
+    handle: async (c) => {
+      const { res, user } = c;
+      return relayCore(res, "GET", `/v1/announcements?principalId=${encodeURIComponent(user)}`);
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/announcements/:id/dismiss",
+    handle: async (c) => {
+      if (resolveIdentity(c.req)?.impersonator !== null) return json(c.res, 403, { error: "impersonation_forbidden" });
+      const { res, user } = c;
+      return relayCore(
+        res,
+        "POST",
+        `/v1/announcements/${encodeURIComponent(c.params.id!)}/dismiss`,
+        JSON.stringify({ principalId: user }),
+      );
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/home-event",
+    handle: async (c) => {
+      if (resolveIdentity(c.req)?.impersonator !== null) return json(c.res, 403, { error: "impersonation_forbidden" });
+      const { req, res, user } = c;
+      const event = await readJson<{ type?: unknown; ref?: unknown }>(req, res);
+      if (!event) return;
+      return relayCore(
+        res,
+        "POST",
+        "/v1/webui-events",
+        JSON.stringify({ principalId: user, type: event.type, ref: event.ref }),
+      );
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/growth",
+    handle: async (c) => relayCore(c.res, "GET", `/v1/me/growth?principalId=${encodeURIComponent(c.user)}`),
+  },
+  {
+    method: "POST",
+    path: "/api/growth/action",
+    handle: async (c) => {
+      if (resolveIdentity(c.req)?.impersonator !== null) return json(c.res, 403, { error: "impersonation_forbidden" });
+      const body = await readJson<{ action?: unknown; key?: unknown; runId?: unknown; preferences?: unknown }>(
+        c.req,
+        c.res,
+      );
+      if (!body) return;
+      return relayCore(
+        c.res,
+        "POST",
+        "/v1/me/growth/action",
+        JSON.stringify({
+          action: body.action,
+          key: body.key,
+          runId: body.runId,
+          preferences: body.preferences,
+          principalId: c.user,
+        }),
+      );
+    },
+  },
+  {
+    method: "GET",
     path: "/api/skills",
     handle: async (c) => {
       const { res, url, user } = c;
@@ -1948,14 +2519,23 @@ const apiRoutes: readonly WebRoute[] = [
     handle: async (c) => {
       const { req, res, user } = c;
       const id = c.params.id!;
-      const p = await readJson<{ upToSeq?: unknown }>(req, res);
+      const p = await readJson<{ upToSeq?: unknown; targetScopeId?: unknown }>(req, res);
       if (!p) return;
       const upToSeq = typeof p.upToSeq === "number" ? p.upToSeq : undefined;
+      if (p.targetScopeId !== undefined && (typeof p.targetScopeId !== "string" || !p.targetScopeId))
+        return json(res, 400, { error: "bad_request", message: "targetScopeId must be a scope id" });
+      const targetScopeId = typeof p.targetScopeId === "string" ? p.targetScopeId : undefined;
+      if (targetScopeId !== undefined && resolveIdentity(req)?.impersonator !== null)
+        return json(res, 403, { error: "impersonation_forbidden" });
       return relayCore(
         res,
         "POST",
         `/v1/sessions/${encodeURIComponent(id)}/fork`,
-        JSON.stringify({ principalId: user, ...(upToSeq !== undefined ? { upToSeq } : {}) }),
+        JSON.stringify({
+          principalId: user,
+          ...(upToSeq !== undefined ? { upToSeq } : {}),
+          ...(targetScopeId !== undefined ? { targetScopeId } : {}),
+        }),
       );
     },
   },
@@ -2073,6 +2653,30 @@ const apiRoutes: readonly WebRoute[] = [
     method: "GET",
     path: "/api/files/:id/content/:name",
     handle: serveFileContent,
+  },
+  {
+    method: "GET",
+    path: "/api/files/trash",
+    handle: async ({ res, url, user }) => {
+      const qs = new URLSearchParams({ viewer: user });
+      for (const key of ["limit", "cursor"]) {
+        const value = url.searchParams.get(key);
+        if (value) qs.set(key, value);
+      }
+      return relayCore(res, "GET", `/v1/files/trash?${qs.toString()}`);
+    },
+  },
+  {
+    method: "DELETE",
+    path: "/api/files/:id",
+    handle: ({ res, params, user }) =>
+      relayCore(res, "DELETE", `/v1/files/${encodeURIComponent(params.id!)}?viewer=${encodeURIComponent(user)}`),
+  },
+  {
+    method: "POST",
+    path: "/api/files/:id/restore",
+    handle: ({ res, params, user }) =>
+      relayCore(res, "POST", `/v1/files/${encodeURIComponent(params.id!)}/restore?viewer=${encodeURIComponent(user)}`),
   },
   {
     method: "GET",
@@ -2434,6 +3038,7 @@ const apiRoutes: readonly WebRoute[] = [
     path: "/api/approvals/:requestId",
     handle: async (c) => {
       const { req, res, user } = c;
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
       const requestId = c.params.requestId!;
       if (!requestId || requestId.includes("/")) return json(res, 404, { error: "not_found" });
       const p = await readJson<{ approved?: unknown; scope?: unknown; idempotencyKey?: unknown }>(req, res, false);
@@ -2490,6 +3095,153 @@ const apiRoutes: readonly WebRoute[] = [
   },
   {
     method: "POST",
+    path: "/api/proactive-opener",
+    handle: async ({ req, res, user }) => {
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
+      const raw = await readJson<Record<string, unknown>>(req, res, false);
+      if (!raw) return;
+      const allowed = new Set(["threadRef", "harness", "model", "thinkingLevel", "fastMode", "timezone"]);
+      if (
+        Array.isArray(raw) ||
+        Object.keys(raw).some((field) => !allowed.has(field)) ||
+        typeof raw.threadRef !== "string" ||
+        raw.threadRef.length > 300 ||
+        (raw.harness !== undefined && (typeof raw.harness !== "string" || raw.harness.length > 64)) ||
+        (raw.model !== undefined && (typeof raw.model !== "string" || raw.model.length > 256)) ||
+        (raw.thinkingLevel !== undefined && (typeof raw.thinkingLevel !== "string" || raw.thinkingLevel.length > 32)) ||
+        (raw.fastMode !== undefined && typeof raw.fastMode !== "boolean") ||
+        (raw.timezone !== undefined && (typeof raw.timezone !== "string" || raw.timezone.length > 64))
+      )
+        return json(res, 400, { error: "invalid_opener_request" });
+      const threadRef = raw.threadRef;
+      if (!threadRef.startsWith(`web:${user}:`) || threadRef === `web:${user}:`)
+        return json(res, 403, { error: "forbidden_thread" });
+      const baseKey = `web:${encodeURIComponent(user)}:server:proactive-opener:v1`;
+      if (baseKey.length > 300) return json(res, 400, { error: "invalid_principal" });
+      const state = await coreFetch("GET", `/v1/web-first-turn?principalId=${encodeURIComponent(user)}`);
+      if (state.status !== 200) return json(res, 503, { error: "opener_gate_unavailable" });
+      let key: string;
+      try {
+        const parsed = JSON.parse(state.text) as { openerKey?: unknown };
+        if (
+          typeof parsed.openerKey !== "string" ||
+          (parsed.openerKey !== baseKey && !parsed.openerKey.startsWith(`${baseKey}:`)) ||
+          parsed.openerKey.length > 300
+        )
+          return json(res, 502, { error: "bad_core_response" });
+        key = parsed.openerKey;
+      } catch {
+        return json(res, 502, { error: "bad_core_response" });
+      }
+      const receiptPath = `/v2/turns/receipt?viewer=${encodeURIComponent(user)}&key=${encodeURIComponent(key)}`;
+      const known = await coreFetch("GET", receiptPath);
+      if (known.status !== 404) {
+        if (known.status !== 200) return relay(res, known);
+        try {
+          const receipt = JSON.parse(known.text) as { runId?: unknown; threadRef?: unknown };
+          if (receipt.threadRef !== threadRef || typeof receipt.runId !== "string")
+            return json(res, 409, { error: "opener_already_started_elsewhere" });
+          rememberRun(receipt.runId, user, threadRef);
+          return json(res, 202, { status: "queued", runId: receipt.runId });
+        } catch {
+          return json(res, 502, { error: "bad_core_response" });
+        }
+      }
+      const home = await coreFetch("GET", "/v1/webui-home");
+      if (home.status !== 404) {
+        if (home.status !== 200) return relay(res, home);
+        try {
+          const config = JSON.parse(home.text) as { opener?: { enabled?: unknown } };
+          if (config?.opener?.enabled === false) return json(res, 409, { error: "opener_disabled" });
+          if (config?.opener !== undefined && config.opener?.enabled !== true)
+            return json(res, 503, { error: "opener_config_unavailable" });
+        } catch {
+          return json(res, 502, { error: "bad_core_response" });
+        }
+      }
+      const sessions = await coreFetch("GET", `/v1/sessions?principalId=${encodeURIComponent(user)}`);
+      if (sessions.status !== 200) return relay(res, sessions);
+      try {
+        const parsed = JSON.parse(sessions.text) as { sessions?: unknown };
+        if (!Array.isArray(parsed.sessions)) return json(res, 502, { error: "bad_core_response" });
+        if (parsed.sessions.length) return json(res, 409, { error: "opener_requires_empty_history" });
+      } catch {
+        return json(res, 502, { error: "bad_core_response" });
+      }
+      const name = resolveIdentity(req)?.name;
+      const turn = {
+        surface: "web",
+        actor: { externalId: user, ...(name ? { displayName: name } : {}) },
+        conversation: { kind: "dm", threadRef },
+        liveActor: true,
+        deliveryTarget: threadRef,
+        text: "",
+        proactiveOpener: true,
+        ...(raw.harness ? { harness: raw.harness } : {}),
+        ...(raw.model ? { model: raw.model } : {}),
+        ...(raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
+        ...(raw.fastMode !== undefined ? { fastMode: raw.fastMode } : {}),
+        ...(raw.timezone ? { timezone: raw.timezone } : {}),
+        idempotencyKey: key,
+      };
+      const submitted = await coreFetch("POST", "/v1/web-proactive-opener?async=1", JSON.stringify(turn));
+      if (submitted.status < 200 || submitted.status >= 300) return relay(res, submitted);
+      let runId: string;
+      try {
+        const result = JSON.parse(submitted.text) as { runId?: unknown };
+        if (typeof result.runId !== "string" || !result.runId) return json(res, 502, { error: "bad_core_response" });
+        runId = result.runId;
+      } catch {
+        return json(res, 502, { error: "bad_core_response" });
+      }
+      const verified = await coreFetch("GET", receiptPath);
+      if (verified.status !== 200) return json(res, 503, { error: "opener_receipt_unavailable" });
+      try {
+        const receipt = JSON.parse(verified.text) as { runId?: unknown; threadRef?: unknown };
+        if (receipt.runId !== runId || receipt.threadRef !== threadRef)
+          return json(res, 409, { error: "opener_already_started_elsewhere" });
+      } catch {
+        return json(res, 502, { error: "bad_core_response" });
+      }
+      rememberRun(runId, user, threadRef);
+      return json(res, 202, { status: "queued", runId });
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/legacy-turn-intents",
+    handle: async ({ req, res, user, url }) => {
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
+      const before = url.searchParams.get("before");
+      const path = `/v2/legacy-turn-intents?principalId=${encodeURIComponent(user)}${before ? `&before=${encodeURIComponent(before)}` : ""}`;
+      const response = await coreFetch("GET", path);
+      if (response.status === 404) return json(res, 503, { error: "legacy_intents_unavailable" });
+      return relay(res, response);
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/legacy-turn-intents/dismiss",
+    handle: async ({ req, res, user }) => {
+      if (resolveIdentity(req)?.impersonator !== null) return json(res, 403, { error: "impersonation_forbidden" });
+      if (crossSiteWrite(req)) return json(res, 403, { error: "forbidden_origin" });
+      if (req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")
+        return json(res, 415, { error: "unsupported_media_type" });
+      const body = await readJson<{ ingressId?: unknown }>(req, res, false);
+      if (!body) return;
+      if (typeof body.ingressId !== "string" || !/^[0-9a-f-]{36}$/.test(body.ingressId))
+        return json(res, 400, { error: "invalid_legacy_intent" });
+      const response = await coreFetch(
+        "POST",
+        "/v2/legacy-turn-intents/dismiss",
+        JSON.stringify({ principalId: user, ingressId: body.ingressId }),
+      );
+      if (response.status === 404) return json(res, 503, { error: "legacy_intents_unavailable" });
+      return relay(res, response);
+    },
+  },
+  {
+    method: "POST",
     path: "/api/turn",
     handle: async (c) => {
       const { req, res, user } = c;
@@ -2507,9 +3259,18 @@ const apiRoutes: readonly WebRoute[] = [
       let approval: { requestId: string; approved: boolean; scope?: string } | undefined;
       let proactiveOpener = false;
       let idempotencyKey: string | undefined;
+      let quote: { quoteSeq?: number; quoteText: string; quoteAuthor?: string } | undefined;
       try {
         const p = JSON.parse(await readBody(req));
         text = String(p.text ?? "");
+        if (typeof p.quoteText === "string" && p.quoteText.trim())
+          quote = {
+            ...(Number.isSafeInteger(p.quoteSeq) && p.quoteSeq >= 0 ? { quoteSeq: p.quoteSeq } : {}),
+            quoteText: p.quoteText.trim().slice(0, 300).trim(),
+            ...(typeof p.quoteAuthor === "string" && p.quoteAuthor.trim()
+              ? { quoteAuthor: p.quoteAuthor.trim().slice(0, 50).trim() }
+              : {}),
+          };
         idempotencyKey = namespacedSendKey(user, p.idempotencyKey);
         if (
           !idempotencyKey &&
@@ -2572,6 +3333,7 @@ const apiRoutes: readonly WebRoute[] = [
         ...(approval ? { approval } : {}),
         ...(proactiveOpener ? { proactiveOpener: true } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...quote,
       };
       return postTurnAndMint(req, res, turn, user, threadRef);
     },
@@ -3078,6 +3840,7 @@ const apiRoutes: readonly WebRoute[] = [
     path: "/api/crons",
     handle: async (c) => {
       const { res, user } = c;
+      res.setHeader("cache-control", "private, no-store");
       const r = await coreFetch("GET", `/v1/crons?viewer=${encodeURIComponent(user)}`);
       if (r.status < 200 || r.status >= 300) {
         return relay(res, r);
@@ -3098,13 +3861,48 @@ const apiRoutes: readonly WebRoute[] = [
     method: "GET",
     path: "/api/crons/:id/runs",
     handle: async (c) => {
-      const { res, user } = c;
+      const { res, url, user } = c;
       const id = c.params.id!;
+      const limit = url.searchParams.get("limit") ?? "20";
       return relay(
         res,
         await coreFetch(
           "GET",
-          `/v1/crons/${encodeURIComponent(id)}/runs?principalId=${encodeURIComponent(user)}&limit=20`,
+          `/v1/crons/${encodeURIComponent(id)}/runs?principalId=${encodeURIComponent(user)}&limit=${encodeURIComponent(limit)}`,
+        ),
+      );
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/crons/:id/runs/:fireKey",
+    handle: async (c) =>
+      relay(
+        c.res,
+        await coreFetch(
+          "GET",
+          `/v1/crons/${encodeURIComponent(c.params.id!)}/runs/${encodeURIComponent(c.params.fireKey!)}?principalId=${encodeURIComponent(c.user)}`,
+        ),
+      ),
+  },
+  {
+    method: "POST",
+    path: "/api/crons/:id/runs/:fireKey/read",
+    handle: async (c) => {
+      let version: unknown;
+      try {
+        const body: unknown = JSON.parse(await readBody(c.req));
+        version = body && typeof body === "object" && "version" in body ? body.version : undefined;
+      } catch (e) {
+        if (e instanceof PayloadTooLargeError) throw e;
+        return json(c.res, 400, { error: "bad_request" });
+      }
+      return relay(
+        c.res,
+        await coreFetch(
+          "POST",
+          `/v1/crons/${encodeURIComponent(c.params.id!)}/runs/${encodeURIComponent(c.params.fireKey!)}/read?principalId=${encodeURIComponent(c.user)}`,
+          JSON.stringify({ version }),
         ),
       );
     },

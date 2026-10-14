@@ -4,19 +4,40 @@ import { coreRememberedSessions, type RememberedSessions, type RememberedSession
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readBody, PayloadTooLargeError, sendBuffered, serveFavicon } from "../../chassis/src/http.ts";
 import { errMessage } from "../../chassis/src/errors.ts";
+import { signedHeaders, withSourceAuthNonce } from "../../chassis/src/core-client.ts";
 import type { AuthConfig } from "./config.ts";
-import { passwordConfigured, validEmail } from "./config.ts";
+import { corePasswords, passwordConfigured, validEmail } from "./config.ts";
 import { verifyPassword } from "./password.ts";
 import { claimOnce, withinRateLimit, ClaimStoreUnavailableError, type ClaimStore } from "../../chassis/src/claims.ts";
 import { coreEmailAllowed } from "../../chassis/src/external-members.ts";
 import { mintIdToken, pkceMatches, safeEqual, subjectFor, TokenSigner, type AuthRequest } from "./tokens.ts";
 import { ID_TOKEN_ALG, type SigningKey } from "./keys.ts";
 import { renderSignInEmail, type Mailer } from "./email.ts";
-import { confirmSignInPage, signInPage, linkSentPage, problemPage, CONFIRM_PAGE_CSP, PAGE_CSP } from "./pages.ts";
+import {
+  changePasswordPage,
+  confirmSignInPage,
+  forgotPasswordPage,
+  signInPage,
+  linkSentPage,
+  problemPage,
+  CONFIRM_PAGE_CSP,
+  PAGE_CSP,
+  SIGNIN_PAGE_CSP,
+} from "./pages.ts";
 
 const MAX_FORM_BYTES = 8 * 1024;
 const ID_TOKEN_TTL_S = 300;
 const MAX_INFLIGHT_SENDS = 32;
+const CHANGE_TTL_S = 600;
+const CORE_PASSWORD_TIMEOUT_MS = 5_000;
+
+interface SignedIn {
+  email: string;
+  authTime: number;
+  cookie?: string;
+  passwordVersion?: string;
+  remember?: boolean;
+}
 
 export interface AuthDeps {
   cfg: AuthConfig;
@@ -126,19 +147,30 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
   const notify = deps.onBackgroundTask ?? ((task: Promise<void>) => void task.catch(() => undefined));
   const formAction = `${cfg.publicPath}/authorize`;
   const passwords = passwordConfigured(cfg);
-  const signInForm = (
+  const managedPasswords = corePasswords(cfg);
+  const changeAction = `${cfg.publicPath}/change-password`;
+  const sendSignInForm = (
+    res: ServerResponse,
+    status: number,
     requestToken: string,
-    extra: { email?: string; problem?: string; passwordProblem?: string } = {},
-  ): string =>
-    signInPage({
-      brandName: brandName(),
-      trustedSignInLabel: deps.trustedSignInLabel,
-      action: formAction,
-      requestToken,
-      emailLink: mailer !== null,
-      password: passwords,
-      ...extra,
-    });
+    state: string,
+    extra: { email?: string; problem?: string; passwordProblem?: string; remember?: boolean } = {},
+  ): void =>
+    sendHtml(
+      res,
+      status,
+      signInPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        action: `${formAction}?state=${encodeURIComponent(state)}`,
+        requestToken,
+        emailLink: mailer !== null,
+        password: passwords,
+        ...(managedPasswords ? { managedPasswords, forgotUrl: `${cfg.publicPath}/forgot` } : {}),
+        ...extra,
+      }),
+      SIGNIN_PAGE_CSP,
+    );
   const linkTtlMinutes = Math.max(1, Math.round(cfg.linkTtlS / 60));
   let inFlightSends = 0;
   const background = (task: () => Promise<void>): void => {
@@ -154,7 +186,22 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     );
   };
 
-  const problem = (res: ServerResponse, status: number, heading: string, msg: string, detail?: string): void =>
+  const signInUrl = ((): string | undefined => {
+    try {
+      return new URL("/auth/login", cfg.redirectUri).toString();
+    } catch {
+      return undefined;
+    }
+  })();
+
+  const problem = (
+    res: ServerResponse,
+    status: number,
+    heading: string,
+    msg: string,
+    detail?: string,
+    restart = false,
+  ): void =>
     sendHtml(
       res,
       status,
@@ -164,7 +211,26 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
         heading,
         msg,
         ...(detail ? { detail } : {}),
+        ...(restart && signInUrl ? { retryUrl: signInUrl } : {}),
       }),
+    );
+
+  const backendUnavailable = (res: ServerResponse): void =>
+    problem(
+      res,
+      503,
+      "Sign-in is temporarily unavailable",
+      "The sign-in service cannot reach its backend. Try again in a minute.",
+    );
+
+  const expiredRequest = (res: ServerResponse): void =>
+    problem(
+      res,
+      400,
+      "This sign-in page expired",
+      "Sign-in pages are only valid for a short while. Start again from the page you were trying to reach.",
+      undefined,
+      true,
     );
 
   const emailUnavailable = (res: ServerResponse): void =>
@@ -183,26 +249,33 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       "Your administrator has not set up any password accounts on this deployment.",
     );
 
-  const signInUrl = ((): string | undefined => {
-    try {
-      return new URL("/auth/login", cfg.redirectUri).toString();
-    } catch {
-      return undefined;
-    }
-  })();
-
   const staleLink = (res: ServerResponse): void =>
-    sendHtml(
+    problem(
       res,
       400,
-      problemPage({
-        brandName: brandName(),
-        trustedSignInLabel: deps.trustedSignInLabel,
-        heading: "This sign-in link no longer works",
-        msg: "Sign-in links work once and expire quickly. Request a fresh one and open it right away.",
-        ...(signInUrl ? { retryUrl: signInUrl } : {}),
-      }),
+      "This sign-in link no longer works",
+      "Sign-in links work once and expire quickly. Request a fresh one and open it right away.",
+      undefined,
+      true,
     );
+
+  const staleChange = (res: ServerResponse): void =>
+    problem(res, 400, "This password change expired", "Sign in again to set your new password.", undefined, true);
+
+  async function corePassword<T>(
+    path: "/v1/auth/password/verify" | "/v1/auth/password/set",
+    body: Record<string, string>,
+  ): Promise<{ status: number; json: T | null }> {
+    const corePath = withSourceAuthNonce(path, cfg.coreSigningSecret);
+    const payload = JSON.stringify(body);
+    const response = await fetch(`${cfg.coreApiUrl}${corePath}`, {
+      method: "POST",
+      headers: signedHeaders(cfg.coreSigningSecret, "POST", corePath, payload),
+      body: payload,
+      signal: AbortSignal.timeout(CORE_PASSWORD_TIMEOUT_MS),
+    });
+    return { status: response.status, json: (await response.json().catch(() => null)) as T | null };
+  }
 
   const cookieSignature = (token: string): string =>
     createHmac("sha256", cfg.tokenSecret)
@@ -227,21 +300,17 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
   const sessionCookie = (token: string, session: RememberedSession): string =>
     `qm_idp_session=${token}.${cookieSignature(token)}; HttpOnly; Secure; SameSite=Lax; Path=${cfg.publicPath || "/"}; Max-Age=${Math.max(0, Math.floor((session.expiresAtMs - now()) / 1000))}`;
 
-  async function issueCode(
-    res: ServerResponse,
-    request: AuthRequest,
-    email: string,
-    authTime: number,
-    cookie: string,
-  ): Promise<void> {
+  async function issueCode(res: ServerResponse, request: AuthRequest, signedIn: SignedIn): Promise<void> {
     const code = await signer.sealCode(
       {
         clientId: request.clientId,
         redirectUri: request.redirectUri,
         nonce: request.nonce,
         codeChallenge: request.codeChallenge,
-        email,
-        authTime,
+        email: signedIn.email,
+        authTime: signedIn.authTime,
+        ...(signedIn.passwordVersion !== undefined ? { passwordVersion: signedIn.passwordVersion } : {}),
+        ...(signedIn.remember ? { remember: true } : {}),
       },
       cfg.codeTtlS,
       now(),
@@ -249,7 +318,10 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     const destination = new URL(request.redirectUri);
     destination.searchParams.set("code", code.token);
     destination.searchParams.set("state", request.state);
-    res.writeHead(302, noStore({ location: destination.toString(), "set-cookie": cookie }));
+    res.writeHead(
+      302,
+      noStore({ location: destination.toString(), ...(signedIn.cookie ? { "set-cookie": signedIn.cookie } : {}) }),
+    );
     res.end();
   }
 
@@ -263,25 +335,24 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
         "Start again from the page you were trying to reach.",
         parsed.problem,
       );
-    const token = rememberedToken(req);
+    const token = managedPasswords ? undefined : rememberedToken(req);
     if (token && !parsed.prompt.split(/\s+/).includes("login") && parsed.maxAge !== 0) {
       let session: RememberedSession | null;
       try {
         session = await sessions.use(token);
       } catch {
-        return problem(
-          res,
-          503,
-          "Sign-in is temporarily unavailable",
-          "The sign-in service cannot reach its backend. Try again in a minute.",
-        );
+        return backendUnavailable(res);
       }
       if (
         session &&
         (parsed.maxAge === undefined || Math.floor(now() / 1000) - session.authTime <= parsed.maxAge) &&
         (await emailAllowed(session.email))
       )
-        return issueCode(res, parsed.request, session.email, session.authTime, sessionCookie(token, session));
+        return issueCode(res, parsed.request, {
+          email: session.email,
+          authTime: session.authTime,
+          cookie: sessionCookie(token, session),
+        });
     }
     if (parsed.prompt.split(/\s+/).includes("none")) {
       const destination = new URL(parsed.request.redirectUri);
@@ -292,7 +363,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     }
     if (!mailer && !passwords) return emailUnavailable(res);
     const sealed = await signer.sealRequest(parsed.request, cfg.requestTtlS, now());
-    return sendHtml(res, 200, signInForm(sealed.token));
+    return sendSignInForm(res, 200, sealed.token, parsed.request.state);
   }
 
   async function passwordSubmit(
@@ -304,16 +375,66 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     if (!passwords) return passwordUnavailable(res);
     const email = normalizeEmail(form.get("email") ?? "");
     const password = form.get("password") ?? "";
-    const reject = async (status: number, passwordProblem: string): Promise<void> => {
-      const sealed = await signer.sealRequest(request, cfg.requestTtlS, now());
-      sendHtml(res, status, signInForm(sealed.token, { email, passwordProblem }));
-    };
+    const remember = managedPasswords && form.get("remember") === "1";
+    const reject = (status: number, passwordProblem: string): void =>
+      sendSignInForm(res, status, form.get("request") ?? "", request.state, { email, passwordProblem, remember });
     if (!validEmail(email) || !password) return reject(400, "Enter your email address and password.");
     const nowMs = now();
     const ip = clientIpOf(req);
+    const within = async (kind: string, value: string, limit: number): Promise<boolean> =>
+      withinRateLimit(claims, { secret: cfg.tokenSecret, kind, value, limit, windowS: cfg.sendWindowS, nowMs });
+    if (managedPasswords) {
+      const refuse = async (): Promise<void> => {
+        let limited: boolean;
+        try {
+          const address = await within("password-ip", ip, cfg.passwordLimitPerIp);
+          const account = await within("password-account", email, cfg.passwordLimitPerEmail);
+          limited = !address || !account;
+        } catch (e) {
+          if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+          reportBackendError(e);
+          return backendUnavailable(res);
+        }
+        console.warn(`[auth] password sign-in refused for ${email}`);
+        return limited
+          ? reject(429, "Too many sign-in attempts. Wait a while, then try again.")
+          : reject(401, "That email address or password is incorrect.");
+      };
+      if (!(await emailAllowed(email))) return refuse();
+      let verdict: {
+        status: number;
+        json: { status?: string; forceChange?: boolean; retryInMs?: number; version?: string } | null;
+      };
+      try {
+        verdict = await corePassword("/v1/auth/password/verify", { principalId: email, password });
+      } catch (e) {
+        reportBackendError(e);
+        return backendUnavailable(res);
+      }
+      if (verdict.status !== 200 || !verdict.json) {
+        console.error(`[auth] core answered the password check with HTTP ${verdict.status}`);
+        return backendUnavailable(res);
+      }
+      if (verdict.json.status === "locked") {
+        const minutes = Math.max(1, Math.ceil((verdict.json.retryInMs ?? 0) / 60_000));
+        console.warn(`[auth] password sign-in refused for ${email}: the account is locked`);
+        return reject(429, `Too many sign-in attempts. Try again in about ${minutes} minutes.`);
+      }
+      if (verdict.json.status !== "ok") return refuse();
+      const passwordVersion = verdict.json.version;
+      if (typeof passwordVersion !== "string") return backendUnavailable(res);
+      if (verdict.json.forceChange) {
+        const sealed = await signer.sealChange({ ...request, email, passwordVersion, remember }, CHANGE_TTL_S, now());
+        return sendHtml(
+          res,
+          200,
+          changePasswordPage({ brandName: brandName(), action: changeAction, changeToken: sealed.token, email }),
+        );
+      }
+      console.log(`[auth] password sign-in for ${email}`);
+      return issueCode(res, request, { email, authTime: Math.floor(now() / 1000), passwordVersion, remember });
+    }
     try {
-      const within = async (kind: string, value: string, limit: number): Promise<boolean> =>
-        withinRateLimit(claims, { secret: cfg.tokenSecret, kind, value, limit, windowS: cfg.sendWindowS, nowMs });
       if (!(await within("password-ip", ip, cfg.passwordLimitPerIp))) {
         console.warn("[auth] password sign-in refused: per-address attempt limit reached for the requesting client");
         return reject(429, "Too many sign-in attempts. Wait a while, then try again.");
@@ -325,12 +446,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     } catch (e) {
       if (!(e instanceof ClaimStoreUnavailableError)) throw e;
       reportBackendError(e);
-      return problem(
-        res,
-        503,
-        "Sign-in is temporarily unavailable",
-        "The sign-in service cannot reach its backend. Try again in a minute.",
-      );
+      return backendUnavailable(res);
     }
     const matched = await verifyPassword(password, cfg.passwordUsers.get(email));
     if (!matched || !(await emailAllowed(email))) {
@@ -349,7 +465,79 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       );
     }
     console.log(`[auth] password sign-in for ${email}`);
-    return issueCode(res, request, email, session.authTime, sessionCookie(session.token, session));
+    return issueCode(res, request, {
+      email,
+      authTime: session.authTime,
+      cookie: sessionCookie(session.token, session),
+    });
+  }
+
+  async function changePasswordSubmit(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let raw: string;
+    try {
+      raw = await readBody(req, MAX_FORM_BYTES);
+    } catch {
+      return problem(res, 413, "That didn't work", "The sign-in form sent more data than we accept.");
+    }
+    const form = new URLSearchParams(raw);
+    const changeToken = form.get("change") ?? "";
+    const opened = await signer.openChange(changeToken, now());
+    if (!opened) return staleChange(res);
+    const { claims: login } = opened;
+    const expected = login.passwordVersion;
+    if (expected === undefined || !(await emailAllowed(login.email))) return staleChange(res);
+    const next = form.get("next") ?? "";
+    const retry = (reason: string): void =>
+      sendHtml(
+        res,
+        400,
+        changePasswordPage({
+          brandName: brandName(),
+          action: changeAction,
+          changeToken,
+          email: login.email,
+          problem: reason,
+        }),
+      );
+    if (next !== (form.get("confirm") ?? "")) return retry("The two passwords do not match.");
+    if (next.length < 8) return retry("Use at least 8 characters.");
+    let outcome: { status: number; json: { ok?: boolean; error?: string; version?: string } | null };
+    try {
+      outcome = await corePassword("/v1/auth/password/set", {
+        principalId: login.email,
+        nextPassword: next,
+        version: expected,
+      });
+    } catch (e) {
+      reportBackendError(e);
+      return backendUnavailable(res);
+    }
+    if (outcome.json?.error === "same_as_initial") return retry("The new password must differ from the initial one.");
+    if (outcome.json?.error === "weak_password") return retry("Use at least 8 characters.");
+    if (outcome.status === 403) return staleChange(res);
+    const passwordVersion = outcome.json?.version;
+    if (outcome.status !== 200 || !outcome.json?.ok || typeof passwordVersion !== "string") {
+      console.error(`[auth] core answered the password change with HTTP ${outcome.status}`);
+      return backendUnavailable(res);
+    }
+    try {
+      if (!(await claimOnce(claims, `change:${opened.jti}`, opened.expiresAtMs))) return staleChange(res);
+    } catch (e) {
+      if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
+      return backendUnavailable(res);
+    }
+    console.log(`[auth] password changed at sign-in for ${login.email}`);
+    return issueCode(res, login, {
+      email: login.email,
+      authTime: Math.floor(now() / 1000),
+      passwordVersion,
+      remember: login.remember === true,
+    });
+  }
+
+  function forgotForm(res: ServerResponse): void {
+    return sendHtml(res, 200, forgotPasswordPage({ brandName: brandName(), ...(signInUrl ? { signInUrl } : {}) }));
   }
 
   async function sendLink(request: AuthRequest, email: string, ip: string, sender: Mailer): Promise<void> {
@@ -401,22 +589,18 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       throw e;
     }
     const form = new URLSearchParams(raw);
-    const request = await signer.openRequest(form.get("request") ?? "", now());
-    if (!request) {
-      return problem(
-        res,
-        400,
-        "This sign-in page expired",
-        "Sign-in pages are only valid for a short while. Start again from the page you were trying to reach.",
-      );
-    }
-    if (form.get("method") === "password" || form.has("password")) return passwordSubmit(req, res, request, form);
-    if (!mailer) return emailUnavailable(res);
+    const requestToken = form.get("request") ?? "";
+    const request = await signer.openRequest(requestToken, now());
+    if (!request) return expiredRequest(res);
+    const postedState = new URL(req.url ?? "/", "http://auth.local").searchParams.get("state");
+    if (postedState !== null && !safeEqual(postedState, request.state)) return expiredRequest(res);
+    if (!mailer || form.get("method") === "password" || form.has("password"))
+      return passwordSubmit(req, res, request, form);
     const email = normalizeEmail(form.get("email") ?? "");
-    if (!validEmail(email)) {
-      const sealed = await signer.sealRequest(request, cfg.requestTtlS, now());
-      return sendHtml(res, 400, signInForm(sealed.token, { problem: "That doesn't look like an email address." }));
-    }
+    if (!validEmail(email))
+      return sendSignInForm(res, 400, requestToken, request.state, {
+        problem: "That doesn't look like an email address.",
+      });
     const ip = clientIpOf(req);
     sendHtml(
       res,
@@ -490,7 +674,11 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
         "The sign-in service cannot remember this browser. Request a fresh link in a minute.",
       );
     }
-    return issueCode(res, link, link.email, session.authTime, sessionCookie(session.token, session));
+    return issueCode(res, link, {
+      email: link.email,
+      authTime: session.authTime,
+      cookie: sessionCookie(session.token, session),
+    });
   }
 
   async function token(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -543,6 +731,8 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       nonce: granted.nonce,
       ttlS: ID_TOKEN_TTL_S,
       authTime: granted.authTime,
+      passwordVersion: granted.passwordVersion,
+      remember: granted.remember,
       nowMs,
     });
     const access = await signer.sealAccess({ sub, email: granted.email }, cfg.accessTtlS, nowMs);
@@ -617,6 +807,8 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     if (method === "POST" && path === "/authorize") return authorizeSubmit(req, res);
     if (method === "GET" && path === "/verify") return confirmVerify(res);
     if (method === "POST" && path === "/verify") return verify(req, res);
+    if (managedPasswords && method === "POST" && path === "/change-password") return changePasswordSubmit(req, res);
+    if (managedPasswords && method === "GET" && path === "/forgot") return forgotForm(res);
     if (method === "POST" && path === "/token") return token(req, res);
     if ((method === "GET" || method === "POST") && path === "/userinfo") return userinfo(req, res);
     return sendJson(res, 404, { error: "not_found" });

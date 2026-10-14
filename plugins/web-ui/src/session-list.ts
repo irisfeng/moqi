@@ -40,6 +40,22 @@ export function splitPinned<T extends Pick<CoreSession, "pinned">>(sessions: rea
   return { pinned, rest };
 }
 
+export function pinnedProjectScopes(
+  sessions: readonly Pick<CoreSession, "pinned" | "scopeId">[],
+  projects: readonly { scopeId: string; pinned: boolean }[],
+): Set<string> {
+  const known = new Set(projects.map((project) => project.scopeId));
+  const withSessions = new Set<string>();
+  const pinned = new Set<string>();
+  for (const session of sessions) {
+    if (!known.has(session.scopeId)) continue;
+    withSessions.add(session.scopeId);
+    if (session.pinned) pinned.add(session.scopeId);
+  }
+  for (const project of projects) if (project.pinned && !withSessions.has(project.scopeId)) pinned.add(project.scopeId);
+  return pinned;
+}
+
 export function chatBrowseStatusMatches(
   session: Pick<CoreSession, "archived" | "awaitingInput">,
   status: ChatBrowseStatus,
@@ -182,6 +198,33 @@ export function applySessionState(
     };
   });
   return { list: matched ? next : list, matched };
+}
+
+export type RunStatus = "running" | "waiting" | "failed" | "done";
+
+export function runStatus(
+  s: Pick<CoreSession, "lastTurnFailed" | "lastTurnAt"> | null | undefined,
+  ind: Pick<RowIndicators, "working" | "awaiting">,
+): RunStatus | null {
+  if (ind.awaiting) return "waiting";
+  if (ind.working) return "running";
+  if (s?.lastTurnFailed) return "failed";
+  return s?.lastTurnAt ? "done" : null;
+}
+
+interface ProjectStanding {
+  pinned?: boolean;
+  important?: boolean;
+  urgent?: boolean;
+  lastActivityAt?: number | null;
+}
+
+export function compareProjects(a: ProjectStanding, b: ProjectStanding): number {
+  const rank = (project: ProjectStanding): number => {
+    if (project.pinned) return 2;
+    return project.important || project.urgent ? 1 : 0;
+  };
+  return rank(b) - rank(a) || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
 }
 
 export interface RowIndicators {

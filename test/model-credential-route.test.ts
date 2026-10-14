@@ -12,6 +12,7 @@ import { providerKeysPresent, harnessCarriedModelAuth } from "../src/config.ts";
 import { testConfig } from "./support/test-config.ts";
 import { createModelCredentialStore, type StoredModelCredential } from "../src/model/model-credential-store.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { setCustomProviders } from "../src/model/custom-providers.ts";
 import { getRequiredModel, MODEL_REGISTRY, modelServiceable, resolveModel } from "../src/model/pi-models.ts";
 
 const ADMIN = { "content-type": "application/json", "x-admin-actor": "admin-alice@default-org" };
@@ -533,6 +534,44 @@ test("surface-config reports whether any model provider is configured", async ()
     assert.equal(((await after.json()) as { modelProviderConfigured?: boolean }).modelProviderConfigured, true);
   } finally {
     await srv.close();
+  }
+});
+
+test("surface-config counts a stored custom provider as configured until it is removed", async () => {
+  const appConfig = testConfig({ dataDir: mkdtempSync(join(tmpdir(), "model-credential-route-")) });
+  const built = buildApp(appConfig);
+  const server = createInsecureTestServer(built.app, {
+    config: built.config,
+    modelCredentials: built.modelCredentials,
+    customProviders: built.customProviders,
+    refreshModels: built.refreshModels,
+    harnessId: "pi",
+    providerKeys: providerKeysPresent(appConfig),
+  });
+  server.listen(0);
+  const base = `http://localhost:${(server.address() as AddressInfo).port}`;
+  const configured = async () =>
+    ((await (await fetch(`${base}/v1/surface-config`)).json()) as { modelProviderConfigured?: boolean })
+      .modelProviderConfigured;
+  try {
+    assert.equal(await configured(), false);
+    await built.customProviders.upsert(
+      {
+        id: "acme-gateway",
+        name: "Acme Gateway",
+        protocol: "openai",
+        baseUrl: "https://llm.acme.internal/v1",
+        models: [{ id: "acme-large", name: "Acme Large", contextWindow: 200_000, maxTokens: 16_000 }],
+      },
+      "acme-key",
+      "admin-alice@default-org",
+    );
+    assert.equal(await configured(), true);
+    await built.customProviders.delete("acme-gateway", "admin-alice@default-org");
+    assert.equal(await configured(), false);
+  } finally {
+    setCustomProviders([]);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

@@ -1,10 +1,11 @@
 import { sessionStatusMark } from "./session-status.ts";
 import type { CoreSession } from "./core-bridge.ts";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowUpLeft, Box, Brain, Clock3, Ellipsis, Files, GitFork, KeyRound, Rocket } from "lucide";
+import { ArrowUpLeft, Box, Brain, Clock3, Ellipsis, Files, Folder, GitFork, KeyRound, Rocket, User } from "lucide";
 import { api } from "./core-bridge";
 import { closeFormMenus, icon, toggleFormMenu } from "./ui";
 import { tip } from "./tooltip";
+import { hasDestination } from "./shell-state";
 
 /** A session's context carried into the crons/files/memory views so the whole
  * view stays scoped to that project and keeps the session top bar. */
@@ -14,6 +15,7 @@ export interface ScopedSessionInfo {
   threadRef: string | null;
   title: string;
   crumb: string | null;
+  crumbGlyph?: Parameters<typeof icon>[0] | null;
 }
 
 export const scopedSession: { active: ScopedSessionInfo | null } = { active: null };
@@ -81,6 +83,7 @@ export interface SessionTopbarOpts {
   status?: CoreSession["status"];
   sessionId?: string | null;
   crumb: string | null;
+  crumbGlyph?: Parameters<typeof icon>[0] | null;
   title: string;
   activeTool?: SessionTool | null;
   toolCount?: ((tool: SessionTool) => number | null) | null;
@@ -92,20 +95,23 @@ export interface SessionTopbarOpts {
 }
 
 export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
-  const crumbTpl = ((): TemplateResult | typeof nothing => {
-    if (!o.crumb) return nothing;
-    if (!o.onCrumb) return html`<span class="session-crumb">${o.crumb}</span><span class="session-crumb-sep">/</span>`;
+  const crumbTpl = ((): TemplateResult => {
+    if (!o.crumb)
+      return html`<span class="session-crumb" data-scope="personal">${icon(User, 12)}<span>Personal</span></span>`;
+    const name = html`${icon(o.crumbGlyph ?? Folder, 12)}<span dir="auto">${o.crumb}</span>`;
+    if (!o.onCrumb) return html`<span class="session-crumb" data-scope="shared">${name}</span>`;
     return html`<button
-        class="session-crumb as-link"
-        type="button"
-        ${tip(`Open the ${o.crumb} project`)}
-        @click=${(e: Event) => {
-          e.stopPropagation();
-          o.onCrumb!();
-        }}
-      >
-        ${o.crumb}</button
-      ><span class="session-crumb-sep">/</span>`;
+      class="session-crumb as-link"
+      data-scope="shared"
+      type="button"
+      ${tip(`Open the ${o.crumb} project`)}
+      @click=${(e: Event) => {
+        e.stopPropagation();
+        o.onCrumb!();
+      }}
+    >
+      ${name}
+    </button>`;
   })();
   const heading = html`
     ${crumbTpl} ${o.title ? html`<span class="session-title" dir="auto">${o.title}</span>` : nothing}
@@ -183,8 +189,8 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
       }
       ${sessionStatusMark(o.status)}
       <div class="topbar-actions session-tools">
-        ${tool("crons", Clock3, "Crons")} ${tool("apps", Rocket, "Apps")} ${tool("files", Files, "Files")}
-        ${tool("skills", Box, "Skills")} ${tool("memory", Brain, "Memory")}
+        ${tool("crons", Clock3, "Crons")} ${hasDestination("apps") ? tool("apps", Rocket, "Apps") : nothing}
+        ${tool("files", Files, "Files")} ${tool("skills", Box, "Skills")} ${tool("memory", Brain, "Memory")}
         ${tool("keychain", KeyRound, "Your keychain")}
       </div>
       <div class="topbar-actions form-menu-control session-tools-more" data-align="right" data-drop="down">
@@ -200,7 +206,7 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
         </button>
         <div class="menu-popover" role="menu" hidden>
           <div class="menu-title">This conversation's workspace</div>
-          ${sheetTool("crons", Clock3, "Crons")} ${sheetTool("apps", Rocket, "Apps")}
+          ${sheetTool("crons", Clock3, "Crons")} ${hasDestination("apps") ? sheetTool("apps", Rocket, "Apps") : nothing}
           ${sheetTool("files", Files, "Files")} ${sheetTool("skills", Box, "Skills")}
           ${sheetTool("memory", Brain, "Memory")} ${sheetTool("keychain", KeyRound, "Your keychain")}
         </div>
@@ -222,6 +228,7 @@ export function scopedViewTopbar(current: SessionTool, redraw: () => void): Temp
   return sessionTopbarTpl({
     sessionId: active.sessionId,
     crumb: active.crumb,
+    crumbGlyph: active.crumbGlyph,
     title: active.title,
     onCrumb: active.crumb ? () => openProjectPage(active.scopeId) : null,
     activeTool: current,

@@ -3,6 +3,8 @@ import { deploymentLiveSmokeRoutes } from "./deployment-live-smoke.ts";
 import { backgroundWorkRoutes } from "./background-work.ts";
 import { composioRoutes } from "./composio.ts";
 import { loopIngressRoutes, loopIngressRawRoutes } from "./loop-ingress.ts";
+import { notificationRoutes } from "./notifications.ts";
+import { projectCollaborationRoutes } from "./project-collaboration.ts";
 import { sendJson } from "../http.ts";
 import { type ApiCtx, type BaseCtx, type Route } from "./route.ts";
 import { connectorRawRoutes, connectorRoutes } from "./connectors.ts";
@@ -13,6 +15,7 @@ import { loopItemEventsRawRoutes } from "./loop-item-events.ts";
 import { webhookRawRoutes, webhookRoutes } from "./webhooks.ts";
 import { runEventRoutes } from "./run-events.ts";
 import { turnRoutes } from "./turns.ts";
+import { legacyTurnIntentRoutes } from "./legacy-turn-intents.ts";
 import { credentialRoutes } from "./credentials.ts";
 import { brokerGitHttp, GIT_HTTP_BROKER_PREFIX } from "../git-http-broker.ts";
 import { keychainRoutes } from "./keychain.ts";
@@ -42,6 +45,13 @@ import { loopItemRoutes } from "./loop-items.ts";
 import { searchRoutes } from "./search.ts";
 import { userModelAuthRoutes } from "./user-model-auth.ts";
 import { swarmRoutes } from "./swarms.ts";
+import { loginPasswordRoutes } from "./login-password.ts";
+import { announcementRoutes } from "./announcements.ts";
+import { webuiHomeRoutes } from "./webui-home.ts";
+import { ratingRoutes } from "./ratings.ts";
+import { projectDepartmentRoutes } from "./project-departments.ts";
+import { directoryPeopleRoutes } from "./directory-people.ts";
+import { userContactRoutes } from "./admin/user-contact.ts";
 
 export const rawRoutes: ReadonlyArray<Route<BaseCtx>> = [
   { method: "GET", path: "/healthz", auth: "public", handle: ({ res }) => sendJson(res, 200, { ok: true }) },
@@ -89,6 +99,7 @@ export const apiRoutes: ReadonlyArray<Route<ApiCtx>> = [
   ...deploymentLiveSmokeRoutes,
   ...turnRoutes,
   ...runEventRoutes,
+  ...legacyTurnIntentRoutes,
   ...credentialRoutes,
   ...keychainRoutes,
   ...secretDropRoutes,
@@ -99,6 +110,7 @@ export const apiRoutes: ReadonlyArray<Route<ApiCtx>> = [
   ...surfaceRoutes,
   ...fileUploadRoutes,
   ...projectRoutes,
+  ...projectCollaborationRoutes,
   ...contextPolicyRoutes,
   ...cronRoutes,
   ...loopRoutes,
@@ -117,4 +129,12 @@ export const apiRoutes: ReadonlyArray<Route<ApiCtx>> = [
   ...egressAuditRoutes,
   ...authBrokerRoutes,
   ...userModelAuthRoutes,
+  ...loginPasswordRoutes,
+  ...notificationRoutes,
+  ...announcementRoutes,
+  ...webuiHomeRoutes,
+  ...ratingRoutes,
+  ...projectDepartmentRoutes,
+  ...directoryPeopleRoutes,
+  ...userContactRoutes,
 ];

@@ -64,6 +64,7 @@ export function createTurnMethods(
   | "getRunToolEntries"
   | "subscribeRun"
   | "syncRunStream"
+  | "webRunForOperationKey"
   | "activeRunForThread"
   | "stopConversation"
   | "withdrawRun"
@@ -110,7 +111,14 @@ export function createTurnMethods(
         };
       await deps.refreshModels?.();
       await deps.identity.refresh();
-      const actor: Principal = deps.identity.resolve(req.actor);
+      const resolvedActor: Principal = deps.identity.resolve(req.actor);
+      const actor = resolvedActor.displayName
+        ? resolvedActor
+        : await (async () => {
+            const entry = await deps.directory.get(resolvedActor.id).catch(() => null);
+            const displayName = entry?.displayName?.trim();
+            return displayName ? { ...resolvedActor, displayName } : resolvedActor;
+          })();
       if (!deps.identity.isInternal(actor)) {
         return { status: "refused", reason: "internal-only: non-internal principals cannot interact" };
       }
@@ -378,6 +386,9 @@ export function createTurnMethods(
         origin,
         modelAccount: origin.kind === "human" ? modelAccount : ("company" as const),
         text: req.text,
+        ...(req.surface === "web" && req.verifiedRequestFingerprint
+          ? { verifiedRequestFingerprint: req.verifiedRequestFingerprint }
+          : {}),
         ...(req.gatewayContext ? { gatewayContext: req.gatewayContext } : {}),
         ...(req.proactiveOpener ? { proactiveOpener: true } : {}),
         ...(req.analyticsSuppressed || (sameApprovedMessage && approvedRequest?.analyticsSuppressed)
@@ -416,6 +427,11 @@ export function createTurnMethods(
         ...(req.approval ? { approval: req.approval } : {}),
         ...(sessionParticipantIds ? { sessionParticipantIds } : {}),
         ...(projectVersion ? { scopeVersion: projectVersion } : {}),
+        ...(typeof req.quoteSeq === "number" ? { quoteSeq: req.quoteSeq } : {}),
+        ...(typeof req.quoteText === "string" && req.quoteText.trim() ? { quoteText: req.quoteText.trim() } : {}),
+        ...(typeof req.quoteAuthor === "string" && req.quoteAuthor.trim()
+          ? { quoteAuthor: req.quoteAuthor.trim() }
+          : {}),
       };
 
       if (projectGroup && req.approval) {
@@ -467,7 +483,9 @@ export function createTurnMethods(
       let dedupKey: string | undefined = redeliveryKey;
       if (req.idempotencyKey) {
         dedupKey =
-          projectVersion === undefined ? req.idempotencyKey : `${req.idempotencyKey}:project-${projectVersion}`;
+          projectVersion === undefined || (req.surface === "web" && req.webSendProtocol === 2)
+            ? req.idempotencyKey
+            : `${req.idempotencyKey}:project-${projectVersion}`;
         if (req.approval) dedupKey = `${dedupKey}:approval:${req.approval.requestId}:${req.approval.approved}`;
       }
 
@@ -569,13 +587,20 @@ export function createTurnMethods(
       const spineRouted = !req.externalSlack && !req.approval && shouldRouteToSpine(request as OrchestratorInput);
       if (spineRouted) {
         request = { ...input, surfaceTools: true };
-        if (origin.kind !== "ambient")
+        if (origin.kind !== "ambient") {
+          const wakeText = await addressedWakeText(input as OrchestratorInput);
+          const quotePrefix =
+            typeof (input as { quoteText?: string }).quoteText === "string" &&
+            (input as { quoteText?: string }).quoteText?.trim()
+              ? `[Quoting ${(input as { quoteAuthor?: string }).quoteAuthor ?? "the original"}: ${(input as { quoteText?: string }).quoteText?.slice(0, 200)}]\n`
+              : "";
           request = {
             ...request,
-            text: await addressedWakeText(input as OrchestratorInput),
+            text: quotePrefix + wakeText,
             displayText: input.text,
             envelopeWrapped: true,
           };
+        }
       }
 
       if (spineRouted && origin.kind === "human" && !req.spawned && !req.idempotencyKey && origin.messageTs) {
@@ -629,20 +654,34 @@ export function createTurnMethods(
           request,
           maxAttempts: deps.maxAttempts,
           ...(dedupKey ? { dedupKey } : {}),
+          ...(req.surface === "web" && req.webSendProtocol === 2 && req.idempotencyKey && !req.approval
+            ? { webBaseKey: req.idempotencyKey }
+            : {}),
         });
       const enqueueStartedAt = performance.now();
       const enqueued = await withCurrentProjectRoster(enqueue);
       if (!enqueued) return { status: "refused", reason: "project membership changed; retry from the current project" };
-      const { run, deduped } = enqueued;
+      const { run, deduped, ambiguous } = enqueued;
       console.info("[turn] queued", {
         runId: run.id,
         preEnqueueMs: Math.round(enqueueStartedAt - startedAt),
         enqueueMs: Math.round(performance.now() - enqueueStartedAt),
       });
+      if (req.surface === "web" && req.webSendProtocol === 2 && deduped) {
+        if (
+          ambiguous ||
+          !req.verifiedRequestFingerprint ||
+          run.request.verifiedRequestFingerprint !== req.verifiedRequestFingerprint ||
+          !samePerson(run.request.actor.id, actor.id) ||
+          run.request.conversation.threadRef !== conversation.threadRef ||
+          !(await viewerMayUseRun(run, actor.id))
+        )
+          return { status: "refused", reason: "the previous send cannot be safely matched; review the original run" };
+      }
       if (deduped && redeliveryKey && run.dedupKey === redeliveryKey) return { status: "silent" };
       if (spineRouted && !deduped) markTriggerHandled(input as OrchestratorInput);
       if (spineRouted) deps.engaged?.engage(conversation.threadRef);
-      if (deduped && run.result && isTerminal(run.status)) return withAdminLink(run.result);
+      if (deduped && run.result && isTerminal(run.status)) return withAdminLink({ ...run.result, runId: run.id });
       if (req.async) return { status: "queued", runId: run.id };
       return drive(run.id);
     },
@@ -792,6 +831,26 @@ export function createTurnMethods(
         return stopSessionTree({ sessions: deps.sessions, runs: deps.runs, signals: deps.signals }, session);
       };
       return deps.advisoryLock ? deps.advisoryLock.withLock("session-tree-admission", stop) : stop();
+    },
+
+    async webRunForOperationKey(idempotencyKey, viewer) {
+      await deps.identity.refresh();
+      if (!deps.identity.isInternal(deps.identity.classify(viewer))) return { conflict: true };
+      const exact = await deps.runs.getByDedupKey(idempotencyKey);
+      const legacy = await deps.runs.findByDedupKeyPrefix(`${idempotencyKey}:project-`, 2);
+      const candidates = [...(exact ? [exact] : []), ...legacy];
+      if (candidates.length > 1) return { conflict: true };
+      const run = candidates[0];
+      if (!run || run.request.surface !== "web" || !samePerson(run.request.actor.id, viewer)) return null;
+      if (!(await viewerMayUseRun(run, viewer))) return { conflict: true };
+      return {
+        runId: run.id,
+        status: run.status,
+        threadRef: run.request.conversation.threadRef,
+        ...(run.request.verifiedRequestFingerprint
+          ? { verifiedRequestFingerprint: run.request.verifiedRequestFingerprint }
+          : {}),
+      };
     },
 
     async activeRunForThread(threadRef, viewer) {

@@ -1,0 +1,59 @@
+{
+  "name": "通义千问（阿里云百炼）",
+  "protocol": "openai",
+  "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "models": [
+    {
+      "id": "qwen3.8-max-preview",
+      "name": "Qwen3.8 Max Preview",
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "reasoning": true,
+      "modalities": ["text", "image"],
+      "compat": {
+        "thinkingFormat": "qwen",
+        "supportsDeveloperRole": false,
+        "supportsStore": false
+      }
+    },
+    {
+      "id": "qwen3.7-max",
+      "name": "Qwen3.7 Max",
+      "contextWindow": 1000000,
+      "maxTokens": 65536,
+      "reasoning": true,
+      "compat": {
+        "thinkingFormat": "qwen",
+        "supportsDeveloperRole": false,
+        "supportsStore": false
+      },
+      "modalities": ["text"]
+    },
+    {
+      "id": "qwen3.7-plus",
+      "name": "Qwen3.7 Plus",
+      "contextWindow": 1000000,
+      "maxTokens": 64000,
+      "reasoning": true,
+      "modalities": ["text", "image"],
+      "compat": {
+        "thinkingFormat": "qwen",
+        "supportsDeveloperRole": false,
+        "supportsStore": false
+      }
+    },
+    {
+      "id": "qwen3.6-flash",
+      "name": "Qwen3.6 Flash",
+      "contextWindow": 1000000,
+      "maxTokens": 65536,
+      "reasoning": true,
+      "modalities": ["text", "image"],
+      "compat": {
+        "thinkingFormat": "qwen",
+        "supportsDeveloperRole": false,
+        "supportsStore": false
+      }
+    }
+  ]
+}

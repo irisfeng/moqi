@@ -6623,7 +6623,20 @@
       const EFFECT_LABELS = { allow: "Allow", deny: "Deny", require_approval: "Require approval" };
       const SECTIONS = [
         {
-          views: ["governance", "models", "credentials", "connectors", "slack-settings", "customize", "users", "spend"],
+          views: [
+            "governance",
+            "models",
+            "credentials",
+            "connectors",
+            "slack-settings",
+            "customize",
+            "users",
+            "announcements",
+            "home",
+            "ratings",
+            "adoption",
+            "spend",
+          ],
         },
         {
           label: "Logs",
@@ -6780,6 +6793,10 @@
         customize: "Customize",
         connectors: "Connectors",
         users: "Users",
+        announcements: "Announcements",
+        home: "Home page",
+        ratings: "Ratings",
+        adoption: "Usage and outcomes",
         keychain: "Keychain",
         user: "User",
         metrics: "Metrics",
@@ -6818,6 +6835,10 @@
       const ORG_WIDE = new Set([
         "retention",
         "users",
+        "announcements",
+        "home",
+        "ratings",
+        "adoption",
         "spend",
         "keychain",
         "connectors",
@@ -6828,7 +6849,7 @@
         "customize",
         "slack-settings",
       ]);
-      const ENDPOINT = { history: "sessions", files: "files", live: "runs" };
+      const ENDPOINT = { history: "sessions", files: "files", live: "runs", home: "webui-home", ratings: "ratings" };
       const HISTORY_PAGE_SIZE = 50;
       const ERRORS_PAGE_SIZE = 50;
 
@@ -7190,7 +7211,10 @@
         if (API_BASE) {
           try {
             const response = await fetch("/auth/logout", { method: "POST", headers: { accept: "application/json" } });
-            if (!response.ok) return alert(`Couldn't sign out (${response.status}). You are still signed in.`);
+            if (!response.ok) {
+              const failure = await response.json().catch(() => ({}));
+              return alert(failure.message || `Couldn't sign out (${response.status}). You are still signed in.`);
+            }
             const result = await response.json();
             location.href = result.redirectTo || "/";
           } catch (e) {
@@ -9171,6 +9195,7 @@
       const dataCache = new Map();
       function paintData(root, data) {
         root.textContent = "";
+        root.classList.remove("adoption-root");
         ({
           metrics: renderMetrics,
           spend: renderSpend,
@@ -9186,6 +9211,10 @@
           deployments: renderDeployments,
           retention: renderRetention,
           users: renderUsers,
+          announcements: renderAnnouncements,
+          home: renderHome,
+          ratings: renderRatings,
+          adoption: renderAdoption,
           keychain: renderKeychain,
         })[view](root, data);
       }
@@ -9209,7 +9238,7 @@
         }
         if (view === "errors") path += `&limit=${ERRORS_PAGE_SIZE}&offset=${(page - 1) * ERRORS_PAGE_SIZE}`;
         if (view === "spend") path += `?${spendQuery(urlToState())}`;
-        const cacheable = view !== "memory";
+        const cacheable = view !== "memory" && view !== "adoption";
         const cached = cacheable ? dataCache.get(path) : undefined;
         if (cached !== undefined) {
           paintData(root, cached);
@@ -9925,6 +9954,40 @@
           scopeKind,
           openUser: (principal) => go({ view: "user", scope, session: null, principal }),
         });
+      }
+      function renderAnnouncements(root, d) {
+        governanceUI.announcements.announcements(root, d, {
+          api,
+          apiBase: API_BASE,
+          fileSha256,
+          defaultShell,
+          fmtTime,
+          firstLine,
+          confirm: (message) => window.confirm(message),
+          reload: () => {
+            dataCache.clear();
+            renderData();
+          },
+        });
+      }
+      function renderHome(root, d) {
+        governanceUI.homeConfig.homeConfig(root, d, {
+          api,
+          defaultShell,
+          orgScope: () => orgScope(),
+          confirm: (message) => window.confirm(message),
+          reload: () => {
+            dataCache.clear();
+            renderData();
+          },
+        });
+      }
+      function renderRatings(root, d) {
+        governanceUI.ratings.ratings(root, d, { defaultShell });
+      }
+      function renderAdoption(root, d) {
+        root.classList.add("adoption-root");
+        governanceUI.adoption.adoption(root, d, { api, apiBase: API_BASE });
       }
       function renderUsers(root, d) {
         governanceUI.users.users(root, d, {

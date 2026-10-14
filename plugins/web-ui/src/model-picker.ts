@@ -22,6 +22,7 @@ import {
   ULTRAFAST_BASE_MODEL_ID,
   ultrafastChoice,
   effortLevelsForHarness,
+  equivalentOfferedEffort,
   compatibleHarnessOptions,
   presetModelId,
   modelLoadoutOptions,
@@ -131,7 +132,10 @@ export function createModelPicker<T>(bindings: ModelPickerBindings<T>) {
       bindings.showDefaultAction !== false &&
       activeRuntimeConfig !== null &&
       (!isDefault ||
-        settings.effort !== (activeRuntimeConfig.effective.effortLevel ?? defaultEffortForModel(option.model)) ||
+        settings.effort !==
+          (equivalentOfferedEffort(option.harnessId, option.model, activeRuntimeConfig.effective.effortLevel) ??
+            activeRuntimeConfig.effective.effortLevel ??
+            defaultEffortForModel(option.model)) ||
         settings.fast !== (activeRuntimeConfig.effective.fastMode === true));
     return html` <div
       class="loadout-row ${active ? "active" : ""} ${canMakeDefault || isDefault ? "has-default-action" : ""}"

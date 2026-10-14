@@ -91,7 +91,10 @@ test("reasoning edits preserve pricing and omitted positional fields", () => {
       { id: "plain", name: "Plain", reasoning: false },
     ],
   });
-  assert.equal(ui.provider.draft.models, "thinking |  | 32768 | 4096 | true\nplain | Plain |  |  | false");
+  assert.equal(
+    ui.provider.draft.models,
+    'thinking |  | 32768 | 4096 | true | {"input":0,"output":2}\nplain | Plain |  |  | false',
+  );
   assert.deepEqual(JSON.parse(JSON.stringify(ui.providerBody().models)), [
     { id: "thinking", contextWindow: 32768, maxTokens: 4096, reasoning: true, input: 0, output: 2 },
     { id: "plain", name: "Plain", reasoning: false },

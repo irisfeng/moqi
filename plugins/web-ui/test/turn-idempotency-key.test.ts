@@ -95,7 +95,10 @@ test("every send gesture mints exactly one key, carried on the prompt message so
     composer.indexOf("async function sendPrompt"),
     composer.indexOf("const LARGE_PASTE_CHARS"),
   );
-  assert.match(send, /agent\.prompt\(userSendMessage\(text, attachments\.length \? attachments : undefined\)\)/);
+  assert.match(
+    send,
+    /agent\.prompt\(userSendMessage\(text, attachments\.length \? attachments : undefined, quote \?\? undefined\)\)/,
+  );
 });
 
 test("the queue path keys each message and a resend after a failed submit reuses the same key", () => {
@@ -114,8 +117,8 @@ test("drive forwards the message's key so a duplicate POST of the same gesture d
   const at = bridge.indexOf("async function drive(");
   assert.ok(at >= 0);
   const body = bridge.slice(at, bridge.indexOf("async function resumeDrive", at));
-  assert.match(body, /const \{ text, attachments, idempotencyKey, issues, droppedIds, retryable \} = opener/);
-  assert.match(body, /turnRequestBody\([\s\S]{0,200}?\{ idempotencyKey, attachments \}\)/);
+  assert.match(body, /const \{ text, attachments, idempotencyKey, quote, issues, droppedIds, retryable \} = opener/);
+  assert.match(body, /turnRequestBody\([\s\S]{0,200}?\{\s*idempotencyKey,\s*attachments,\s*quote,\s*\}\)/);
 });
 
 test("latestUserTurn is the send chokepoint: it mints a key for any unkeyed message and writes it back", () => {

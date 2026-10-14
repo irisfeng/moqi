@@ -1,5 +1,7 @@
 import { html, nothing } from "lit";
 import { card, table, badge, renderer } from "./shared.ts";
+import { contactCard } from "./user-contact.ts";
+import { passwordCard } from "./user-password.ts";
 
 export async function detail(root: HTMLElement, principal: string, s: Record<string, any>) {
   const paint = renderer(root);
@@ -33,6 +35,8 @@ export async function detail(root: HTMLElement, principal: string, s: Record<str
   let selectedGrant: any = null;
   let usage: any = null;
   let usageRequest = 0;
+  const contact = contactCard(principal, s, () => draw());
+  const password = passwordCard(principal, s, () => draw());
   const stacked = (primary: any, secondary: any) =>
     html`<div>
       <div class="primaryline">${primary}</div>
@@ -307,7 +311,7 @@ export async function detail(root: HTMLElement, principal: string, s: Record<str
             </button>
             <p class="hint">${resetHint}</p>
           </div>`,
-        )}
+        )}${contact()}${password()}
       </div>`,
     );
   }

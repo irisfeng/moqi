@@ -8,6 +8,8 @@ COPY plugins/web-ui/index.html plugins/web-ui/shared.html plugins/web-ui/vite.co
 COPY plugins/web-ui/public ./public
 COPY plugins/web-ui/src ./src
 COPY plugins/chassis/src /chassis/src
+COPY scripts/i18n /scripts/i18n
+COPY i18n /i18n
 COPY docs/images/slack-app-config-token-setup.gif /docs/images/slack-app-config-token-setup.gif
 RUN npm run build
 

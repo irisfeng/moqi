@@ -67,15 +67,21 @@ test("analytics config is authenticated, company-scoped and omitted during imper
   assert.equal((await fetch(`${base}/me`, { headers: headers() })).status, 503);
 });
 
-test("authenticated impersonation suppresses analytics on turns and approval replay", async () => {
+test("impersonation suppresses analytics on turns and cannot answer an approval", async () => {
   coreStatus = 200;
   for (const impersonator of [undefined, "admin"]) {
     for (const path of ["/api/turn", "/api/approvals/approval-1"]) {
+      const sent = turns.length;
       const response = await fetch(`${base}${path}`, {
         method: "POST",
         headers: headers(impersonator),
         body: JSON.stringify({ text: "test turn", approved: true, analyticsSuppressed: false }),
       });
+      if (impersonator && path !== "/api/turn") {
+        assert.equal(response.status, 403);
+        assert.equal(turns.length, sent);
+        continue;
+      }
       assert.equal(response.status, 200);
       const turn = turns.at(-1)!;
       assert.equal(turn.analyticsSuppressed, impersonator ? true : undefined);

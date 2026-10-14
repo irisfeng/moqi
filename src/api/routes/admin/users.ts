@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mintSignedPayload } from "../../../auth/signed-token.ts";
 import { scopeId as makeScopeId } from "../../../types.ts";
 import { adminStatusFromGrants, AdminError } from "../../../admin/admin-service.ts";
 import { personKey, samePerson } from "../../../directory/person.ts";
+import { firstWebTurnLockKey } from "../../first-web-turn.ts";
 import type { AdminRole } from "../../../admin/admin-grant-store.ts";
 import type { DirectoryMember } from "../../../directory/directory-store.ts";
 import { computeUsers } from "../../../admin/users.ts";
@@ -412,6 +413,72 @@ export async function getUserDetail(ctx: ApiCtx): Promise<void> {
   });
 }
 
+export async function getUserPassword(ctx: ApiCtx): Promise<void> {
+  const { res, deps, params } = ctx;
+  res.setHeader("cache-control", "no-store");
+  if (!ctx.actor || ctx.actor.imp || ctx.capability) return sendJson(res, 403, { error: "forbidden" });
+  const actor = await authorizeAdmin(ctx, orgScope(deps));
+  if (!actor) return;
+  const id = personKey(params.principalId);
+  if (samePerson(id, actor.id))
+    return sendJson(res, 400, { error: "self_reset", message: "Ask another administrator to reset your password." });
+  if (!deps.identity || !deps.identity.isInternal(deps.identity.classify(id)))
+    return sendJson(res, 404, { error: "not_found", message: "This account is not active." });
+  const password = await deps.loginPasswords?.get(id);
+  if (!password?.initialHash)
+    return sendJson(res, 404, {
+      error: "no_credential",
+      message: "This email has no initial password to restore. Check the sign-in email.",
+    });
+  return sendJson(res, 200, {
+    version: password.version ?? "",
+    forceChange: password.forceChange,
+    locked: password.lockedUntil > Date.now(),
+  });
+}
+
+export async function resetUserPassword(ctx: ApiCtx): Promise<void> {
+  const { res, deps, params, body } = ctx;
+  const scope = orgScope(deps);
+  res.setHeader("cache-control", "no-store");
+  if (!ctx.actor || ctx.actor.imp || ctx.capability) return sendJson(res, 403, { error: "forbidden" });
+  const actor = await authorizeAdmin(ctx, scope);
+  if (!actor) return;
+  const id = personKey(params.principalId);
+  if (samePerson(id, actor.id))
+    return sendJson(res, 400, { error: "self_reset", message: "Ask another administrator to reset your password." });
+  if (!deps.loginPasswords || !deps.auditLog?.recordOnce) return sendJson(res, 503, { error: "not_configured" });
+  if (!deps.identity || !deps.identity.isInternal(deps.identity.classify(id)))
+    return sendJson(res, 404, { error: "not_found", message: "This account is not active." });
+  const input = body as { version?: unknown; operationId?: unknown } | null;
+  if (
+    !input ||
+    typeof input.version !== "string" ||
+    input.version.length > 128 ||
+    typeof input.operationId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.operationId)
+  )
+    return sendJson(res, 400, { error: "bad_request" });
+  const credential = await deps.loginPasswords.get(id);
+  if (!credential?.initialHash)
+    return sendJson(res, 404, { error: "no_credential", message: "This account has no initial password to restore." });
+  const event = {
+    at: Date.now(),
+    principalId: actor.id,
+    action: "user.password.reset",
+    resource: id,
+    scopeLabel: scope,
+  };
+  const auditKey = `password-reset:${actor.id}:${id}:${input.operationId}`;
+  await deps.auditLog.recordOnce(`${auditKey}:requested`, { ...event, status: "requested" });
+  const result = await deps.loginPasswords.resetInitial(id, actor.id, input.version, input.operationId);
+  await deps.auditLog.recordOnce(`${auditKey}:${result}`, { ...event, status: result });
+  if (result === "conflict")
+    return sendJson(res, 409, { error: "conflict", message: "The password state changed. Refresh and confirm again." });
+  if (result !== "ok") return sendJson(res, 404, { error: "no_credential" });
+  return sendJson(res, 200, { ok: true, forceChange: true });
+}
+
 export async function startImpersonation(ctx: ApiCtx): Promise<void> {
   const { res, app, deps, body } = ctx;
   const org = orgScope(deps);
@@ -468,22 +535,46 @@ export async function resetUserToBrandNew(ctx: ApiCtx): Promise<void> {
   const actor = await authorizeAdmin(ctx, orgScope(deps));
   if (!actor) return;
   if (!deps.memory) return sendJson(res, 404, { error: "not_found" });
+  if (deps.production && (!deps.advisoryLock || !deps.firstWebTurns || !deps.firstWebTurnsDurable || !deps.runs))
+    return sendJson(res, 503, { error: "first_turn_gate_unavailable" });
   const { principalId } = await resolveAdminUser(deps, params.principalId!);
   const personal = makeScopeId("personal", principalId);
-  const today = new Date().toISOString().slice(0, 10);
-  await deps.memory.replace(
-    personal,
-    setOnboardingStatus(await deps.memory.read(personal), "not_started", today),
-    actor.id,
-  );
-  let deletedSessions = 0;
-  if (deps.sessions) {
-    const own = (await deps.sessions.listByParticipant(principalId)).filter((s) => s.scopeId === personal);
-    for (const s of own) {
-      await deps.sessions.deleteSession(s.id);
-      deletedSessions++;
+  const reset = async () => {
+    if (deps.runs) {
+      for (const sessionId of await deps.runs.activeSessionIds()) {
+        const pending = await deps.runs.inFlightForThread(sessionId);
+        if (pending.some((run) => samePerson(run.request.actor.id, principalId))) return null;
+      }
     }
-  }
+    const today = new Date().toISOString().slice(0, 10);
+    await deps.memory!.replace(
+      personal,
+      setOnboardingStatus(await deps.memory!.read(personal), "not_started", today),
+      actor.id,
+    );
+    let deletedSessions = 0;
+    if (deps.sessions) {
+      const own = (await deps.sessions.listByParticipant(principalId)).filter((s) => s.scopeId === personal);
+      for (const s of own) {
+        await deps.sessions.deleteSession(s.id);
+        deletedSessions++;
+      }
+    }
+    if (deps.firstWebTurns) {
+      await deps.firstWebTurns.put(personKey(principalId), {
+        kind: "reset",
+        threadRef: "",
+        createdAt: Date.now(),
+        openerGeneration: randomBytes(8).toString("hex"),
+      });
+    }
+    return deletedSessions;
+  };
+  const deletedSessions =
+    deps.advisoryLock && deps.firstWebTurns
+      ? await deps.advisoryLock.withLock(firstWebTurnLockKey(principalId), reset)
+      : await reset();
+  if (deletedSessions === null) return sendJson(res, 409, { error: "active_runs" });
   audit(deps, {
     principalId: actor.id,
     action: "user.reset",

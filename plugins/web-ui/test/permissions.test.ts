@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appState, can, canView } from "../src/shell-state.ts";
+import { appState, can, canView, hasDestination } from "../src/shell-state.ts";
 
 test("can(key) is false before /me loads", () => {
   appState.me = null;
@@ -28,4 +28,18 @@ test("loops view requires the loops permission", () => {
 
   appState.me.permissions = ["loops"];
   assert.equal(canView("loops"), true);
+});
+
+test("a deployment names which of Docs, Project management and Apps exist", () => {
+  appState.me = { user: "alice", org: "acme" };
+  assert.equal(hasDestination("apps"), true);
+  assert.equal(canView("deploys"), true);
+  assert.equal(canView("docs"), false);
+  assert.equal(canView("pm"), false);
+
+  appState.me = { user: "alice", org: "acme", destinations: ["docs", "pm"] };
+  assert.equal(canView("docs"), true);
+  assert.equal(canView("pm"), true);
+  assert.equal(canView("deploys"), false);
+  assert.equal(hasDestination("apps"), false);
 });

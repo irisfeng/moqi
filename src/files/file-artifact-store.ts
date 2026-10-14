@@ -43,6 +43,7 @@ export interface PutFileInput {
   createdAt?: number;
   maxBytes?: number;
   reuseExistingPath?: boolean;
+  inboundRunId?: string;
 }
 
 type PublishFileInput = Omit<PutFileInput, "data" | "maxBytes"> & {
@@ -60,6 +61,7 @@ export interface ListOwnedOptions {
   limit?: number;
   cursor?: string;
   includeDisabled?: boolean;
+  disabledOnly?: boolean;
   createdInScope?: ScopeId;
   nameQuery?: string;
 }
@@ -146,7 +148,7 @@ export function createMemoryFileArtifactStore(byteStore: DurableByteStore): File
     let all = [...rows.values()]
       .filter(
         (r) =>
-          (owners.has(r.ownerScopeId) && (opts?.includeDisabled || r.enabled)) ||
+          (owners.has(r.ownerScopeId) && (opts?.disabledOnly ? !r.enabled : opts?.includeDisabled || r.enabled)) ||
           (r.enabled && shared.has(JSON.stringify([r.ownerScopeId, r.id]))),
       )
       .filter((r) => opts?.createdInScope == null || r.createdInScope === opts.createdInScope)

@@ -1,0 +1,15 @@
+{
+  "name": "火山方舟（豆包）",
+  "protocol": "openai",
+  "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+  "validate": false,
+  "models": [
+    {
+      "id": "REPLACE_WITH_YOUR_ENDPOINT_ID",
+      "name": "方舟推理接入点（替换 id 为你的 ep-xxxx 或模型名）",
+      "contextWindow": 256000,
+      "maxTokens": 32768,
+      "compat": { "supportsDeveloperRole": false, "supportsStore": false }
+    }
+  ]
+}

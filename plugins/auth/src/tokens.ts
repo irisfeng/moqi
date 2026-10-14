@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { jwtVerify, SignJWT, type JWTPayload } from "jose";
 import { ID_TOKEN_ALG, type SigningKey } from "./keys.ts";
 
-export type TokenPurpose = "request" | "link" | "code" | "access";
+export type TokenPurpose = "request" | "link" | "code" | "access" | "change";
 
 export interface AuthRequest {
   clientId: string;
@@ -14,11 +14,15 @@ export interface AuthRequest {
 }
 
 export interface LinkClaims extends AuthRequest {
+  passwordVersion?: string;
+  remember?: boolean;
   email: string;
 }
 
 export interface CodeClaims {
   authTime?: number;
+  passwordVersion?: string;
+  remember?: boolean;
   clientId: string;
   redirectUri: string;
   nonce: string;
@@ -132,6 +136,35 @@ export class TokenSigner {
     return { claims: { ...request, email }, jti: String(payload.jti), expiresAtMs: Number(payload.exp) * 1000 };
   }
 
+  async sealChange(claims: LinkClaims, ttlS: number, nowMs?: number): Promise<SealedToken> {
+    return this.seal(
+      "change",
+      { ...requestClaims(claims), em: claims.email, pv: claims.passwordVersion, remember: claims.remember === true },
+      ttlS,
+      nowMs,
+    );
+  }
+
+  async openChange(
+    token: string,
+    nowMs?: number,
+  ): Promise<{ claims: LinkClaims; jti: string; expiresAtMs: number } | null> {
+    const payload = await this.open("change", token, nowMs);
+    const request = payload ? readRequest(payload) : null;
+    const email = payload?.em;
+    if (!payload || !request || typeof email !== "string" || !email) return null;
+    return {
+      claims: {
+        ...request,
+        email,
+        remember: payload.remember === true,
+        ...(typeof payload.pv === "string" ? { passwordVersion: payload.pv } : {}),
+      },
+      jti: String(payload.jti),
+      expiresAtMs: Number(payload.exp) * 1000,
+    };
+  }
+
   async sealCode(claims: CodeClaims, ttlS: number, nowMs?: number): Promise<SealedToken> {
     return this.seal(
       "code",
@@ -142,6 +175,8 @@ export class TokenSigner {
         cc: claims.codeChallenge,
         em: claims.email,
         at: claims.authTime,
+        pv: claims.passwordVersion,
+        remember: claims.remember === true,
       },
       ttlS,
       nowMs,
@@ -164,6 +199,8 @@ export class TokenSigner {
         codeChallenge: cc as string,
         email: em as string,
         ...(typeof payload.at === "number" ? { authTime: payload.at } : {}),
+        remember: payload.remember === true,
+        ...(typeof payload.pv === "string" ? { passwordVersion: payload.pv } : {}),
       },
       jti: String(payload.jti),
       expiresAtMs: Number(payload.exp) * 1000,
@@ -216,6 +253,8 @@ export async function mintIdToken(
     ttlS: number;
     nowMs?: number;
     authTime?: number;
+    passwordVersion?: string;
+    remember?: boolean;
   },
 ): Promise<string> {
   const issuedAt = Math.floor((args.nowMs ?? Date.now()) / 1000);
@@ -225,6 +264,8 @@ export async function mintIdToken(
     email: args.email,
     email_verified: true,
     ...(args.authTime !== undefined ? { auth_time: args.authTime } : {}),
+    remember_login: args.remember === true && args.passwordVersion !== undefined,
+    ...(args.passwordVersion !== undefined ? { password_version: args.passwordVersion } : {}),
   })
     .setProtectedHeader({ alg: ID_TOKEN_ALG, kid: key.kid, typ: "JWT" })
     .setIssuer(args.issuer)

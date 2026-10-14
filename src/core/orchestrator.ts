@@ -211,6 +211,8 @@ import {
   renderReachRoster,
   renderStandingObligations,
 } from "./orchestrator/prompt-blocks.ts";
+import { mentionsOtherMember } from "./orchestrator/human-mention.ts";
+import { NoDefaultSandboxError } from "../sandbox/sandbox-routing.ts";
 import { createCompaction } from "./orchestrator/compaction.ts";
 import { startLeaseKeepalive } from "./orchestrator/lease-keepalive.ts";
 import { createSecurityClassifier } from "./orchestrator/security-screen.ts";
@@ -255,6 +257,24 @@ const MIN_SESSION_LEASE_TTL_MS = 15_000;
 const AUTOMATED_TURN_LEASE_WAIT_MS = 1_000;
 
 const SESSION_GONE_REASON = "this conversation is no longer available — start a new one";
+const ATTACHMENTS_NOT_SAVED_REASON = "Attachments have expired or cannot be read. Upload them again and retry.";
+const ATTACHMENTS_BLOCKED_REASON = "An attachment was held back by the security check, so the message was not sent.";
+const ATTACHMENTS_TOO_MANY_REASON = "Too many attachments in one message. Send fewer and retry.";
+const emptyInbound = (): Awaited<ReturnType<typeof materializeInbound>> => ({
+  metas: [],
+  images: [],
+  tooMany: [],
+  unavailable: [],
+  blocked: [],
+  unscreened: [],
+});
+
+function attachmentsRefusal(inbound: Awaited<ReturnType<typeof materializeInbound>>, requested: number): string | null {
+  if (inbound.metas.length === requested && inbound.metas.every((meta) => meta.artifactId)) return null;
+  if (inbound.blocked.length) return ATTACHMENTS_BLOCKED_REASON;
+  if (inbound.tooMany.length) return ATTACHMENTS_TOO_MANY_REASON;
+  return ATTACHMENTS_NOT_SAVED_REASON;
+}
 
 const DEFAULT_APPROVAL_SUMMARY_TIMEOUT_MS = 6_000;
 
@@ -1128,6 +1148,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const surfaceTool = input.surface ?? "slack";
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
+      const humanDirected =
+        isWeb &&
+        conversation.kind === "group" &&
+        input.origin.kind === "human" &&
+        !input.approval &&
+        mentionsOtherMember(input.displayText ?? input.text, conversation.audience, actor.id, botName);
       const orgName = branding.orgName ?? "this organization";
       const rawHandle = cleanBrandingLabel(input.gatewayContext?.botHandle?.replace(/^@/, ""), 40);
       const botHandle = rawHandle && rawHandle.toLowerCase() !== botName.toLowerCase() ? rawHandle : undefined;
@@ -2119,6 +2145,125 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           await deps.harness.turns.resetSession?.(session.id);
           await deps.sessions.append(lease, { type: "system", scopeLabel: scopeId, payload: nextContext });
         }
+        const fileAudience =
+          !external && resolution.orgScopeId
+            ? defaultPublishAudience({
+                kind: conversation.kind,
+                ...(conversation.isPrivate !== undefined ? { isPrivate: conversation.isPrivate } : {}),
+                ...(conversation.isMpim !== undefined ? { isMpim: conversation.isMpim } : {}),
+                ...(conversation.publishMembers ? { members: conversation.publishMembers } : {}),
+                orgScopeId: resolution.orgScopeId,
+                ownerId: actor.id,
+              }).grantees
+            : [];
+        // Files posted into a group/DM conversation (e.g. a project web session) get no
+        // per-member grants from defaultPublishAudience ("auto-share deferred"), which left
+        // other members unable to load them. Grant the conversation scope itself read access
+        // so everyone party to the conversation can fetch what was posted into it.
+        const fileOwnerScopeId = external ? scopeId : toScopeId("personal", actor.id);
+        const fileGrantees = [...fileAudience];
+        if ((conversation.kind === "group" || conversation.kind === "dm") && scopeId !== fileOwnerScopeId) {
+          fileGrantees.push(scopeId);
+        }
+        const fileRegistration: ArtifactRegistration = {
+          ...(deps.durableInboundRuns && input.runId ? { runId: input.runId } : {}),
+          store: deps.files,
+          ownerScopeId: fileOwnerScopeId,
+          createdBy: actor.id,
+          createdInScope: scopeId,
+          seed: input.runId ?? `${session.id}:${Date.now()}`,
+          onRegistered: async ({ id, ownerScopeId, direction }) => {
+            await deps.fileOrigins
+              ?.record({ artifactId: id, sessionId: session.id, runId: input.runId ?? null, recordedAt: Date.now() })
+              .catch(swallowAs("orchestrator: file origin record", undefined));
+            for (const granteeScopeId of fileGrantees) {
+              await deps.acl.grant(
+                {
+                  ownerScopeId,
+                  ref: id,
+                  granteeScopeId,
+                  permission: "read",
+                  grantedBy: actor.id,
+                },
+                undefined,
+                direction === "in" ? fileRegistration.runId : undefined,
+              );
+            }
+          },
+          onError: (e) =>
+            deps.errors?.record(
+              {
+                category: "file_store",
+                code: "register_failed",
+                message: errMessage(e),
+                scopeLabel: scopeId,
+                sessionId: session.id,
+              },
+              e,
+            ),
+        };
+        const inboundTextScreen =
+          securityPolicy.screening !== "off" && (deps.securityScreener || deps.harness.models.screenSecurity)
+            ? ({ content }: { content: string }) =>
+                classifySecurityData(content, actor.id, scopeId, undefined, {
+                  ...screenTrace,
+                  sessionId: session.id,
+                  hook: "tool_response",
+                  request: input.text,
+                  surface: "inbound_file",
+                  origin: input.origin.kind,
+                })
+            : undefined;
+        if (humanDirected) {
+          if (strictReadOnly && input.attachments?.length) {
+            return {
+              status: "refused",
+              sessionId: session.id,
+              reason: "attachments cannot be saved in read-only mode",
+            };
+          }
+          if (input.runId) {
+            const entries = await deps.sessions.getEntries(session.id);
+            if (
+              entries.some(
+                (entry) => entry.type === "user" && (entry.payload as { runId?: string } | null)?.runId === input.runId,
+              )
+            ) {
+              return { status: "silent", sessionId: session.id };
+            }
+          }
+          const requested = input.attachments?.length ?? 0;
+          const saved = requested
+            ? await materializeInbound(
+                deps.sandbox,
+                () => Promise.reject(new NoDefaultSandboxError()),
+                input.attachments ?? [],
+                blobTransfer,
+                { ...fileRegistration, failClosed: true },
+                turnInboxDir,
+                inboundTextScreen,
+              )
+            : emptyInbound();
+          const refusal = attachmentsRefusal(saved, requested);
+          if (refusal) return { status: "refused", sessionId: session.id, reason: refusal };
+          return await withManagedRosterVersion(async () => {
+            const appended = await deps.sessions.append(lease, {
+              type: "user",
+              payload: {
+                text: input.displayText ?? input.text,
+                ...(input.runId ? { runId: input.runId } : {}),
+                ...(actor.displayName?.trim() ? { name: actor.displayName.trim() } : {}),
+                ...(saved.metas.length ? { attachments: saved.metas } : {}),
+                ...(input.quoteSeq !== undefined ? { quoteSeq: input.quoteSeq } : {}),
+                ...(input.quoteText?.trim() ? { quoteText: input.quoteText.trim() } : {}),
+                ...(input.quoteAuthor?.trim() ? { quoteAuthor: input.quoteAuthor.trim() } : {}),
+              },
+              scopeLabel: scopeId,
+            });
+            await deps.sessions.appendTape(lease, tapeEntryMirrorRecord(appended));
+            return { status: "silent" as const, sessionId: session.id };
+          });
+        }
         if (input.approval) {
           const p = await pending.get(input.approval.requestId);
           const decision = input.approval.approved ? "approve" : "deny";
@@ -2605,59 +2750,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         let spineFirstBlock = "";
         let spineFirstBlockOpen = true;
         let spineAckText: string | undefined;
-        const fileAudience =
-          !external && resolution.orgScopeId
-            ? defaultPublishAudience({
-                kind: conversation.kind,
-                ...(conversation.isPrivate !== undefined ? { isPrivate: conversation.isPrivate } : {}),
-                ...(conversation.isMpim !== undefined ? { isMpim: conversation.isMpim } : {}),
-                ...(conversation.publishMembers ? { members: conversation.publishMembers } : {}),
-                orgScopeId: resolution.orgScopeId,
-                ownerId: actor.id,
-              }).grantees
-            : [];
-        // Files posted into a group/DM conversation (e.g. a project web session) get no
-        // per-member grants from defaultPublishAudience ("auto-share deferred"), which left
-        // other members unable to load them. Grant the conversation scope itself read access
-        // so everyone party to the conversation can fetch what was posted into it.
-        const fileOwnerScopeId = external ? scopeId : toScopeId("personal", actor.id);
-        const fileGrantees = [...fileAudience];
-        if ((conversation.kind === "group" || conversation.kind === "dm") && scopeId !== fileOwnerScopeId) {
-          fileGrantees.push(scopeId);
-        }
-        const fileRegistration: ArtifactRegistration = {
-          store: deps.files,
-          ownerScopeId: fileOwnerScopeId,
-          createdBy: actor.id,
-          createdInScope: scopeId,
-          seed: input.runId ?? `${session.id}:${Date.now()}`,
-          ...(fileGrantees.length
-            ? {
-                onRegistered: async ({ ownerScopeId, id }) => {
-                  for (const granteeScopeId of fileGrantees) {
-                    await deps.acl.grant({
-                      ownerScopeId,
-                      ref: id,
-                      granteeScopeId,
-                      permission: "read",
-                      grantedBy: actor.id,
-                    });
-                  }
-                },
-              }
-            : {}),
-          onError: (e) =>
-            deps.errors?.record(
-              {
-                category: "file_store",
-                code: "register_failed",
-                message: errMessage(e),
-                scopeLabel: scopeId,
-                sessionId: session.id,
-              },
-              e,
-            ),
-        };
         const postProvenance = (deliveryKey: string): DeliveryProvenance =>
           turnDeliveryProvenance({
             origin: input.origin,
@@ -2888,6 +2980,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             (await deps.sessions.getContextWindow(session.id)).entries,
           );
         }
+        const webAttachments = isWeb && !strictReadOnly ? (input.attachments?.length ?? 0) : 0;
         const inbound =
           input.attachments?.length && !strictReadOnly
             ? await materializeInbound(
@@ -2895,21 +2988,22 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 provision,
                 input.attachments,
                 blobTransfer,
-                fileRegistration,
+                webAttachments ? { ...fileRegistration, failClosed: true } : fileRegistration,
                 turnInboxDir,
-                securityPolicy.screening !== "off" && (deps.securityScreener || deps.harness.models.screenSecurity)
-                  ? ({ content }) =>
-                      classifySecurityData(content, actor.id, scopeId, undefined, {
-                        ...screenTrace,
-                        sessionId: session.id,
-                        hook: "tool_response",
-                        request: input.text,
-                        surface: "inbound_file",
-                        origin: input.origin.kind,
-                      })
-                  : undefined,
+                inboundTextScreen,
               )
-            : { metas: [], images: [], tooMany: [], unavailable: [], blocked: [], unscreened: [] };
+            : emptyInbound();
+        const webRefusal = webAttachments ? attachmentsRefusal(inbound, webAttachments) : null;
+        if (webRefusal) return { status: "refused", sessionId: session.id, reason: webRefusal };
+        const userPayload = {
+          text: input.text,
+          ...(input.runId ? { runId: input.runId } : {}),
+          ...(inbound.metas.length ? { attachments: inbound.metas } : {}),
+          ...((messageTs ?? entryTs) ? { ts: messageTs ?? entryTs } : {}),
+          ...(actor.displayName?.trim() ? { name: actor.displayName.trim() } : {}),
+          ...(input.displayText?.trim() ? { display: input.displayText } : {}),
+        };
+        if (inbound.metas.length && !input.approval && !automatedTurn && !isRetry) failureUserPayload = userPayload;
         const manifest = inboundManifest(inbound.metas, turnInboxDir, inbound.unstaged);
         const inboundIssues = inboundIssueList({
           tooMany: inbound.tooMany,
@@ -3286,16 +3380,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         let firstChunkAt: number | undefined;
         let lastChunkAt: number | undefined;
         const emittedEntries: SessionEntry[] = [];
+        const replyProvenance = (deliveryKey: string): DeliveryProvenance => {
+          const sourceAssistantEntrySeq = emittedEntries.findLast((entry) => entry.type === "assistant")?.seq;
+          return {
+            ...postProvenance(deliveryKey),
+            ...(sourceAssistantEntrySeq !== undefined ? { sourceAssistantEntrySeq } : {}),
+          };
+        };
         const syntheticPrompt = syntheticInput || partial || approvalReplay || !!releasedToolOutput;
-        failureUserPayload =
-          !syntheticPrompt && input.text.trim()
-            ? {
-                text: input.text,
-                ...((messageTs ?? entryTs) ? { ts: messageTs ?? entryTs } : {}),
-                ...(actor.displayName?.trim() ? { name: actor.displayName.trim() } : {}),
-                ...(input.displayText?.trim() ? { display: input.displayText } : {}),
-              }
-            : undefined;
+        failureUserPayload = !syntheticPrompt && (input.text.trim() || inbound.metas.length) ? userPayload : undefined;
         const requestedTurnWallClockMs =
           typeof input.turnWallClockMs === "number" && input.turnWallClockMs > 0 ? input.turnWallClockMs : undefined;
         const configuredTurnWallClockSec = await deps.config?.getTurnWallClockSecDurable(resolution.orgScopeId);
@@ -3537,6 +3630,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   payload.name = actor.displayName.trim();
                 if (input.displayText?.trim() && payload.text === input.text && typeof payload.display !== "string")
                   payload.display = input.displayText;
+                if (input.quoteSeq !== undefined && typeof payload.quoteSeq !== "number")
+                  payload.quoteSeq = input.quoteSeq;
+                if (input.quoteText?.trim() && typeof payload.quoteText !== "string")
+                  payload.quoteText = input.quoteText.trim();
+                if (input.quoteAuthor?.trim() && typeof payload.quoteAuthor !== "string")
+                  payload.quoteAuthor = input.quoteAuthor.trim();
                 if ((syntheticPrompt || continuation) && payload.steered !== true) payload.hidden = true;
                 return { ...tainted, payload };
               })();
@@ -4090,7 +4189,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 destination: defaultDestination,
                 text: primaryReply,
                 idempotencyKey: directKey,
-                provenance: postProvenance(directKey),
+                provenance: replyProvenance(directKey),
               });
               spine.surfaceOutboundCount += 1;
               if (input.runId) deps.turnStream?.markSurfacePosted(input.runId);
@@ -4160,7 +4259,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     destination: defaultDestination,
                     text: fallback,
                     idempotencyKey: fallbackKey,
-                    provenance: postProvenance(fallbackKey),
+                    provenance: replyProvenance(fallbackKey),
                   });
                   spine.surfaceOutboundCount += 1;
                   if (input.runId) deps.turnStream?.markSurfacePosted(input.runId);
@@ -4520,8 +4619,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               .catch(swallowAs("orchestrator: turn failure mirror", undefined));
           };
           if (failureUserPayload) {
-            await deps.sessions
-              .append(lease, { type: "user", payload: failureUserPayload, scopeLabel: scopeId as ScopeId })
+            const userEntry = { type: "user" as const, payload: failureUserPayload, scopeLabel: scopeId as ScopeId };
+            await withManagedRosterVersion(() => deps.sessions.append(lease, userEntry))
               .then(mirrorFailureEntry)
               .catch(swallowAs("orchestrator: turn failure user back-fill", undefined));
           }
@@ -4530,8 +4629,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             message: turnFailureMessage(err),
             ...(input.runId ? { runId: input.runId } : {}),
           };
-          await deps.sessions
-            .append(lease, { type: "system", payload, scopeLabel: scopeId as ScopeId })
+          await withManagedRosterVersion(() =>
+            deps.sessions.append(lease, { type: "system", payload, scopeLabel: scopeId as ScopeId }),
+          )
             .then(mirrorFailureEntry)
             .catch(swallowAs("orchestrator: terminal turn failure record", undefined));
         }

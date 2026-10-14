@@ -5,9 +5,9 @@ import test from "node:test";
 const source = readFileSync(new URL("../src/crons.ts", import.meta.url), "utf8");
 const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
 
-test("a run's worklog link addresses the chats view, not the page it was rendered on", () => {
-  assert.match(source, /class="cron-run-link" href=\$\{deepLinkPath\(UI_BASE, "chats", run\.sessionId\)\}/);
-  assert.doesNotMatch(source, /location\.pathname\}\?session=/);
+test("a run's full reply renders inline in the detail view", () => {
+  assert.match(source, /<div class="cron-run-body">\$\{markdown\(reply\)\}<\/div>/);
+  assert.match(source, /cronRunCard\(c, run, index === 0\)/);
 });
 
 test("a cron row is a real link to its own path", () => {

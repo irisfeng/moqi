@@ -13,6 +13,7 @@ export default tseslint.config(
       "deploy/layers/",
       "docs/",
       "plugins/web-ui/public/",
+      "plugins/admin/public/adoption.js",
       ".claude/",
       ".context/",
       ".generated/",

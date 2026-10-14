@@ -179,6 +179,7 @@ test("single and multiview headers render mutually exclusive tools and pane cont
     },
     paneScopeId: () => null,
     paneKindEntry: () => null,
+    hasDestination: () => true,
     PANE_TOOLS: ["Crons", "Apps", "Files", "Skills", "Memory", "Your keychain"].map((label) => ({
       label,
       tool: label,

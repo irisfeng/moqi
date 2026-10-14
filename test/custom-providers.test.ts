@@ -10,7 +10,13 @@ import {
 } from "../src/model/custom-providers.ts";
 import { builtInModelCatalog } from "../src/model/model-catalog.ts";
 import { createCustomProviderStore } from "../src/model/custom-provider-store.ts";
-import { modelSupportedByHarness, modelServiceable, resolveModel } from "../src/model/pi-models.ts";
+import {
+  modelSupportedByHarness,
+  modelServiceable,
+  resolveModel,
+  safeModelMetadata,
+  thinkingLevelsForHarness,
+} from "../src/model/pi-models.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import type { StoredCustomProvider } from "../src/model/custom-provider-store.ts";
 
@@ -103,6 +109,97 @@ test("spec validation rejects reserved ids, bad slugs, bad URLs, and empty model
   assert.throws(() => validateCustomProviderSpec({ ...GATEWAY, baseUrl: "https://x?y=1" }), /query/);
   assert.throws(() => validateCustomProviderSpec({ ...GATEWAY, models: [] }), /at least one model/);
   assert.throws(() => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "a" }, { id: "a" }] }), /duplicate/);
+});
+
+test("reasoning, modalities, and compat pass through to the runtime model and models.json", () => {
+  setCustomProviders([
+    {
+      ...GATEWAY,
+      models: [
+        {
+          id: "acme-thinker",
+          input: 1,
+          output: 4,
+          cacheRead: 0.1,
+          cacheWrite: 1.25,
+          reasoning: true,
+          modalities: ["text", "image"],
+          compat: { thinkingFormat: "qwen", supportsUsageInStreaming: true },
+          thinkingLevelMap: { off: null, high: "high", max: "max" },
+        },
+      ],
+    },
+  ]);
+  const model = resolveCustomModel("acme-thinker");
+  assert.ok(model);
+  assert.equal(model.reasoning, true);
+  assert.deepEqual(model.input, ["text", "image"]);
+  assert.deepEqual(model.compat, { thinkingFormat: "qwen", supportsUsageInStreaming: true });
+  assert.deepEqual(model.thinkingLevelMap, { off: null, high: "high", max: "max" });
+  assert.equal(model.cost.input, 1);
+  assert.equal(model.cost.cacheRead, 0.1);
+  assert.equal(model.cost.cacheWrite, 1.25);
+
+  const json = customModelsJson();
+  const provider = json?.providers["acme-gateway"] as { models: Array<Record<string, unknown>> } | undefined;
+  const emitted = provider?.models.find((m) => m.id === "acme-thinker");
+  assert.ok(emitted);
+  assert.equal(emitted.reasoning, true);
+  assert.deepEqual(emitted.input, ["text", "image"]);
+  assert.deepEqual(emitted.compat, { thinkingFormat: "qwen", supportsUsageInStreaming: true });
+  assert.deepEqual(emitted.thinkingLevelMap, { off: null, high: "high", max: "max" });
+  assert.deepEqual(emitted.cost, { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1.25 });
+});
+
+test("models without the new fields resolve to defaults and emit them as pi defaults", () => {
+  setCustomProviders([GATEWAY]);
+  const model = resolveCustomModel("acme-large");
+  assert.ok(model);
+  assert.equal(model.reasoning, false);
+  assert.deepEqual(model.input, ["text"]);
+  assert.equal(model.compat, undefined);
+  assert.equal(model.thinkingLevelMap, undefined);
+  const json = customModelsJson();
+  const provider = json?.providers["acme-gateway"] as { models: Array<Record<string, unknown>> } | undefined;
+  const emitted = provider?.models[0];
+  assert.ok(emitted);
+  assert.equal(emitted.reasoning, false);
+  assert.deepEqual(emitted.input, ["text"]);
+  assert.equal("compat" in emitted, false);
+  assert.equal("thinkingLevelMap" in emitted, false);
+});
+
+test("spec validation rejects malformed reasoning, modalities, and compat", () => {
+  assert.throws(
+    () => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "m", reasoning: "yes" as unknown as boolean }] }),
+    /reasoning/,
+  );
+  assert.throws(() => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "m", modalities: [] }] }), /modalities/);
+  assert.throws(
+    () =>
+      validateCustomProviderSpec({
+        ...GATEWAY,
+        models: [{ id: "m", modalities: ["audio"] as unknown as ("text" | "image")[] }],
+      }),
+    /modalities/,
+  );
+  assert.throws(
+    () => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "m", compat: { "kebab-case": true } }] }),
+    /camelCase/,
+  );
+  assert.throws(
+    () => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "m", compat: { nesting: () => 1 } }] }),
+    /JSON values/,
+  );
+  assert.throws(
+    () =>
+      validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "m", thinkingLevelMap: { ultra: "high" } as never }] }),
+    /thinkingLevelMap level/,
+  );
+  assert.throws(
+    () => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "m", thinkingLevelMap: { high: 3 as never } }] }),
+    /thinkingLevelMap.high/,
+  );
 });
 
 test("store round-trip: upsert encrypts the key, statuses never leak it, delete disables", async () => {
@@ -224,6 +321,59 @@ for (const field of ["contextWindow", "maxTokens"] as const) {
     );
   });
 }
+
+test("the effort menu offers only the levels a custom model tells apart", () => {
+  setCustomProviders([
+    {
+      ...GATEWAY,
+      id: "acme-glm",
+      models: [
+        {
+          id: "acme-glm-flash",
+          reasoning: true,
+          thinkingLevelMap: { minimal: null, low: "low", medium: "high", high: "high", max: "max" },
+        },
+      ],
+    },
+    {
+      ...GATEWAY,
+      id: "acme-deep",
+      models: [
+        {
+          id: "acme-deep-flash",
+          reasoning: true,
+          thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", max: "max" },
+        },
+        { id: "acme-plain" },
+      ],
+    },
+  ]);
+  assert.deepEqual(safeModelMetadata("acme-glm-flash")?.effortLevelsByHarness.pi, ["auto", "low", "high", "max"]);
+  assert.deepEqual(safeModelMetadata("acme-deep-flash")?.effortLevelsByHarness.pi, ["auto", "high", "max"]);
+  assert.deepEqual(safeModelMetadata("acme-plain")?.effortLevelsByHarness.pi, ["auto"]);
+  assert.deepEqual(safeModelMetadata("acme-glm-flash")?.effortEquivalentsByHarness, {
+    pi: { medium: "high", xhigh: "max", ultracode: "max" },
+  });
+  assert.deepEqual(safeModelMetadata("acme-deep-flash")?.effortEquivalentsByHarness, {
+    pi: { low: "high", medium: "high", xhigh: "max", ultracode: "max" },
+  });
+  assert.equal(safeModelMetadata("acme-plain")?.effortEquivalentsByHarness, undefined);
+  assert.ok(
+    thinkingLevelsForHarness("pi", "acme-deep-flash").includes("xhigh"),
+    "a level saved before the menu narrowed is still accepted and clamped by the runtime",
+  );
+});
+
+test("a custom entry claiming a built-in id does not narrow the built-in's effort menu", () => {
+  setCustomProviders([
+    { ...GATEWAY, models: [{ id: "claude-opus-5", reasoning: true, thinkingLevelMap: { low: null } }] },
+  ]);
+  assert.deepEqual(
+    safeModelMetadata("claude-opus-5")?.effortLevelsByHarness.pi,
+    thinkingLevelsForHarness("pi", "claude-opus-5"),
+  );
+  assert.equal(safeModelMetadata("claude-opus-5")?.effortEquivalentsByHarness, undefined);
+});
 
 for (const protocol of ["openai", "openai-responses", "anthropic"] as const) {
   for (const reasoning of [undefined, false, true]) {

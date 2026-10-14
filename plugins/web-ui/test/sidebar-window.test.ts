@@ -104,9 +104,14 @@ test("chat browsing batches rows while search still covers the complete history"
     h.appState.currentView = "chats";
     h.drawChatsPage();
     const main = document.querySelector("#main")!;
+    assert.equal(main.querySelectorAll(".chat-row").length, 20);
+    button(main, "Next").click();
+    assert.equal(main.querySelectorAll(".chat-row").length, 20);
+    assert.match(main.querySelector(".list-pagination-count")?.textContent ?? "", /21–40 · 125 in total/);
+    const size = main.querySelector<HTMLSelectElement>(".list-pagination select")!;
+    size.value = "50";
+    size.dispatchEvent(new window.Event("change", { bubbles: true }));
     assert.equal(main.querySelectorAll(".chat-row").length, 50);
-    button(main, "Show more conversations").click();
-    assert.equal(main.querySelectorAll(".chat-row").length, 100);
     const input = main.querySelector<HTMLInputElement>('input[type="search"]')!;
     input.value = "Older matching";
     input.dispatchEvent(new window.Event("input", { bubbles: true }));

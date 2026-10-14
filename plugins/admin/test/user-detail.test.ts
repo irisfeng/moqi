@@ -28,7 +28,7 @@ test("user controls render before credentials and artifacts are scoped links", a
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(
     [...f.root.querySelectorAll("h2")].map((e) => e.textContent),
-    ["Configuration", "Onboarding"],
+    ["Configuration", "Onboarding", "Contact", "Password"],
   );
   const links = [...f.root.querySelectorAll<HTMLAnchorElement>(".user-resource-links a")];
   assert.deepEqual(
@@ -40,7 +40,7 @@ test("user controls render before credentials and artifacts are scoped links", a
   await pending;
   assert.deepEqual(
     [...f.root.querySelectorAll("h2")].map((e) => e.textContent),
-    ["Credentials (0)", "Grants (0)", "Configuration", "Onboarding"],
+    ["Credentials (0)", "Grants (0)", "Configuration", "Onboarding", "Contact", "Password"],
   );
   f.dom.window.close();
 });

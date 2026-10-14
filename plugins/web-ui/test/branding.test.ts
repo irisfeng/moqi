@@ -59,6 +59,52 @@ test("the vite template carries the self-label anchor the server injects into", 
   assert.match(template, /<meta name="brand-self-label" content="QM"\s*\/?>/);
 });
 
+test("the static favicon asset is the product's geometric mark", async () => {
+  const { BRAND_MARK_SVG } = await import("../../chassis/src/branding.ts");
+  const asset = readFileSync(new URL("../public/favicon.svg", import.meta.url), "utf8")
+    .replace(/>\s+</g, "><")
+    .trim();
+  assert.equal(asset, BRAND_MARK_SVG);
+});
+
+test("the sidebar mark is drawn by the stylesheet, so the organisation's text mark or image shows", () => {
+  const sidebar = readFileSync(new URL("../src/ui.ts", import.meta.url), "utf8");
+  assert.match(sidebar, /<span class="brand-mark" aria-hidden="true"/);
+  assert.equal(sidebar.match(/<span class="brand-mark-half"><\/span/g)?.length, 2, "two halves of one image");
+  assert.doesNotMatch(sidebar, /BRAND_MARK_GEOMETRY/);
+  const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
+  assert.match(css, /\.brand-mark::before \{\s*content: var\(--brand-mark\);/);
+  assert.match(css, /\.brand-mark-half \{[^}]*var\(--brand-mark-image, url\("\.\/assets\/brand-mark\.svg"\)\)/);
+  assert.match(css, /\.brand-mark-half:first-child \{\s*clip-path: inset\(0 42% 0 0\);/);
+  assert.match(
+    css,
+    /\.brand-mark-half:last-child \{\s*clip-path: inset\(0 0 0 58%\);/,
+    "the halves meet without a gap",
+  );
+  assert.match(css, /\.brand-mark::before \{[^}]*z-index: 1;/, "a text mark covers the image halves");
+});
+
+test("opening the sidebar assembles the mark from its two halves, only after a toggle and gently", () => {
+  const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const setOpen =
+    shell.match(/function setSidebarOpen\(open: boolean, moveFocus = true\): void \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(setOpen, /layout\?\.classList\.add\("brand-motion"\);/, "a toggle, not a page load, starts the motion");
+  assert.match(
+    css,
+    /\.layout\.brand-motion:not\(\.sidebar-closed\) \.brand-lockup \.brand-mark-half:first-child \{\s*animation: brand-join-left 320ms/,
+  );
+  assert.match(
+    css,
+    /\.layout\.brand-motion:not\(\.sidebar-closed\) \.brand-lockup \.brand-mark-half:last-child \{\s*animation: brand-join-right 320ms/,
+  );
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.layout\.brand-motion[^{]*\{\s*animation: brand-fade-in 160ms ease-out both;/,
+    "reduced motion fades without moving",
+  );
+});
+
 test("injectBranding rewrites the tab title with the escaped label when a suffix is given", async () => {
   const { injectBranding } = await import("../../chassis/src/branding.ts");
   const shell =

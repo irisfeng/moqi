@@ -9,7 +9,7 @@ import { INVITE_LOGIN_SCRIPT, INVITE_LOGIN_SCRIPT_HASH } from "./invite-login.ts
 import { reportBackendError } from "../../chassis/src/error-reporting.ts";
 import "./instrument.ts";
 import { provisionTrustedAdmin } from "./trusted-admin.ts";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, METHODS, type IncomingMessage, type ServerResponse } from "node:http";
 import { pathToFileURL } from "node:url";
 import { ADMIN_LOGIN_SCRIPT, ADMIN_LOGIN_SCRIPT_HASH, openAdminLogin } from "./admin-login.ts";
@@ -17,11 +17,15 @@ import { LRUCache } from "lru-cache";
 import { createTrustedEntry, trustedEntryConfig } from "./trusted-entry.ts";
 import { answerPreflight, parseAllowedOrigins, prepareCors } from "./cors.ts";
 import {
+  REMEMBER_TTL_S,
+  UNREMEMBERED_TTL_S,
+  open,
   deriveKey,
   seal,
+  sealSession,
   openSession,
   openImpersonation,
-  openTmp,
+  readTmpCookies,
   setCookie,
   sessionCookieHeaders,
   clearCookie,
@@ -113,7 +117,9 @@ function playgroundIntEnv(name: string, fallback: number): number {
 const PLAYGROUND_MINTS_PER_IP = playgroundIntEnv("PORTAL_PLAYGROUND_MINTS_PER_IP", 30);
 const PLAYGROUND_MINT_WINDOW_S = playgroundIntEnv("PORTAL_PLAYGROUND_MINT_WINDOW_S", 3600);
 const NEUTRAL_ACCENT = "#4f46e5";
+const NEUTRAL_LABEL = "Portal";
 let brandAccent = NEUTRAL_ACCENT;
+let brandLabel = NEUTRAL_LABEL;
 let modelProviderConfigured: boolean | undefined;
 let surfaceConfigNextAt = 0;
 let surfaceConfigInflight: Promise<void> | null = null;
@@ -134,8 +140,15 @@ async function fetchSurfaceConfig(): Promise<void> {
       signal: AbortSignal.timeout(2_000),
     });
     if (r.ok) {
-      const body = (await r.json()) as { branding?: { accent?: unknown }; modelProviderConfigured?: unknown };
+      const body = (await r.json()) as {
+        branding?: { accent?: unknown; selfLabel?: unknown };
+        modelProviderConfigured?: unknown;
+      };
       brandAccent = typeof body.branding?.accent === "string" ? body.branding.accent : NEUTRAL_ACCENT;
+      brandLabel =
+        typeof body.branding?.selfLabel === "string" && body.branding.selfLabel.trim()
+          ? body.branding.selfLabel.trim()
+          : NEUTRAL_LABEL;
       modelProviderConfigured =
         typeof body.modelProviderConfigured === "boolean" ? body.modelProviderConfigured : undefined;
       surfaceConfigNextAt = Date.now() + (modelProviderConfigured === false ? 5_000 : 30_000);
@@ -183,6 +196,8 @@ const BROKER_PUBLIC_ROUTES: ReadonlyArray<{ method: string; path: string }> = [
   { method: "POST", path: "/authorize" },
   { method: "GET", path: "/verify" },
   { method: "POST", path: "/verify" },
+  { method: "POST", path: "/change-password" },
+  { method: "GET", path: "/forgot" },
 ];
 
 export function brokerRouteFor(method: string, pathname: string): string | null {
@@ -242,6 +257,8 @@ const trustedEntry = trustedOidc
 const IMPERSONATE_TTL_S = Number(process.env.PORTAL_IMPERSONATE_TTL_S ?? 3600);
 
 const TMP_TTL_S = 600;
+const PENDING_LOGINS_KEPT = 3;
+const REMEMBERED_DEVICE_LIMIT = 20;
 const LOCAL_LOGOUT_COOKIE = "portal_local_logout";
 const CONSUMED_STATES_MAX = 10_000;
 export const consumedStates = new LRUCache<string, number>({ max: CONSUMED_STATES_MAX, ttl: 2 * TMP_TTL_S * 1000 });
@@ -435,6 +452,7 @@ export function isPrivateNetworkUrl(raw: string): boolean {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return false;
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host.includes(".") && !host.includes(":")) return true;
   if (host === "localhost" || host.endsWith(".localhost")) return true;
   if (host.endsWith(".internal") || host.endsWith(".flycast") || host.endsWith(".local")) return true;
   if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) || /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
@@ -469,6 +487,73 @@ function currentSession(req: IncomingMessage): SessionClaims | null {
     openSession(readCookie(req.headers.cookie, "portal_session"), sessionKey, Date.now(), ORG, SESSION_MAX_TTL_S) ??
     localDevSession(req)
   );
+}
+
+const CREDENTIAL_TIMEOUT_MS = 5_000;
+
+async function passwordSessionValid(session: SessionClaims, impersonatedPrincipalId?: string): Promise<boolean> {
+  const path = withSourceAuthNonce("/v1/auth/password/session", CORE_SIGNING_SECRET);
+  const body = JSON.stringify({
+    principalId: session.sub,
+    version: session.passwordVersion ?? "",
+    sid: session.sid,
+    impersonatedPrincipalId,
+  });
+  const response = await fetch(`${CORE}${path}`, {
+    method: "POST",
+    headers: signedHeaders(CORE_SIGNING_SECRET, "POST", path, body),
+    body,
+    signal: AbortSignal.timeout(CREDENTIAL_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error("password session validation unavailable");
+  const result = (await response.json()) as { valid?: unknown };
+  if (typeof result.valid !== "boolean") throw new Error("invalid password session validation response");
+  return result.valid;
+}
+
+async function liveSession(req: IncomingMessage, allowLocal = true): Promise<SessionClaims | null> {
+  const session = openSession(
+    readCookie(req.headers.cookie, "portal_session"),
+    sessionKey,
+    Date.now(),
+    ORG,
+    SESSION_MAX_TTL_S,
+  );
+  if (!session) return allowLocal ? localDevSession(req) : null;
+  if (session.passwordVersion === undefined) return session;
+  return (await passwordSessionValid(session)) ? session : null;
+}
+
+async function impersonationCurrent(signedIn: SessionClaims, admin: string, target: string): Promise<boolean> {
+  return (await adminProbeAttempt(admin)) === true && (await passwordSessionValid(signedIn, target));
+}
+
+async function deviceCall(
+  session: Pick<SessionClaims, "sub" | "passwordVersion" | "sid">,
+  action: Record<string, unknown>,
+): Promise<{ status: number; data: Record<string, unknown> }> {
+  const body = JSON.stringify({
+    ...action,
+    principalId: session.sub,
+    version: session.passwordVersion ?? "",
+    sid: session.sid,
+  });
+  for (let attempt = 0; ; attempt++) {
+    const path = withSourceAuthNonce("/v1/auth/password/devices", CORE_SIGNING_SECRET);
+    try {
+      const response = await fetch(`${CORE}${path}`, {
+        method: "POST",
+        headers: signedHeaders(CORE_SIGNING_SECRET, "POST", path, body),
+        body,
+        signal: AbortSignal.timeout(CREDENTIAL_TIMEOUT_MS),
+      });
+      const data = (await response.json()) as Record<string, unknown>;
+      if (action.action === "remember" && attempt === 0 && response.status >= 500) continue;
+      return { status: response.status, data };
+    } catch (error) {
+      if (action.action !== "remember" || attempt > 0) throw error;
+    }
+  }
 }
 
 const CARD_STYLE = `<style>
@@ -543,7 +628,7 @@ function cardPage(o: {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(o.title)} · Portal</title>
+<title>${escapeHtml(o.title)} · ${escapeHtml(brandLabel)}</title>
 ${CARD_STYLE}
 </head>
 <body>
@@ -579,6 +664,42 @@ export function signInErrorHtml(
     actions: `<a class="btn primary" href="${retryPath}">Try signing in again</a>`,
     help: "Still stuck? Check that your account has access, then contact your admin.",
   });
+}
+
+async function devicePage(session: SessionClaims, res: ServerResponse): Promise<void> {
+  const result = await deviceCall(session, { action: "list" });
+  if (result.status !== 200 || !Array.isArray(result.data.devices))
+    return sendHtml(
+      res,
+      result.status === 403 ? 403 : 503,
+      signInErrorHtml("Sign in again with your email and password to manage remembered devices."),
+    );
+  const rows = result.data.devices
+    .map((raw) => {
+      const device = raw as { id: string; label: string; createdAt: number; expiresAt: number; current: boolean };
+      const label = escapeHtml(device.label || "Browser");
+      const signedInAt = escapeHtml(new Date(device.createdAt).toLocaleString("en"));
+      const expiresAt = escapeHtml(new Date(device.expiresAt).toLocaleString("en"));
+      return `<li style="padding:16px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere;display:grid;gap:10px">
+        <strong>${device.current ? "This device · " : ""}${label}</strong>
+        <span>Signed in ${signedInAt}<br>Expires ${expiresAt}</span>
+        <form method="post" action="/auth/devices"><input type="hidden" name="deviceId" value="${escapeHtml(device.id)}">
+          <button class="btn ghost" type="submit">${device.current ? "Sign out this device" : "Sign out that device"}</button>
+        </form></li>`;
+    })
+    .join("");
+  return sendHtml(
+    res,
+    200,
+    cardPage({
+      title: "Signed-in devices",
+      heading: "Remembered devices",
+      msg: "These devices stay signed in for up to 30 days. Changing or resetting your password signs all of them out.",
+      icon: LOCK_ICON,
+      actions: `<ul style="margin:0;padding:0;list-style:none;text-align:left">${rows || "<li>No remembered devices.</li>"}</ul><a class="btn primary" href="/">Back to the workspace</a>`,
+      help: "Browser sessions signed in without the remember choice are not listed. Sign out after using a shared device.",
+    }),
+  );
 }
 
 export function nonAdminDeniedHtml(o: { sub: string; org: string }): string {
@@ -639,7 +760,7 @@ const connectStyle = (): string => `<style>
 
 function connectPage(o: { title: string; body: string; action?: string }): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(o.title)} · Portal</title>${connectStyle()}</head>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(o.title)} · ${escapeHtml(brandLabel)}</title>${connectStyle()}</head>
 <body><div class="card"><h1>${escapeHtml(o.title)}</h1><p>${escapeHtml(o.body)}</p>${o.action ?? ""}</div></body></html>`;
 }
 
@@ -856,14 +977,42 @@ function loginProviderCookie(sub: string): string[] {
 
 const FRAME_SESSION_COOKIE = "portal_session_x";
 
-function sessionCookieSet(value: string, sub: string): string[] {
+function sessionCeiling(session: SessionClaims): number {
+  const maxAge =
+    session.passwordVersion === undefined ? SESSION_MAX_TTL_S : Math.min(SESSION_MAX_TTL_S, UNREMEMBERED_TTL_S);
+  return (session.auth ?? session.iat) + maxAge;
+}
+
+function sessionLifetime(session: SessionClaims): { maxAge?: number; expires?: Date } {
+  if (session.remember)
+    return { maxAge: Math.max(0, session.exp - Math.floor(Date.now() / 1000)), expires: new Date(session.exp * 1000) };
+  return session.passwordVersion === undefined ? { maxAge: SESSION_TTL_S } : {};
+}
+
+function sessionCookieSet(session: SessionClaims): string[] {
   const attrs = {
     path: "/",
-    maxAge: SESSION_TTL_S,
+    ...sessionLifetime(session),
     secure: SECURE_COOKIES,
     ...(COOKIE_DOMAIN ? { domain: COOKIE_DOMAIN } : {}),
   };
-  return [...sessionCookieHeaders(value, attrs), ...loginProviderCookie(sub)];
+  return [...sessionCookieHeaders(sealSession(session, sessionKey), attrs), ...loginProviderCookie(session.sub)];
+}
+
+function signedOutCookies(req: IncomingMessage): string[] {
+  return [
+    ...new Set([
+      clearCookie("portal_impersonate", "/", SECURE_COOKIES),
+      clearCookie("portal_trusted_tmp", "/auth/trusted", SECURE_COOKIES),
+      clearCookie("portal_session", "/", SECURE_COOKIES, COOKIE_DOMAIN),
+      clearCookie(FRAME_SESSION_COOKIE, "/", SECURE_COOKIES, COOKIE_DOMAIN),
+      ...(COOKIE_DOMAIN
+        ? [clearCookie("portal_session", "/", SECURE_COOKIES), clearCookie(FRAME_SESSION_COOKIE, "/", SECURE_COOKIES)]
+        : []),
+      clearCookie("portal_oidc_tmp", "/auth", SECURE_COOKIES),
+      ...clearLoginCookies(req),
+    ]),
+  ];
 }
 
 function setSession(res: ServerResponse, headers: string[]): void {
@@ -935,7 +1084,7 @@ async function mintPlaygroundSession(req: IncomingMessage, res: ServerResponse):
     iat: now,
     exp: now + SESSION_TTL_S,
   };
-  setSession(res, sessionCookieSet(seal(session, sessionKey), session.sub));
+  setSession(res, sessionCookieSet(session));
   return session;
 }
 
@@ -948,17 +1097,16 @@ function renewSessionCookie(req: IncomingMessage, res: ServerResponse): SessionC
     SESSION_MAX_TTL_S,
   );
   if (!session) return null;
-  if (session.appOnly) return session;
+  if (session.appOnly || session.remember) return session;
   const now = Math.floor(Date.now() / 1000);
   if (now - session.iat < SESSION_RENEW_AFTER_S) return session;
-  const authenticatedAt = session.auth ?? session.iat;
   const renewed: SessionClaims = {
     ...session,
-    auth: authenticatedAt,
+    auth: session.auth ?? session.iat,
     iat: now,
-    exp: Math.min(now + SESSION_TTL_S, authenticatedAt + SESSION_MAX_TTL_S),
+    exp: Math.min(now + SESSION_TTL_S, sessionCeiling(session)),
   };
-  setSession(res, sessionCookieSet(seal(renewed, sessionKey), renewed.sub));
+  setSession(res, sessionCookieSet(renewed));
   return renewed;
 }
 
@@ -1087,19 +1235,29 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const redirectTo = !AUTH_BROKER_UPSTREAM && signedOutSession && !signedOutSession.anon ? "/auth/signed-out" : "/";
     setSession(res, [
       ...(signedOutSession ? loginProviderCookie(signedOutSession.sub) : []),
-      clearCookie("portal_impersonate", "/", SECURE_COOKIES),
-      clearCookie("portal_trusted_tmp", "/auth/trusted", SECURE_COOKIES),
-      clearCookie("portal_session", "/", SECURE_COOKIES, COOKIE_DOMAIN),
-      clearCookie(FRAME_SESSION_COOKIE, "/", SECURE_COOKIES, COOKIE_DOMAIN),
-      ...(COOKIE_DOMAIN
-        ? [clearCookie("portal_session", "/", SECURE_COOKIES), clearCookie(FRAME_SESSION_COOKIE, "/", SECURE_COOKIES)]
-        : []),
-      clearCookie("portal_oidc_tmp", "/auth", SECURE_COOKIES),
+      ...signedOutCookies(req),
       ...(AUTH_BROKER_UPSTREAM ? [clearCookie("qm_idp_session", AUTH_BROKER_PREFIX, true)] : []),
       ...(LOCAL_AUTH_BYPASS && isLoopbackAddress(req.socket.remoteAddress)
         ? [setCookie(LOCAL_LOGOUT_COOKIE, "1", { path: "/", maxAge: SESSION_TTL_S, secure: SECURE_COOKIES })]
         : []),
     ]);
+    const remembered = open(readCookie(req.headers.cookie, "portal_session"), sessionKey);
+    if (
+      remembered?.k === "session" &&
+      remembered.org === ORG &&
+      typeof remembered.sub === "string" &&
+      typeof remembered.sid === "string"
+    ) {
+      const unconfirmed =
+        "This browser is signed out, but the server has not confirmed it yet. Sign in again and sign this device out under signed-in devices.";
+      try {
+        const result = await deviceCall({ sub: remembered.sub, sid: remembered.sid }, { action: "logout" });
+        if (result.status !== 200) throw new Error("revoke unavailable");
+      } catch {
+        if (wantsHtml(req)) return sendHtml(res, 503, signInErrorHtml(unconfirmed));
+        return json(res, 503, { error: "revoke_unavailable", message: unconfirmed });
+      }
+    }
     if (wantsHtml(req)) {
       res.writeHead(303, { location: redirectTo, "cache-control": "no-store" });
       return void res.end();
@@ -1110,6 +1268,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (brokerPath) {
     if (method !== "GET" && !sameOriginRequest(req))
       return json(res, 403, { error: "forbidden", message: "cross-origin request refused" });
+    if (brokerPath === "/authorize") {
+      const pending = loginTransaction(req, url.searchParams.get("state") ?? "");
+      const status = method === "POST" ? 303 : 302;
+      if (await hasAuthenticatedSession(req))
+        return loginRedirect(res, loginReturnTo(pending?.claims?.returnTo), status);
+      if (!pending) return loginRedirect(res, "/auth/login", status);
+    }
     return proxyToUpstream(
       req,
       res,
@@ -1126,7 +1291,45 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     );
   }
 
-  let session = renewSessionCookie(req, res) ?? currentSession(req);
+  let session = await liveSession(req);
+  const signedIn = session;
+  if (pathname === "/auth/session-check" && method === "GET") {
+    res.setHeader("cache-control", "no-store");
+    const imp =
+      session?.passwordVersion === undefined
+        ? null
+        : openImpersonation(readCookie(req.headers.cookie, "portal_impersonate"), impersonateKey, Date.now());
+    const live =
+      session &&
+      !session.anon &&
+      (!imp ||
+        imp.actor !== session.sub ||
+        imp.org !== session.org ||
+        (await impersonationCurrent(session, session.sub, imp.target)));
+    res.writeHead(live ? 204 : 401);
+    return void res.end();
+  }
+  if (pathname === "/auth/devices" && (method === "GET" || method === "POST")) {
+    res.setHeader("cache-control", "no-store");
+    if (!session || session.anon) return loginRedirect(res, "/auth/login?returnTo=%2Fauth%2Fdevices");
+    if (method === "GET") return devicePage(session, res);
+    if (!sameOriginRequest(req)) return json(res, 403, { error: "forbidden" });
+    let deviceId: string;
+    try {
+      deviceId = new URLSearchParams(await readBody(req, 1024)).get("deviceId") ?? "";
+    } catch {
+      return json(res, 400, { error: "bad_request" });
+    }
+    const result = await deviceCall(session, { action: "revoke", deviceId });
+    if (result.status !== 200)
+      return sendHtml(res, result.status, signInErrorHtml("That device is still signed in. Refresh and try again."));
+    if (result.data.revokedCurrent === true) {
+      setSession(res, signedOutCookies(req));
+      return loginRedirect(res, "/", 303);
+    }
+    return loginRedirect(res, "/auth/devices", 303);
+  }
+  if (session) session = renewSessionCookie(req, res) ?? session;
   const authenticatedPrincipal = session?.sub;
   if (session && !session.anon && (!pathname.startsWith("/auth/") || pathname.startsWith("/auth/impersonate"))) {
     const canonical = await canonicalPrincipal(session.sub);
@@ -1373,9 +1576,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   let impersonator: string | undefined;
   if (key === "web-ui" && !crossOrigin) {
     const imp = openImpersonation(readCookie(req.headers.cookie, "portal_impersonate"), impersonateKey, Date.now());
-    if (imp && imp.actor === session.sub && imp.org === session.org && (await isAdmin(session.sub))) {
-      principal = imp.target;
-      impersonator = session.sub;
+    if (imp && imp.actor === session.sub && imp.org === session.org) {
+      const managed = signedIn?.passwordVersion !== undefined;
+      if (managed && !(await impersonationCurrent(signedIn, session.sub, imp.target)))
+        return json(res, 401, { error: "unauthenticated", message: "impersonation session is no longer valid" });
+      if (managed || (await isAdmin(session.sub))) {
+        principal = imp.target;
+        impersonator = session.sub;
+      }
     }
   }
 
@@ -1433,10 +1641,7 @@ async function desktopLogin(req: IncomingMessage, res: ServerResponse, url: URL)
       if (error instanceof ClaimStoreUnavailableError) return json(res, 503, { error: "temporarily_unavailable" });
       throw error;
     }
-    setSession(res, [
-      ...sessionCookieSet(seal(claims.session, sessionKey), claims.session.sub),
-      clearCookie("portal_impersonate", "/", SECURE_COOKIES),
-    ]);
+    setSession(res, [...sessionCookieSet(claims.session), clearCookie("portal_impersonate", "/", SECURE_COOKIES)]);
     return json(res, 200, { ok: true });
   }
   if (req.method !== "GET" && req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
@@ -1445,7 +1650,8 @@ async function desktopLogin(req: IncomingMessage, res: ServerResponse, url: URL)
   if (!desktopChallenge(challenge) || !desktopChallenge(state))
     return json(res, 400, { error: "invalid_desktop_request" });
   if (req.method === "POST" && !sameOriginRequest(req)) return json(res, 403, { error: "forbidden" });
-  const session = renewSessionCookie(req, res) ?? currentSession(req);
+  const live = await liveSession(req);
+  const session = live && (renewSessionCookie(req, res) ?? live);
   if (!session || session.anon) {
     res.writeHead(303, {
       location: `/auth/login?returnTo=${encodeURIComponent(`${url.pathname}${url.search}`)}`,
@@ -1453,6 +1659,11 @@ async function desktopLogin(req: IncomingMessage, res: ServerResponse, url: URL)
     });
     return void res.end();
   }
+  if (session.passwordVersion !== undefined)
+    return json(res, 403, {
+      error: "desktop_login_unavailable",
+      message: "desktop sign-in is not available for password accounts",
+    });
   if (req.method === "GET") {
     return sendHtml(
       res,
@@ -1600,10 +1811,10 @@ async function trustedAuth(req: IncomingMessage, res: ServerResponse, url: URL):
   const cookieName = "portal_trusted_tmp";
   const path = "/auth/trusted";
   if (url.pathname === `${path}/login`) {
-    const returnTo =
-      url.searchParams.get("returnTo") ??
-      openTmp(readCookie(req.headers.cookie, "portal_oidc_tmp"), tmpKey, Date.now())?.returnTo ??
-      null;
+    const newestPending = readTmpCookies(req.headers.cookie, tmpKey, Date.now())
+      .flatMap((item) => (item.claims ? [item.claims] : []))
+      .sort((a, b) => b.iat - a.iat)[0];
+    const returnTo = url.searchParams.get("returnTo") ?? newestPending?.returnTo ?? null;
     const existing = currentSession(req);
     const trustedPrefix = `oidc:${createHash("sha256").update(trustedOidc!.issuer).digest("hex")}:`;
     if (existing && !existing.anon && !existing.appOnly && existing.sub.startsWith(trustedPrefix)) {
@@ -1650,9 +1861,9 @@ async function trustedAuth(req: IncomingMessage, res: ServerResponse, url: URL):
   }
 }
 
-function setAuthenticatedSession(res: ServerResponse, sub: string, name = "", appOnly = false): void {
+function newSession(sub: string, name = "", appOnly = false): SessionClaims {
   const now = Math.floor(Date.now() / 1000);
-  const session: SessionClaims = {
+  return {
     k: "session",
     sub,
     org: ORG,
@@ -1662,15 +1873,79 @@ function setAuthenticatedSession(res: ServerResponse, sub: string, name = "", ap
     ...(name ? { name } : {}),
     ...(appOnly ? { appOnly: true } : {}),
   };
+}
+
+function setSignedIn(res: ServerResponse, session: SessionClaims, finishedLogin: string[] = []): void {
   setSession(res, [
-    ...sessionCookieSet(seal(session, sessionKey), session.sub),
+    ...sessionCookieSet(session),
     clearCookie("portal_trusted_tmp", "/auth/trusted", SECURE_COOKIES),
-    clearCookie("portal_oidc_tmp", "/auth", SECURE_COOKIES),
+    ...(finishedLogin.length ? finishedLogin : [clearCookie("portal_oidc_tmp", "/auth", SECURE_COOKIES)]),
     clearCookie("portal_impersonate", "/", SECURE_COOKIES),
   ]);
 }
 
-function authLogin(req: IncomingMessage, res: ServerResponse, url: URL): void {
+function setAuthenticatedSession(res: ServerResponse, sub: string, name = "", appOnly = false): void {
+  setSignedIn(res, newSession(sub, name, appOnly));
+}
+
+async function hasAuthenticatedSession(req: IncomingMessage): Promise<boolean> {
+  const session = await liveSession(req, false);
+  return Boolean(session && !session.anon && !session.appOnly);
+}
+
+function loginReturnTo(value: string | null | undefined): string {
+  const target = sanitizeReturnTo(value, PUBLIC_URL, APPS_DOMAIN);
+  const url = new URL(target, PUBLIC_URL);
+  if (
+    url.origin === new URL(PUBLIC_URL).origin &&
+    (url.pathname === "/auth" ||
+      url.pathname.startsWith("/auth/") ||
+      (AUTH_BROKER_PREFIX &&
+        (url.pathname === AUTH_BROKER_PREFIX || url.pathname.startsWith(`${AUTH_BROKER_PREFIX}/`))))
+  )
+    return "/";
+  return target;
+}
+
+function loginRedirect(res: ServerResponse, location: string, status: 302 | 303 = 302): void {
+  res.writeHead(status, { location, "cache-control": "no-store" });
+  res.end();
+}
+
+function loginTransaction(req: IncomingMessage, state: string): { name: string; claims: TmpClaims | null } | undefined {
+  return readTmpCookies(req.headers.cookie, tmpKey, Date.now()).find(
+    (item) => item.claims && safeEqual(item.claims.state, state),
+  );
+}
+
+function clearLoginCookies(req: IncomingMessage, state?: string): string[] {
+  return readTmpCookies(req.headers.cookie, tmpKey, Date.now())
+    .filter((item) => state === undefined || item.claims?.state === state || item.name === `portal_oidc_tmp_${state}`)
+    .map((item) => clearCookie(item.name, item.name === "portal_oidc_tmp" ? "/auth" : "/", SECURE_COOKIES));
+}
+
+const DEVICE_BROWSERS: ReadonlyArray<[RegExp, string]> = [
+  [/Edg(?:e|A|iOS)?\//, "Edge"],
+  [/(?:Chrome|CriOS)\//, "Chrome"],
+  [/(?:Firefox|FxiOS)\//, "Firefox"],
+  [/Safari\//, "Safari"],
+];
+const DEVICE_PLATFORMS: ReadonlyArray<[RegExp, string]> = [
+  [/Android/, "Android"],
+  [/iPhone|iPad|iPod/, "iOS"],
+  [/Windows/, "Windows"],
+  [/Macintosh|Mac OS X/, "macOS"],
+  [/Linux/, "Linux"],
+];
+
+function deviceLabel(userAgent: string): string {
+  const named = (table: ReadonlyArray<[RegExp, string]>, fallback: string): string =>
+    table.find(([pattern]) => pattern.test(userAgent))?.[1] ?? fallback;
+  return `${named(DEVICE_BROWSERS, "Browser")} · ${named(DEVICE_PLATFORMS, "Device")}`;
+}
+
+async function authLogin(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  if (await hasAuthenticatedSession(req)) return loginRedirect(res, loginReturnTo(url.searchParams.get("returnTo")));
   if (
     trustedOidc &&
     trustedSignInLabel &&
@@ -1685,12 +1960,12 @@ function authLogin(req: IncomingMessage, res: ServerResponse, url: URL): void {
     });
     return void res.end();
   }
-  const returnTo = sanitizeReturnTo(url.searchParams.get("returnTo"), PUBLIC_URL, APPS_DOMAIN);
+  const returnTo = loginReturnTo(url.searchParams.get("returnTo"));
   const localSession = localDevSession(req, Date.now(), true);
   if (localSession) {
     setSession(res, [
-      ...sessionCookieSet(seal(localSession, sessionKey), localSession.sub),
-      clearCookie("portal_oidc_tmp", "/auth", SECURE_COOKIES),
+      ...sessionCookieSet(localSession),
+      ...clearLoginCookies(req),
       ...(AUTH_BROKER_UPSTREAM ? [clearCookie("qm_idp_session", AUTH_BROKER_PREFIX, true)] : []),
       clearCookie(LOCAL_LOGOUT_COOKIE, "/", SECURE_COOKIES),
     ]);
@@ -1702,33 +1977,58 @@ function authLogin(req: IncomingMessage, res: ServerResponse, url: URL): void {
   const { verifier, challenge } = pkcePair();
   const now = Math.floor(Date.now() / 1000);
   const tmp: TmpClaims = { k: "tmp", state, nonce, pkceVerifier: verifier, returnTo, iat: now, exp: now + TMP_TTL_S };
+  const previous = readTmpCookies(req.headers.cookie, tmpKey, Date.now());
+  const kept = new Set(
+    previous
+      .flatMap((item) => (item.claims ? [{ name: item.name, iat: item.claims.iat }] : []))
+      .reverse()
+      .sort((a, b) => b.iat - a.iat)
+      .slice(0, PENDING_LOGINS_KEPT)
+      .map((item) => item.name),
+  );
   setSession(res, [
-    setCookie("portal_oidc_tmp", seal(tmp, tmpKey), { path: "/auth", maxAge: TMP_TTL_S, secure: SECURE_COOKIES }),
+    ...previous
+      .filter((item) => !kept.has(item.name))
+      .map((item) => clearCookie(item.name, item.name === "portal_oidc_tmp" ? "/auth" : "/", SECURE_COOKIES)),
+    setCookie(`portal_oidc_tmp_${state}`, seal(tmp, tmpKey), { path: "/", maxAge: TMP_TTL_S, secure: SECURE_COOKIES }),
   ]);
   res.writeHead(302, { location: buildAuthorizeUrl(OIDC, { state, nonce, challenge }), "cache-control": "no-store" });
   res.end();
 }
 
 async function authCallback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const stateParam = url.searchParams.get("state") ?? "";
+  const pending = loginTransaction(req, stateParam);
+  if (await hasAuthenticatedSession(req)) {
+    setSession(res, clearLoginCookies(req, stateParam));
+    return loginRedirect(res, loginReturnTo(pending?.claims?.returnTo));
+  }
   const fail = (detail: string): void => {
-    setSession(res, [clearCookie("portal_oidc_tmp", "/auth", SECURE_COOKIES)]);
+    setSession(res, clearLoginCookies(req, stateParam));
     sendHtml(res, 400, signInErrorHtml(detail));
   };
 
-  if (url.searchParams.get("error")) return fail(`identity provider returned: ${url.searchParams.get("error") ?? ""}`);
   const code = url.searchParams.get("code") ?? "";
-  const stateParam = url.searchParams.get("state") ?? "";
-
-  const tmp = openTmp(readCookie(req.headers.cookie, "portal_oidc_tmp"), tmpKey, Date.now());
-  if (!tmp) return fail("login session expired, please try again");
+  const tmp = pending?.claims;
+  if (!tmp) {
+    setSession(res, clearLoginCookies(req, stateParam));
+    return loginRedirect(res, "/auth/login");
+  }
+  if (url.searchParams.get("error")) return fail(`identity provider returned: ${url.searchParams.get("error") ?? ""}`);
   if (!code || !stateParam || !safeEqual(stateParam, tmp.state)) return fail("invalid login state");
   if (!consumeState(tmp.state)) return fail("login already used, please try again");
 
   let principal: { sub: string; appOnly?: true };
   let name = "";
+  let passwordVersion: string | undefined;
+  let remember = false;
   try {
     const { accessToken, idToken } = await exchangeCode(OIDC, { code, codeVerifier: tmp.pkceVerifier });
     const claims = await verifyIdToken(OIDC, idToken, tmp.nonce);
+    if (AUTH_BROKER_UPSTREAM && typeof claims.password_version === "string") {
+      passwordVersion = claims.password_version;
+      remember = claims.remember_login === true;
+    }
     if (OIDC.expectedTeamId) {
       const team = claims["https://slack.com/team_id"];
       if (team !== OIDC.expectedTeamId) throw new Error("workspace not permitted");
@@ -1746,12 +2046,39 @@ async function authCallback(req: IncomingMessage, res: ServerResponse, url: URL)
     return fail(errMessage(e, "sign-in failed"));
   }
 
-  setAuthenticatedSession(res, principal.sub, name, principal.appOnly);
-  res.writeHead(302, {
-    location: sanitizeReturnTo(tmp.returnTo, PUBLIC_URL, APPS_DOMAIN),
-    "cache-control": "no-store",
-  });
-  res.end();
+  const session = newSession(principal.sub, name, principal.appOnly);
+  if (passwordVersion !== undefined) {
+    session.passwordVersion = passwordVersion;
+    session.exp = Math.min(session.exp, sessionCeiling(session));
+    try {
+      if (remember) {
+        const sid = randomToken(32);
+        const expiresAt = (session.iat + REMEMBER_TTL_S) * 1000;
+        const registered = await deviceCall(session, {
+          action: "remember",
+          newSid: sid,
+          deviceId: randomUUID(),
+          label: deviceLabel(req.headers["user-agent"] ?? ""),
+          createdAt: session.iat * 1000,
+          expiresAt,
+        });
+        if (registered.status === 409)
+          return fail(
+            `${REMEMBERED_DEVICE_LIMIT} devices are already remembered. Sign in without the remember choice, then sign out old devices under signed-in devices.`,
+          );
+        if (registered.status !== 200) return fail("Your sign-in could not be saved. Sign in again.");
+        session.remember = true;
+        session.sid = sid;
+        session.exp = expiresAt / 1000;
+      } else if (!(await passwordSessionValid(session))) {
+        return fail("This sign-in is no longer valid. Sign in again.");
+      }
+    } catch {
+      return fail("Sign-in is temporarily unavailable. Try again in a minute.");
+    }
+  }
+  setSignedIn(res, session, clearLoginCookies(req, stateParam));
+  loginRedirect(res, loginReturnTo(tmp.returnTo));
 }
 
 export function bootChecks(): void {
@@ -1871,8 +2198,10 @@ export function bootChecks(): void {
     if (SESSION_SECRET && CORE_SIGNING_SECRET && SESSION_SECRET === CORE_SIGNING_SECRET) {
       problems.push("PORTAL_SESSION_SECRET must differ from CORE_SIGNING_SECRET");
     }
-    if (!PUBLIC_URL.startsWith("https://")) problems.push("PORTAL_PUBLIC_URL must be https in production");
-    if (!OIDC.authEndpoint.startsWith("https://")) {
+    const allowInsecureHttp = ["1", "true"].includes(process.env.PORTAL_ALLOW_INSECURE_HTTP ?? "");
+    if (!PUBLIC_URL.startsWith("https://") && !allowInsecureHttp)
+      problems.push("PORTAL_PUBLIC_URL must be https in production");
+    if (!OIDC.authEndpoint.startsWith("https://") && !allowInsecureHttp) {
       problems.push(`OIDC_AUTH_ENDPOINT must be https, since the browser is sent there: ${OIDC.authEndpoint}`);
     }
     const brokerOrigin =

@@ -26,16 +26,28 @@ export function open(token: string | null | undefined, key: Buffer): Record<stri
   }
 }
 
+export const REMEMBER_TTL_S = 30 * 24 * 60 * 60;
+export const UNREMEMBERED_TTL_S = 24 * 60 * 60;
+
 export interface SessionClaims {
   k: "session";
   sub: string;
   org: string;
   name?: string;
   auth?: number;
+  passwordVersion?: string;
+  remember?: boolean;
+  sid?: string;
   anon?: boolean;
   appOnly?: boolean;
   iat: number;
   exp: number;
+}
+
+export function sealSession(session: SessionClaims, key: Buffer): string {
+  if (!session.remember) return seal(session, key);
+  const { iat, auth, ...claims } = session;
+  return seal({ ...claims, v: 2, issuedAt: iat, authenticatedAt: auth }, key);
 }
 
 export interface ImpersonationClaims {
@@ -64,8 +76,19 @@ export function openSession(
   expectedOrg?: string,
   maxAgeSeconds?: number,
 ): SessionClaims | null {
-  const p = open(token, key);
+  let p = open(token, key);
   if (!p || p.k !== "session") return null;
+  if (p.v === 2) {
+    if (
+      p.remember !== true ||
+      p.iat !== undefined ||
+      p.auth !== undefined ||
+      typeof p.issuedAt !== "number" ||
+      typeof p.authenticatedAt !== "number"
+    )
+      return null;
+    p = { ...p, iat: p.issuedAt, auth: p.authenticatedAt };
+  } else if (p.sid !== undefined || p.remember === true) return null;
   if (
     typeof p.sub !== "string" ||
     !p.sub ||
@@ -79,7 +102,30 @@ export function openSession(
   if (expectedOrg !== undefined && p.org !== expectedOrg) return null;
   if (now >= p.exp * 1000) return null;
   const authenticatedAt = typeof p.auth === "number" ? p.auth : p.iat;
-  if (maxAgeSeconds !== undefined && now >= (authenticatedAt + maxAgeSeconds) * 1000) return null;
+  if (
+    !Number.isFinite(p.iat) ||
+    !Number.isFinite(p.exp) ||
+    !Number.isFinite(authenticatedAt) ||
+    authenticatedAt > p.iat ||
+    p.iat * 1000 > now + 5_000
+  )
+    return null;
+  const remembered = p.remember === true;
+  if (
+    (p.sid !== undefined || remembered) &&
+    (!remembered ||
+      typeof p.sid !== "string" ||
+      !/^[a-f0-9]{64}$/.test(p.sid) ||
+      typeof p.passwordVersion !== "string" ||
+      typeof p.auth !== "number" ||
+      p.anon)
+  )
+    return null;
+  let maxAge = maxAgeSeconds;
+  if (remembered) maxAge = REMEMBER_TTL_S;
+  else if (p.passwordVersion !== undefined) maxAge = Math.min(maxAgeSeconds ?? UNREMEMBERED_TTL_S, UNREMEMBERED_TTL_S);
+  if (maxAge !== undefined && (now >= (authenticatedAt + maxAge) * 1000 || p.exp > authenticatedAt + maxAge))
+    return null;
   return p as unknown as SessionClaims;
 }
 
@@ -107,9 +153,30 @@ export function openTmp(token: string | null, key: Buffer, now: number): TmpClai
   return p as unknown as TmpClaims;
 }
 
+export function readTmpCookies(
+  header: string | undefined,
+  key: Buffer,
+  now: number,
+): Array<{ name: string; claims: TmpClaims | null }> {
+  const names = new Set(
+    (header ?? "")
+      .split(";")
+      .map((part) => part.trim().split("=")[0] ?? "")
+      .filter((name) => /^portal_oidc_tmp(?:_[a-f0-9]{64})?$/.test(name)),
+  );
+  return [...names].map((name) => {
+    const claims = openTmp(readCookie(header, name), key, now);
+    return {
+      name,
+      claims: claims && (name === "portal_oidc_tmp" || name === `portal_oidc_tmp_${claims.state}`) ? claims : null,
+    };
+  });
+}
+
 export interface CookieOpts {
   path?: string;
   maxAge?: number;
+  expires?: Date;
   secure: boolean;
   domain?: string;
   sameSite?: "Lax" | "None";
@@ -126,6 +193,7 @@ export function setCookie(name: string, value: string, opts: CookieOpts): string
   if (opts.domain) parts.push(`Domain=${opts.domain}`);
   if (opts.secure) parts.push("Secure");
   if (opts.maxAge !== undefined) parts.push(`Max-Age=${opts.maxAge}`);
+  if (opts.expires) parts.push(`Expires=${opts.expires.toUTCString()}`);
   return parts.join("; ");
 }
 

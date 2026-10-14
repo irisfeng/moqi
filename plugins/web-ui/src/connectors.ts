@@ -1,7 +1,7 @@
 import { html, render, type TemplateResult } from "lit";
 import { KeyRound, Link } from "lucide";
 import { api } from "./core-bridge";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error";
 import { icon } from "./ui";
 import { connectorLogo } from "./connector-logo";
 import { appState, replacePanePreservingFocus } from "./shell";

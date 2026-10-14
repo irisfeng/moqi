@@ -61,6 +61,7 @@ function fixture() {
 async function runLoadOnboarding(
   modelProviders: unknown,
   scopeConfig: unknown = { baseModel: "claude-opus-5" },
+  customProviders: unknown = { providers: [] },
 ): Promise<Record<string, any>> {
   const { dom, controller } = fixture();
   const fixtures: Record<string, unknown> = {
@@ -68,6 +69,7 @@ async function runLoadOnboarding(
     "/api/slack-installation": { configured: false },
     "/api/connector-catalog": { catalog: [] },
     "/api/scopes/org%3Adefault-org?view=onboarding": scopeConfig,
+    "/api/custom-providers": customProviders,
   };
   controller.context.api = async (_method: string, path: string) => ({ ok: true, data: fixtures[path] ?? {} });
   await controller.load();
@@ -114,6 +116,24 @@ test("without harness auth an unconfigured provider still needs a key", async ()
   assert.equal(elements["onboarding-model-badge"]!.textContent, "Needs a key");
   assert.equal(elements["onboarding-model-badge"]!.className, "badge warn");
   assert.match(elements["onboarding-model-summary"]!.textContent, /cannot run until its Anthropic key is configured/);
+});
+
+test("a base model on an enabled custom provider is ready without a built-in key", async () => {
+  const acme = { id: "acme-gateway", name: "Acme Gateway", disabled: false, hasKey: true };
+  const ready = await runLoadOnboarding(
+    { providers: UNCONFIGURED_PROVIDERS, models: [{ id: "acme-large", name: "Acme Large", provider: "acme-gateway" }] },
+    { baseModel: "acme-large" },
+    { providers: [acme] },
+  );
+  assert.equal(ready["onboarding-model-badge"]!.textContent, "Ready");
+  assert.equal(ready["onboarding-model-summary"]!.textContent, "acme-large · custom provider Acme Gateway");
+
+  const disabled = await runLoadOnboarding(
+    { providers: UNCONFIGURED_PROVIDERS, models: [{ id: "acme-large", name: "Acme Large", provider: "acme-gateway" }] },
+    { baseModel: "acme-large" },
+    { providers: [{ ...acme, disabled: true }] },
+  );
+  assert.equal(disabled["onboarding-model-badge"]!.textContent, "Needs a key");
 });
 
 test("a stored key keeps its summary even when the harness also carries auth", async () => {

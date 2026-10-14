@@ -40,6 +40,23 @@ test("the org cap holds across principals", async () => {
   assert.equal((await b.check("U3", 1000)).allowed, false);
 });
 
+test("exempt principals bypass both caps and do not consume the org pool", async () => {
+  const b = createBudgetTracker({ limitUsd: 1, orgLimitUsd: 2, windowMs: 60_000, exempt: new Set(["payor@x.cn"]) });
+  await b.record("payor@x.cn", 500, 1000);
+  const self = await b.check("payor@x.cn", 1000);
+  assert.equal(self.allowed, true, "personal cap bypassed");
+  assert.equal(self.limitUsd, Infinity);
+  assert.equal((await b.check("U1", 1000)).allowed, true, "exempt spend left the org pool untouched");
+  await b.record("U1", 1.5, 1000);
+  assert.equal((await b.check("U1", 1000)).allowed, false, "non-exempt still capped by the personal limit");
+  const b2 = createBudgetTracker({ orgLimitUsd: 2, windowMs: 60_000, exempt: new Set(["payor@x.cn"]) });
+  await b2.record("payor@x.cn", 100, 1000);
+  await b2.record("U2", 1.5, 1000);
+  assert.equal((await b2.check("U2", 1000)).allowed, true, "org pool counts only non-exempt spend");
+  await b2.record("U3", 1, 1000);
+  assert.equal((await b2.check("U3", 1000)).allowed, false, "org cap trips without the exempt principal's spend");
+});
+
 test("a principal over budget is refused by the app", async () => {
   const config = testConfig({
     dataDir: mkdtempSync(join(tmpdir(), "ap-bud-")),

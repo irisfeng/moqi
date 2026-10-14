@@ -39,6 +39,16 @@ export interface Run {
   finishedAt: number | null;
 }
 
+export interface RunOutcome {
+  failed: boolean;
+  finishedAt: number;
+}
+
+export function runOutcome(run: Pick<Run, "status" | "result" | "finishedAt">): RunOutcome | null {
+  if (!isTerminal(run.status) || run.finishedAt === null) return null;
+  return { failed: run.status === "failed" || run.result?.status === "failed", finishedAt: run.finishedAt };
+}
+
 interface TerminalCursor {
   finishedAt: number;
   id: string;
@@ -48,12 +58,14 @@ export interface EnqueueInput {
   sessionId: string;
   request: OrchestratorInput;
   dedupKey?: string;
+  webBaseKey?: string;
   maxAttempts?: number;
 }
 
 export interface EnqueueResult {
   run: Run;
   deduped: boolean;
+  ambiguous?: boolean;
 }
 
 export interface RunStore {
@@ -63,6 +75,8 @@ export interface RunStore {
 
   enqueue(input: EnqueueInput): Promise<EnqueueResult>;
   getByDedupKey(dedupKey: string): Promise<Run | null>;
+
+  findByDedupKeyPrefix(prefix: string, limit: number): Promise<Run[]>;
 
   claim(workerId: string, ttlMs: number): Promise<Run | null>;
 
@@ -92,6 +106,7 @@ export interface RunStore {
     opts?: { excludePrivateMessages?: boolean },
   ): Promise<Map<string, Run>>;
   latestForThread(threadRef: string, opts?: { excludePrivateMessages?: boolean }): Promise<Run | null>;
+  latestOutcomes(threadRefs: readonly string[]): Promise<Map<string, RunOutcome>>;
   pendingReturns(limit?: number, afterId?: string): Promise<Run[]>;
   terminalFinished(after: TerminalCursor, beforeMs: number, limit: number): Promise<Run[]>;
   markReturned(runId: string): Promise<void>;

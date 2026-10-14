@@ -147,6 +147,33 @@ test("scope indexes hide full artifact lists until searching", () => {
   dom.window.close();
 });
 
+test("skills are filtered by source and shown twenty to a page", () => {
+  const { dom, root, c, ui } = fixture();
+  c.view = "skills";
+  c.createdByCell = (skill: { createdBy?: string }) => ({ text: skill.createdBy ?? "" });
+  const skills = Array.from({ length: 23 }, (_, i) => ({
+    id: `own-${i}`,
+    name: `Own ${String(i).padStart(2, "0")}`,
+    ownerScopeId: "personal:alice",
+    createdBy: "alice",
+    updatedAt: 100 - i,
+  }));
+  skills.push({ id: "built", name: "Built", ownerScopeId: "personal:alice", createdBy: "system:seed", updatedAt: 1 });
+  assert.equal(ui.skillSourceOf({ pack: "p" }), "pack");
+  assert.equal(ui.skillSourceOf(skills.at(-1)), "builtin");
+  ui.skills(root, { skills }, c);
+  assert.equal(root.querySelectorAll(".skills-table tbody tr").length, 20);
+  const options = [...root.querySelectorAll<HTMLButtonElement>("#skills-source .seg")];
+  assert.deepEqual(
+    options.map((option) => option.textContent!.replace(/\s+/g, " ").trim()),
+    ["All 24", "Built-in 1", "Own 23"],
+  );
+  options[1]!.click();
+  assert.equal(root.querySelectorAll(".skills-table tbody tr").length, 1);
+  assert.equal(root.querySelector(".pager"), null);
+  dom.window.close();
+});
+
 test("cron destination draft derives placeholders, disabled fields and API payload", async () => {
   const { dom, root, c, ui } = fixture();
   c.cron = "job";

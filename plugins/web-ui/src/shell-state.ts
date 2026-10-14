@@ -7,9 +7,11 @@ export interface Me {
   analytics?: { apiKey: string; host: string };
   companyName?: string | null;
   welcomeCohort?: string;
+  verifiedSends?: boolean;
   suggestedActivities?: SuggestedActivity[];
   suggestedActivitiesGeneration?: boolean;
   individualModelAuth?: boolean;
+  personalModelAccounts?: boolean;
   modelAuthConnected?: boolean;
   mode?: AuthMode;
   user: string;
@@ -18,7 +20,10 @@ export interface Me {
   impersonatedBy?: string | null;
   displayName?: string | null;
   permissions?: string[];
+  destinations?: Destination[];
 }
+
+export type Destination = "docs" | "pm" | "apps";
 
 const VIEWS = [
   "chats",
@@ -29,6 +34,10 @@ const VIEWS = [
   "crons",
   "loops",
   "files",
+  "docs",
+  "pm",
+  "people",
+  "guide",
   "keychain",
   "deploys",
   "memory",
@@ -54,7 +63,13 @@ export function can(key: string): boolean {
   return appState.me?.permissions?.includes(key) === true;
 }
 
+export function hasDestination(key: Destination): boolean {
+  return (appState.me?.destinations ?? ["apps"]).includes(key);
+}
+
 export function canView(view: View): boolean {
+  if (view === "docs" || view === "pm") return hasDestination(view);
+  if (view === "deploys") return hasDestination("apps");
   if (view === "loops") return can("loops");
   if (view === "inbox" || view === "calendar") return can("inbox");
   return true;

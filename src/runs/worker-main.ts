@@ -11,6 +11,7 @@ await built.sandboxResources.initialize();
 await built.config.hydrate?.();
 await built.identity.hydrate();
 const { runtime } = built;
+await built.adoption?.prepare();
 runtime.start();
 console.log(`[qm:worker] draining runs (org=${config.orgId}, runStore=${config.runStore}, workers=${config.workers})`);
 

@@ -1,0 +1,384 @@
+{
+  "welcome": {
+    "headline": "今天要办什么？",
+    "subline": "我是你的 AI 同事——交代任务、我来干活；也能和全组在同一个项目里协作。",
+    "roles": [
+      {
+        "id": "a",
+        "label": "业务人员",
+        "tips": ["T02", "T04", "T10", "T28", "T03"]
+      },
+      {
+        "id": "b",
+        "label": "团队负责人",
+        "tips": ["T07", "T17", "T08", "T23"]
+      },
+      {
+        "id": "c",
+        "label": "综合行政",
+        "tips": ["T09", "T14", "T11", "T16"]
+      }
+    ]
+  },
+  "composerPlaceholder": "描述你要完成的工作，输入 / 选择技能，输入 @ 提及同事",
+  "nav": {
+    "advancedGroup": ["webhooks", "connectors", "memory", "skills"]
+  },
+  "opener": {
+    "enabled": false
+  },
+  "tips": [
+    {
+      "id": "T01",
+      "layer": "icebreak",
+      "title": "先认识一下",
+      "oneLiner": "介绍你的工作背景，让回答更贴合需求",
+      "prompt": "你好！我叫（你的名字），在（部门）负责（主要工作）。以后请多关照，先简单介绍一下你能帮我做什么。",
+      "capability": "memory",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T02",
+      "layer": "icebreak",
+      "title": "问我任何事",
+      "oneLiner": "提供一段文字，提炼三条要点",
+      "prompt": "帮我把这段话总结成 3 条要点：（粘贴任意一段文字）",
+      "capability": "通用",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T03",
+      "layer": "icebreak",
+      "title": "帮我算个账",
+      "oneLiner": "口算易错的数据，公式列清楚",
+      "prompt": "帮我算：本月共 100 项任务，87 项按时完成、13 项延期，按时完成率是多少？列出计算过程，再用一句结论概括。",
+      "capability": "通用",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T04",
+      "layer": "icebreak",
+      "title": "翻译成正式英文",
+      "oneLiner": "正式场合不露怯",
+      "prompt": "把下面这段中文翻译成正式、得体的英文商务邮件语气：（粘贴内容）",
+      "capability": "baoyu-translate",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T05",
+      "layer": "icebreak",
+      "title": "起个标题",
+      "oneLiner": "报告命名不用愁",
+      "prompt": "帮这份月度工作分析报告起 5 个标题，风格正式、适合给管理层看。",
+      "capability": "通用",
+      "depts": ["业务部"],
+      "status": "active"
+    },
+    {
+      "id": "T06",
+      "layer": "icebreak",
+      "title": "不满意就追问",
+      "oneLiner": "AI 会基于上一版改",
+      "prompt": "第二版更正式一点，并在开头加一段数据对比。",
+      "capability": "通用",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T07",
+      "layer": "task",
+      "title": "一份周报 PPT",
+      "oneLiner": "表格变汇报 · 约 3–5 分钟",
+      "prompt": "根据我上传的本周工作记录表，做一份周报 PPT，10 页以内，深蓝简洁风，重点突出完成率和重点事项。",
+      "capability": "ppt-master",
+      "depts": ["业务部"],
+      "status": "active"
+    },
+    {
+      "id": "T08",
+      "layer": "task",
+      "title": "表格变图表",
+      "oneLiner": "Excel 数据一眼看清",
+      "prompt": "把我上传的这份 Excel 里每周任务量画成柱状图，标出最高的一周，导出成图片。",
+      "capability": "office-docs",
+      "depts": ["业务部"],
+      "status": "active"
+    },
+    {
+      "id": "T09",
+      "layer": "task",
+      "title": "会议纪要",
+      "oneLiner": "录音转写或粗糙记录变正式纪要",
+      "prompt": "把这份记录整理成正式会议纪要，分三部分：结论、待办事项（标责任人）、遗留问题。",
+      "capability": "office-docs",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T10",
+      "layer": "task",
+      "title": "Excel 公式不求人",
+      "oneLiner": "说需求，得公式带解释",
+      "prompt": "帮我写一个 Excel 公式：统计 A 列中包含「已完成」三字的行数，并解释这个公式怎么用、怎么改成统计「进行中」。",
+      "capability": "通用",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T11",
+      "layer": "task",
+      "title": "长文件变导读",
+      "oneLiner": "8000 字读 1 页",
+      "prompt": "把这份文件压缩成一页导读：先 3 句话概述，再列出和我们工作最相关的 3 个要点。",
+      "capability": "office-docs",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T12",
+      "layer": "task",
+      "title": "一张信息图",
+      "oneLiner": "月度数据适合发工作群",
+      "prompt": "把这份月度数据做成一张适合发到工作群的信息图，风格简洁清爽。",
+      "capability": "baoyu-infographic",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T13",
+      "layer": "task",
+      "title": "报告配图 / 封面",
+      "oneLiner": "配图一句话生成",
+      "prompt": "为这篇工作总结生成一张封面图：简洁、商务风、深蓝主色，不要出现文字。",
+      "capability": "image-gen",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T14",
+      "layer": "task",
+      "title": "画一张流程图",
+      "oneLiner": "部门流程可视化",
+      "prompt": "把我们团队的产品发布流程画成流程图：需求→设计→开发→测试→上线→复盘，超时的环节用红色标出。",
+      "capability": "drawio",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T15",
+      "layer": "task",
+      "title": "帮我查资料",
+      "oneLiner": "联网搜索带来源",
+      "prompt": "搜索最近一周关于（你关注的行业或政策）的新闻，列出 5 条，每条附来源链接和一句话摘要。",
+      "capability": "web-search",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T16",
+      "layer": "task",
+      "title": "公众号式改写",
+      "oneLiner": "项目成果变宣传稿",
+      "prompt": "把这段项目成果改写成适合公众号发布的短文，300 字以内，语气积极但不夸张。",
+      "capability": "baoyu",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T17",
+      "layer": "collab",
+      "title": "建一个项目小组",
+      "oneLiner": "常规工作项目化，全组围着干",
+      "prompt": "我想把「月度分析」变成一个常设项目，和两位同事一起维护。帮我建好项目并列出该做的 5 件事。",
+      "capability": "项目",
+      "depts": ["业务部"],
+      "status": "active"
+    },
+    {
+      "id": "T18",
+      "layer": "collab",
+      "title": "@你的同事",
+      "oneLiner": "人和 AI 都能被点名",
+      "prompt": "（在项目里输入）@同事名字 帮我看看这版提纲第二部分是否数据齐全",
+      "capability": "@提及",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T19",
+      "layer": "collab",
+      "title": "共享文件",
+      "oneLiner": "传一次，全组能用",
+      "prompt": "把这份表格上传到项目的文件区，然后告诉全组在哪里可以找到它。",
+      "capability": "项目文件",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T20",
+      "layer": "collab",
+      "title": "部门文档库",
+      "oneLiner": "你们部门的所有共享文件",
+      "prompt": "（打开左侧「部门文档」）把月度总结传到部门文档库，全部门同事登录就能看到，点文件名即可下载。",
+      "capability": "部门文档",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T21",
+      "layer": "collab",
+      "title": "引用同事的话再加工",
+      "oneLiner": "选中→引用→继续干",
+      "prompt": "（选中同事的一段消息点「引用」）基于这段话，把其中的待办整理成任务清单。",
+      "capability": "引用回复",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T22",
+      "layer": "collab",
+      "title": "成果归档进项目",
+      "oneLiner": "聊天里的活儿落成文件",
+      "prompt": "把这次会话里生成的图表和总结整理成文件，存到我们项目的文件区。",
+      "capability": "项目",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T23",
+      "layer": "collab",
+      "title": "项目里全组共用",
+      "oneLiner": "同事的活儿不用挨个问",
+      "prompt": "（打开左侧「项目」进你们组的项目）同事和 AI 的所有会话、产出的文件都在同一个项目里——谁在干什么、做出来了什么，点开就有。",
+      "capability": "项目",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T24",
+      "layer": "collab",
+      "title": "两个人的接力",
+      "oneLiner": "你出思路，同事让 AI 续做",
+      "prompt": "我列好提纲发到项目里，@同事 让 TA 的 AI 按提纲把数据部分补全。",
+      "capability": "项目协作",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T25",
+      "layer": "advanced",
+      "title": "每天早上一份摘要",
+      "oneLiner": "定时任务，到点自动来",
+      "prompt": "帮我设一个定时任务：每个工作日早上 9 点，把本周的待办和进展总结成 5 条发给我。",
+      "capability": "定时任务",
+      "depts": ["业务部"],
+      "status": "deferred",
+      "deferredReason": "cron 输出在纯 web 部署下不可见，待修复落地后入池"
+    },
+    {
+      "id": "T26",
+      "layer": "advanced",
+      "title": "让它记住你的规矩",
+      "oneLiner": "说一次，以后都照办",
+      "prompt": "记住：我做的 PPT 一律用深蓝简洁风、不要动画；汇报材料标题都带「（草稿）」。",
+      "capability": "memory",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T27",
+      "layer": "advanced",
+      "title": "到点提醒",
+      "oneLiner": "防遗忘",
+      "prompt": "帮我设一个提醒：每个工作日下午 5 点提醒我整理今日工作并归档。",
+      "capability": "定时任务",
+      "depts": ["通用"],
+      "status": "deferred",
+      "deferredReason": "同 T25"
+    },
+    {
+      "id": "T28",
+      "layer": "advanced",
+      "title": "文件拖进来直接问",
+      "oneLiner": "Excel / PDF 都能读",
+      "prompt": "（把文件拖进聊天框）这份文件里的数据，哪个项目完成率最低？为什么？",
+      "capability": "文件分析",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T29",
+      "layer": "advanced",
+      "title": "换个语气",
+      "oneLiner": "口语变书面语",
+      "prompt": "以后回复我都用正式书面语，像正式邮件一样简洁。",
+      "capability": "memory",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T30",
+      "layer": "advanced",
+      "title": "关掉页面也不丢",
+      "oneLiner": "活儿在后台继续干",
+      "prompt": "让 AI 干活的时候你可以先去忙别的，回来在这个会话里找结果，中途关页面不影响。",
+      "capability": "会话",
+      "depts": ["通用"],
+      "status": "active"
+    },
+    {
+      "id": "T31",
+      "layer": "advanced",
+      "title": "搜历史会话",
+      "oneLiner": "上周让它做的东西找得回来",
+      "prompt": "（点侧边栏搜索）输入关键词，翻出之前所有会话和产物。",
+      "capability": "搜索",
+      "depts": ["通用"],
+      "status": "active"
+    }
+  ],
+  "growth": {
+    "onboarding": {
+      "title": "把一段记录变成可用纪要",
+      "description": "用示例材料练习：说清要求，检查初稿，再提出一次具体修改。约5–10分钟。",
+      "prompt": "请把下面的示例记录整理成一份会议纪要，分为结论、待办、待确认事项。仅使用提供的信息，没有写明的负责人或时间请标记待确认。\n\n示例记录：本周项目组讨论了客户服务改进。大家同意先收集常见问题，由小林整理现有反馈，周五前完成初稿。培训时间和最终负责人尚未确定。下次讨论需要对比两种培训方式。\n\n请先生成一份便于核对的初稿。",
+      "revisionPrompt": "请在上一版基础上修改：把待办整理成“事项、负责人、时间、状态”四列表格；缺少的信息写“待确认”，并在末尾说明你修改了什么。",
+      "steps": ["交代目标", "准备材料", "生成初稿", "提出修改", "确认成果"],
+      "firstPoints": 30,
+      "revisionPoints": 20
+    },
+    "daily": [
+      {
+        "title": "长消息变成三条要点",
+        "description": "练习提炼信息与保留不确定项。",
+        "prompt": "请把下面的示例消息提炼成3条要点，并列出需要进一步确认的问题：项目讨论确定先整理已有客户反馈，下周试用新版表格；试用范围和负责人还没最终确定。请不要补充未提供的事实。",
+        "revisionPrompt": "",
+        "steps": ["交代目标", "准备材料", "生成初稿", "提出修改", "确认成果"],
+        "firstPoints": 10,
+        "revisionPoints": 0
+      },
+      {
+        "title": "把模糊要求改成明确任务",
+        "description": "练习目标、材料与验收标准的表达。",
+        "prompt": "请把“帮我做好本月工作总结”改写成一份清晰的任务说明，包含要补充的材料、输出结构和验收清单。缺失事实用待补充表示，不要替我编造业绩。",
+        "revisionPrompt": "",
+        "steps": ["交代目标", "准备材料", "生成初稿", "提出修改", "确认成果"],
+        "firstPoints": 10,
+        "revisionPoints": 0
+      },
+      {
+        "title": "检查一份行动计划",
+        "description": "练习发现缺失信息并提出追问。",
+        "prompt": "请检查这个示例行动计划：下周完成客户回访，整理问题后安排一次培训，月底评估效果。列出目标、负责人、截止时间、验收方式中还缺少的信息，再给我一版保留待确认项的改进计划。",
+        "revisionPrompt": "",
+        "steps": ["交代目标", "准备材料", "生成初稿", "提出修改", "确认成果"],
+        "firstPoints": 10,
+        "revisionPoints": 0
+      }
+    ]
+  }
+}

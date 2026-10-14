@@ -1,10 +1,18 @@
+export interface OrgTheme {
+  light?: Record<string, string>;
+  dark?: Record<string, string>;
+}
+
 export interface OrgBranding {
+  theme?: OrgTheme;
   orgName?: string;
   accent?: string;
   mark?: string;
   markUrl?: string;
   selfLabel?: string;
 }
+
+export { BRAND_MARK_SVG } from "./brand-mark.ts";
 
 const REFRESH_MS = 30_000;
 const RETRY_MS = 5_000;
@@ -65,7 +73,29 @@ const CSS_HOSTILE = /[<>{}"'();\\]/;
 const cssSafe = (v: string | undefined): v is string => !!v && !CSS_HOSTILE.test(v);
 const cssUrlSafe = (v: string | undefined): v is string => cssSafe(v) && /^https:\/\/\S+$/.test(v);
 
-export function injectBranding(html: string, branding: OrgBranding, opts?: { titleSuffix?: string }): string {
+const THEME_TOKEN = /^[a-z][a-z0-9-]{0,47}$/;
+const THEME_COLOR =
+  /^(#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|(oklch|oklab|rgb|hsl)\([0-9a-z.%,/ -]{1,60}\))$/;
+
+function themeDecls(tokens: Record<string, string> | undefined): string {
+  if (!tokens || typeof tokens !== "object") return "";
+  return Object.entries(tokens)
+    .filter(([name, color]) => THEME_TOKEN.test(name) && typeof color === "string" && THEME_COLOR.test(color))
+    .map(([name, color]) => `--${name}:${color}`)
+    .join(";");
+}
+
+export function themeCss(theme: OrgTheme | undefined): string {
+  const light = themeDecls(theme?.light);
+  const dark = themeDecls(theme?.dark);
+  return `${light ? `html:not(.dark){${light}}` : ""}${dark ? `html.dark{${dark}}` : ""}`;
+}
+
+export function injectBranding(
+  html: string,
+  branding: OrgBranding,
+  opts?: { titleSuffix?: string; keepIcon?: boolean },
+): string {
   const { accent, mark, markUrl, selfLabel } = branding;
   let out = html;
   if (selfLabel) {
@@ -87,6 +117,11 @@ export function injectBranding(html: string, branding: OrgBranding, opts?: { tit
     ...(cssSafe(mark) ? [`--brand-mark:"${mark}"`] : []),
     ...(cssUrlSafe(markUrl) ? [`--brand-mark-image:url("${markUrl}")`] : []),
   ].join(";");
-  if (decls) out = out.replace("</head>", () => `<style>:root{${decls}}</style></head>`);
+  const css = `${decls ? `:root{${decls}}` : ""}${themeCss(branding.theme)}`;
+  if (css) out = out.replace("</head>", () => `<style>${css}</style></head>`);
+  if (cssUrlSafe(markUrl) && !opts?.keepIcon) {
+    const icon = `<link rel="icon" href="${escapeAttr(markUrl)}" />`;
+    out = out.replace(/<link rel="icon"[^>]*>\s*/g, "").replace("</head>", () => `${icon}</head>`);
+  }
   return out;
 }

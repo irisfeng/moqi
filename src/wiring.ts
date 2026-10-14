@@ -52,6 +52,11 @@ import type { probeModel } from "./harness/pi-harness.ts";
 import { createAwsRoleBroker, type AwsRoleBroker } from "./auth/aws-role-broker.ts";
 import type { SessionShare, SessionShareStore } from "./sessions/session-share.ts";
 import { createModelOverlayStore, type ModelOverlayStore } from "./model/model-overlay-store.ts";
+import { createInboundArtifactFinalizer } from "./files/inbound-artifact-finalizer.ts";
+import { createPostgresNotificationStore, type NotificationStore } from "./notifications/notification-store.ts";
+import { createMemoryRatingStore, createPostgresRatingStore, type RatingStore } from "./ratings/rating-store.ts";
+import { createAdoptionStore, type AdoptionStore } from "./admin/adoption-store.ts";
+import { createPostgresGrowthStore, type GrowthStore } from "./webui/growth-store.ts";
 import { mkdirSync } from "node:fs";
 import type { StagedEnvelope } from "./slack/envelope-staging.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -78,8 +83,15 @@ import {
 } from "./identity/principal-links.ts";
 import type { SlackAccountLink, ComposioReturn } from "./api/routes/composio.ts";
 import { installPrincipalLinks } from "./directory/person.ts";
+import type { PersonContact } from "./directory/person-contact.ts";
 import type { ExternalMember } from "./identity/external-members.ts";
 import { createResendMailer } from "./admin/invite-email.ts";
+import type { FirstWebTurnRecord } from "./api/first-web-turn.ts";
+import {
+  createLoginPasswordStore,
+  type LoginPasswordRecord,
+  type LoginPasswordStore,
+} from "./auth/login-password-store.ts";
 import {
   createMemoryConfigStore,
   type ScopedConfigStore,
@@ -148,6 +160,17 @@ import type { SecurityScreenProbe } from "./security/security-screener.ts";
 import { createPostgresBudgetTracker } from "./ratelimit/postgres-budget.ts";
 import { createCronStore, type CronStore } from "./cron/cron-store.ts";
 import { createMemoryCronFireStore, createPostgresCronFireStore } from "./cron/fire-store.ts";
+import { createMemoryCronFireReadStore, createPostgresCronFireReadStore } from "./cron/fire-read-store.ts";
+import {
+  createProjectJoinStore,
+  type ProjectJoinRecord,
+  type ProjectJoinStore,
+} from "./projects/project-join-store.ts";
+import {
+  createMemoryFileOriginStore,
+  createPostgresFileOriginStore,
+  type FileOriginStore,
+} from "./files/file-origin-store.ts";
 import { createLoopStore } from "./loops/loop-store.ts";
 import { createLoopItemLedger } from "./loops/item-ledger.ts";
 import {
@@ -313,7 +336,7 @@ import { createCodexHarness, codexHarnessConfigOptions } from "./harness/codex-h
 import { keychainCodexAuthStore, fileCodexAuthStore, type CodexAuthStore } from "./harness/codex-auth-store.ts";
 import { keychainHarnessAuthEnv } from "./credentials/harness-auth-env.ts";
 import { createClaudeHarness, claudeHarnessConfigOptions } from "./harness/claude-harness.ts";
-import { createPiHarness, piHarnessConfigOptions, type ProviderKeys } from "./harness/pi-harness.ts";
+import { createPiHarness, oneShot, piHarnessConfigOptions, type ProviderKeys } from "./harness/pi-harness.ts";
 import { createHarnessRouter, resolveRuntimeChoiceDurable } from "./harness/harness-router.ts";
 import { selectableModelCatalog } from "./model/model-catalog.ts";
 import type { Harness } from "./harness/harness.ts";
@@ -333,6 +356,7 @@ import {
 import { createControlService } from "./api/control-service.ts";
 import { createMemoryRunStore } from "./runs/memory-run-store.ts";
 import { createPostgresRunStore } from "./runs/postgres-run-store.ts";
+import { createPostgresLegacyTurnIntentStore, type LegacyTurnIntentStore } from "./runs/legacy-turn-intent-store.ts";
 import { createMemoryRunSignalStore, type RunSignalStore } from "./runs/run-signal-store.ts";
 import { createPostgresRunSignalStore } from "./runs/postgres-run-signal-store.ts";
 import { isTerminal, type Run, type RunStore } from "./runs/run-store.ts";
@@ -362,6 +386,7 @@ import { createPostgresSessionStateBus } from "./runs/postgres-session-state-bus
 import { createMemoryRunActivityStore, type RunActivityStore } from "./runs/run-activity-store.ts";
 import { createPostgresRunActivityStore } from "./runs/postgres-run-activity-store.ts";
 import { createApp, type App } from "./api/app.ts";
+import type { DirectorySyncBatch } from "./api/app-types.ts";
 import { startSession } from "./api/start-session.ts";
 import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
@@ -390,6 +415,16 @@ import {
   type AckEmojiPickStore,
 } from "./surface-cache/ack-emoji-pick-store.ts";
 import {
+  createMemoryAnnouncementStore,
+  createPostgresAnnouncementStore,
+  type AnnouncementStore,
+} from "./announcements/announcement-store.ts";
+import {
+  createMemoryWebuiEventStore,
+  createPostgresWebuiEventStore,
+  type WebuiEventStore,
+} from "./webui/webui-events-store.ts";
+import {
   auxiliaryModelFor,
   auxiliaryModelForProvider,
   defaultModelForHarness,
@@ -402,6 +437,11 @@ import { createAdminService, bootAdminGrantSeed, type AdminService } from "./adm
 import { createAdminGrantStore, createMapAdminGrantPersistence, type AdminGrant } from "./admin/admin-grant-store.ts";
 import { createPostgresAdminGrantStore } from "./admin/postgres-admin-grant-store.ts";
 import { createProjectStore, type Project, type ProjectStore } from "./projects/project-store.ts";
+import {
+  createProjectCollaborationStore,
+  type ProjectBoard,
+  type ProjectCollaborationStore,
+} from "./projects/project-collaboration.ts";
 import { withErrorReporting, createErrorLog, type ErrorLog } from "./admin/error-log.ts";
 import { createMemoryReplayDedupe, createPostgresReplayDedupe, type ReplayDedupe } from "./auth/replay-dedupe.ts";
 import {
@@ -481,6 +521,8 @@ export interface BuiltApp {
   deploymentLayerRefresh: Sweeper;
   sessions: SessionStore;
   runs: RunStore;
+  firstWebTurns: DurableMap<FirstWebTurnRecord>;
+  legacyTurnIntents?: LegacyTurnIntentStore;
   signals: RunSignalStore;
   tasks: TaskStore;
   sessionStateBus: SessionStateBus;
@@ -538,7 +580,9 @@ export interface BuiltApp {
   advisoryLock: AdvisoryLock;
   sandboxResources: SandboxResources;
   blobTransfer: BlobTransferStore;
+  loginPasswords: LoginPasswordStore;
   files: FileArtifactStore;
+  fileOrigins: FileOriginStore;
   fileUploads?: DirectFileUploads;
   featureFlags: FeatureFlagStore;
   teams?: TeamStore;
@@ -546,6 +590,7 @@ export interface BuiltApp {
   brokerSessions?: BrokerSessionStore;
   directory: DirectoryStore;
   projects: ProjectStore;
+  projectCollaboration: ProjectCollaborationStore;
   environments: EnvironmentStore;
   processes?: ProcessRegistry;
   appPageViews?: AppPageViewLog;
@@ -554,6 +599,16 @@ export interface BuiltApp {
   monitorPoller?: MonitorPoller;
   ambientJudgments?: AmbientJudgmentStore;
   ackEmojiPicks?: AckEmojiPickStore;
+  announcements: AnnouncementStore;
+  webuiHome: DurableMap<unknown>;
+  notificationPrefs: DurableMap<{ muteCompletions: boolean }>;
+  personContacts: DurableMap<PersonContact>;
+  projectJoins: ProjectJoinStore;
+  webuiEvents: WebuiEventStore;
+  growth?: GrowthStore;
+  adoption?: AdoptionStore;
+  notifications?: NotificationStore;
+  ratings: RatingStore;
   channelPolicy: ChannelPolicyStore;
   uiState: UiStateStore;
   sessionShares: SessionShareStore;
@@ -654,17 +709,20 @@ export function buildApp(
     : createMemoryAdvisoryLock();
   const principalLinks = createPrincipalLinkService(artifactMap<PrincipalLink>("principal_links"), advisoryLock);
   installPrincipalLinks(principalLinks);
+  const loginPasswords = createLoginPasswordStore(artifactMap<LoginPasswordRecord>("login_passwords"));
   const identity = createIdentityService(artifactMap<DeactivationRecord>("deactivated_principals"), {
     isOverridden: (id) => configStore.getInternalMemberOverrides().includes(id.trim().toLowerCase()),
     directorySyncProtected: config.emailAuthPrincipals,
     externalMembers: artifactMap<ExternalMember>("external_members"),
     principalLinks,
+    revokeSessions: (id) => loginPasswords.revokeAllSessions(id),
   });
   void identity.hydrate().catch(reportFailureAs("startup: hydrate identity", undefined));
   const leaderLease: LeaderLease = pgArtifactMap
     ? createPostgresLeaderLease(pgArtifactMap.pool)
     : createNoopLeaderLease();
   const configStore = createMemoryConfigStore(config.orgId, {
+    personalModelAccounts: config.personalModelAccountsEnabled !== false,
     connectorClients: artifactMap<StoredConnectorClient>("connector_clients"),
     souls: artifactMap<PersistedSoul>("soul_configs"),
     soulHistory: artifactMap<PersistedSoulRevision>("soul_history"),
@@ -785,6 +843,7 @@ export function buildApp(
     ...(config.budgetUsdPerWindow !== undefined ? { limitUsd: config.budgetUsdPerWindow } : {}),
     ...(config.orgBudgetUsdPerWindow !== undefined ? { orgLimitUsd: config.orgBudgetUsdPerWindow } : {}),
     windowMs: config.budgetWindowMs,
+    ...(config.budgetExemptPrincipals ? { exempt: new Set(config.budgetExemptPrincipals) } : {}),
   };
   const budget =
     config.databaseUrl && (config.budgetUsdPerWindow !== undefined || config.orgBudgetUsdPerWindow !== undefined)
@@ -817,6 +876,9 @@ export function buildApp(
   const files: FileArtifactStore = config.databaseUrl
     ? createPostgresFileArtifactStore(config.databaseUrl, fileBytes)
     : createMemoryFileArtifactStore(fileBytes);
+  const fileOrigins = config.databaseUrl
+    ? createPostgresFileOriginStore(config.databaseUrl)
+    : createMemoryFileOriginStore();
   const fileUploads =
     config.databaseUrl && config.snapshotStore === "s3" && config.s3Bucket
       ? createDirectFileUploads({
@@ -1732,6 +1794,14 @@ export function buildApp(
     isActiveMember: (principalId) => identity.isInternal(identity.classify(principalId)),
     advisoryLock,
   });
+  const projectCollaboration = createProjectCollaborationStore(
+    projects,
+    artifactMap<ProjectBoard>("project_boards"),
+    artifactMap<string[]>("project_preferences"),
+    {
+      isActiveMember: (id) => identity.isInternal(identity.classify(id)),
+    },
+  );
   const canReadScope = createCanReadScope({ managedGroups: projects, directory, identity, teams, sessions });
   const canWriteScope = createCanWriteScope({ managedGroups: projects, directory, identity, teams });
   const canManageScope = createCanManageScope({ managedGroups: projects, directory, identity, sessions });
@@ -1840,6 +1910,10 @@ export function buildApp(
   const loopGrants = createShipGrantStore(artifactMap<ShipGrant>("loop_ship_grants"));
   const cronChanged: { notify?: (id: string) => void } = {};
   const cronFires = config.databaseUrl ? createPostgresCronFireStore(config.databaseUrl) : createMemoryCronFireStore();
+  const projectJoins = createProjectJoinStore(artifactMap<ProjectJoinRecord>("project_joins"));
+  const cronFireReads = config.databaseUrl
+    ? createPostgresCronFireReadStore(config.databaseUrl)
+    : createMemoryCronFireReadStore();
   const cronsBase = createCronStore(artifactMap<Cron>("crons"), {
     staleRunningMs: config.runMaxAgeMs,
     fires: cronFires,
@@ -1946,7 +2020,14 @@ export function buildApp(
       );
     },
   });
+  const durableInboundRuns = Boolean(
+    config.databaseUrl && config.sessionStore === "postgres" && config.runStore === "postgres",
+  );
+  const inboundArtifactFinalizer = durableInboundRuns
+    ? createInboundArtifactFinalizer(config.databaseUrl!, config.reaperIntervalMs)
+    : null;
   const orchestratorDeps: OrchestratorDeps = {
+    durableInboundRuns,
     sessionStateBus,
     externalSlackPolicies: config.externalSlackPolicies,
     sessionSyscalls,
@@ -1956,12 +2037,13 @@ export function buildApp(
     config: configStore,
     defaultHarness: fallbackHarness,
     defaultTurnWallClockMs: config.turnWallClockMs,
-    userModelCredentials,
+    userModelCredentials: offeredUserModelCredentials(config, userModelCredentials),
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     sessionTapeMode: config.sessionTapeMode,
     sessions,
     workspace,
     files,
+    fileOrigins,
     sandbox,
     sandboxResources,
     swarms,
@@ -2128,6 +2210,64 @@ export function buildApp(
   const ackEmojiPicks: AckEmojiPickStore = config.databaseUrl
     ? createPostgresAckEmojiPickStore(config.databaseUrl)
     : createMemoryAckEmojiPickStore();
+  const announcements: AnnouncementStore = config.databaseUrl
+    ? createPostgresAnnouncementStore(config.databaseUrl, artifactMap<string[]>("announcement_dismissals"))
+    : createMemoryAnnouncementStore(artifactMap<string[]>("announcement_dismissals"));
+  const notifications =
+    config.databaseUrl && config.sessionStore === "postgres" && config.runStore === "postgres"
+      ? createPostgresNotificationStore(config.databaseUrl, { sessions, deliveries, runs })
+      : undefined;
+  const ratings = config.databaseUrl ? createPostgresRatingStore(config.databaseUrl) : createMemoryRatingStore();
+  const webuiHome = artifactMap<unknown>("webui_home");
+  const notificationPrefs = artifactMap<{ muteCompletions: boolean }>("notification_prefs");
+  const personContacts = artifactMap<PersonContact>("person_contacts");
+  const firstWebTurns = artifactMap<FirstWebTurnRecord>("web_first_turns");
+  const webuiEvents: WebuiEventStore = config.databaseUrl
+    ? createPostgresWebuiEventStore(config.databaseUrl)
+    : createMemoryWebuiEventStore();
+  const adoption =
+    config.databaseUrl && config.runStore === "postgres"
+      ? createAdoptionStore(config.databaseUrl, `org:${config.orgId}`, runs, directory, {
+          enabled: config.layerEnv?.ADOPTION_SCENARIOS_ENABLED !== "0",
+          resolveModel: async () => {
+            await refreshCustomProviders();
+            const enabled = await customProviders.enabled();
+            const desired = config.layerEnv?.ADOPTION_SCENARIOS_MODEL?.trim() || (orgBaseModelId() ?? fallback.modelId);
+            if (desired !== "glm-5.3-flash") return null;
+            const model = resolveModel(desired);
+            if (!model || model.provider !== "zhipu-glm" || model.id !== "glm-5.3-flash") return null;
+            if (!enabled.some((p) => p.id === "zhipu-glm" && p.models.some((m) => m.id === "glm-5.3-flash")))
+              return null;
+            const keys: Record<string, string | undefined> = await resolveModelProviderKeys();
+            if (!keys[model.provider]) return null;
+            return {
+              complete: (system, prompt, signal) =>
+                oneShot(
+                  "adoption-scenes",
+                  { ...model, maxTokens: Math.min(model.maxTokens, 256) },
+                  keys,
+                  system,
+                  prompt,
+                  { signal, retry: false, thinkingLevel: "off" },
+                ),
+            };
+          },
+        })
+      : undefined;
+  const adoptionSweeper = adoption
+    ? createSweeper(() => adoption.whenAvailable(adoption.sync), 30000, { label: "adoption" })
+    : null;
+  const adoptionScenarioSweeper = adoption
+    ? createSweeper(() => adoption.whenAvailable(adoption.processScenarios), 1000, { label: "adoption-scenes" })
+    : null;
+  const growth = config.databaseUrl ? createPostgresGrowthStore(config.databaseUrl) : undefined;
+  const legacyTurnIntents =
+    config.databaseUrl && config.runStore === "postgres"
+      ? createPostgresLegacyTurnIntentStore(config.databaseUrl)
+      : undefined;
+  const legacyIntentSweeper = legacyTurnIntents
+    ? createSweeper(() => legacyTurnIntents.prune(), 60_000, { label: "legacy-turn-intents" })
+    : null;
   const providerKeys = directProviderAvailability;
   const screenSecurity: SecurityScreenProbe | undefined = harness.models.screenSecurity
     ? ({ payload, harnessId, modelId, systemPrompt, actorId, scopeLabel, signal }) =>
@@ -2164,7 +2304,7 @@ export function buildApp(
     tasks,
     modelGateway,
     modelCredentials,
-    userModelCredentials,
+    userModelCredentials: offeredUserModelCredentials(config, userModelCredentials),
     modelRegistry,
     refreshModels,
     customProviders,
@@ -2182,6 +2322,8 @@ export function buildApp(
     auditLog,
     config: configStore,
     crons,
+    cronFireReads,
+    projectJoins,
     webhooks,
     deliveries,
     directory,
@@ -2194,7 +2336,9 @@ export function buildApp(
           })),
         }
       : {}),
+    directorySyncJournal: artifactMap<DirectorySyncBatch>("directory_identity_sync"),
     projects,
+    projectCollaboration,
     environments,
     deploy: deployService,
     deployAppsDomain: config.awsDeploy.appsDomain,
@@ -2203,6 +2347,7 @@ export function buildApp(
     monitors,
     sandbox,
     files,
+    fileOrigins,
     approvals,
     sessionStateBus,
     ledgerEventBus,
@@ -2708,6 +2853,7 @@ export function buildApp(
     const startPeriodic = () => {
       if (!backgroundRunning || generation !== backgroundGeneration) return;
       reaper.start();
+      inboundArtifactFinalizer?.start();
       processReaper?.start();
       monitorPoller?.start(config.monitorPollMs);
       void monitorDrained
@@ -2721,6 +2867,9 @@ export function buildApp(
       blobSweeper.start();
       composioReturnSweeper.start();
       fileUploads?.start();
+      legacyIntentSweeper?.start();
+      adoptionSweeper?.start();
+      adoptionScenarioSweeper?.start();
       idleSweeper?.start();
       keepWarmSweeper.start();
       deepIdleSweeper?.start();
@@ -2754,6 +2903,11 @@ export function buildApp(
       blobSweeper.stop(),
       composioReturnSweeper.stop(),
       fileUploads?.stop(),
+      inboundArtifactFinalizer?.stop(),
+      legacyIntentSweeper?.stop(),
+      adoptionSweeper?.stop(),
+      adoptionScenarioSweeper?.stop(),
+      adoption?.stopScenarios(),
       wakeSweep.stop(),
       swarms?.stop(),
       orphanedSignalSweeper.stop(),
@@ -2826,6 +2980,13 @@ export function buildApp(
       await harness.turns.close?.();
       await tasks.close?.();
       await flyTunnel?.stop();
+      await inboundArtifactFinalizer?.close();
+      await cronFireReads.close?.();
+      await fileOrigins.close?.();
+      await adoption?.close();
+      await legacyTurnIntents?.close();
+      await notifications?.close();
+      await ratings.close?.();
     },
   };
 
@@ -2842,6 +3003,8 @@ export function buildApp(
     deploymentLayerRefresh,
     sessions,
     runs,
+    firstWebTurns,
+    ...(legacyTurnIntents ? { legacyTurnIntents } : {}),
     signals: runSignals,
     tasks,
     sessionStateBus,
@@ -2899,7 +3062,9 @@ export function buildApp(
     sandboxResources,
     advisoryLock,
     blobTransfer,
+    loginPasswords,
     files,
+    fileOrigins,
     ...(fileUploads ? { fileUploads } : {}),
     featureFlags,
     teams,
@@ -2907,6 +3072,7 @@ export function buildApp(
     ...(brokerSessions ? { brokerSessions } : {}),
     directory,
     projects,
+    projectCollaboration,
     environments,
     ...(processes ? { processes } : {}),
     ...(appPageViews ? { appPageViews } : {}),
@@ -2915,6 +3081,16 @@ export function buildApp(
     ...(monitorPoller ? { monitorPoller } : {}),
     ...(ambientJudgments ? { ambientJudgments } : {}),
     ...(ackEmojiPicks ? { ackEmojiPicks } : {}),
+    announcements,
+    webuiHome,
+    notificationPrefs,
+    personContacts,
+    projectJoins,
+    webuiEvents,
+    ...(growth ? { growth } : {}),
+    ...(adoption ? { adoption } : {}),
+    ...(notifications ? { notifications } : {}),
+    ratings,
     channelPolicy,
     ...(config.suggestedActivitiesEnabled && (config.backgroundWorkEnabled || config.backgroundDeploymentId)
       ? { suggestedActivities }
@@ -2934,6 +3110,10 @@ export function buildApp(
     skillSyncEngine,
     slackCore,
   };
+}
+
+function offeredUserModelCredentials(config: Config, store: UserModelCredentialStore) {
+  return config.personalModelAccountsEnabled === false ? undefined : store;
 }
 
 export function serverDeps(
@@ -2972,7 +3152,7 @@ export function serverDeps(
     modelProviders: modelProviderAvailabilityFor(config.harness, providerKeysPresent(config)),
     providerKeys: providerKeysPresent(config),
     modelCredentials: built.modelCredentials,
-    userModelCredentials: built.userModelCredentials,
+    userModelCredentials: offeredUserModelCredentials(config, built.userModelCredentials),
     modelRegistry: built.modelRegistry,
     modelVerifier: built.modelVerifier,
     refreshModels: built.refreshModels,
@@ -3037,12 +3217,18 @@ export function serverDeps(
     ...(built.fireAskResolution ? { fireAskResolution: built.fireAskResolution } : {}),
     runs: built.runs,
     signals: built.signals,
+    firstWebTurns: built.firstWebTurns,
+    firstWebTurnsDurable: Boolean(
+      config.databaseUrl && config.sessionStore === "postgres" && config.runStore === "postgres",
+    ),
+    ...(built.legacyTurnIntents ? { legacyTurnIntents: built.legacyTurnIntents } : {}),
     workspace: built.workspace,
     files: built.files,
     ...(built.fileUploads ? { fileUploads: built.fileUploads } : {}),
     filesDirectUploadsEnabled: config.filesDirectUploadsEnabled,
     memory: built.memory,
     blobTransfer: built.blobTransfer,
+    loginPasswords: built.loginPasswords,
     sandboxBackend: built.sandbox.profile.backend,
     egressDeclaredEnforcement: built.sandbox.profile.egressEnforcement ?? "none",
     egressEnforcement: effectiveEgressEnforcement(built.sandbox.profile, {
@@ -3057,6 +3243,17 @@ export function serverDeps(
     directory: built.directory,
     ...(built.ambientJudgments ? { ambientJudgments: built.ambientJudgments } : {}),
     ...(built.ackEmojiPicks ? { ackEmojiPicks: built.ackEmojiPicks } : {}),
+    projectCollaboration: built.projectCollaboration,
+    announcements: built.announcements,
+    webuiHome: built.webuiHome,
+    notificationPrefs: built.notificationPrefs,
+    personContacts: built.personContacts,
+    projectJoins: built.projectJoins,
+    webuiEvents: built.webuiEvents,
+    ...(built.growth ? { growth: built.growth } : {}),
+    ...(built.adoption ? { adoption: built.adoption } : {}),
+    ...(built.notifications ? { notifications: built.notifications } : {}),
+    ratings: built.ratings,
     channelPolicy: built.channelPolicy,
     ...(built.suggestedActivities ? { suggestedActivities: built.suggestedActivities } : {}),
     uiState: built.uiState,

@@ -1,6 +1,8 @@
 import { previewFile } from "./file-open.ts";
 import { html, nothing, render } from "lit";
 import {
+  ArrowLeft,
+  Download,
   File,
   FileArchive,
   FileAudio,
@@ -11,19 +13,23 @@ import {
   FileText,
   FileVideo,
   Presentation,
+  RotateCcw,
   Search,
+  Trash2,
   Upload,
   type IconNode,
 } from "lucide";
 import { api, fileContentUrl, webFetch, withBase } from "./core-bridge";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error.ts";
 import { browserRenderableImage, fieldSelect, formatBytes, icon, relTime } from "./ui";
 import { contextsState, ensureContexts, personalScopeId, scopeTitle } from "./contexts";
 import { appState } from "./shell";
 import { fileListNeedsAllPages } from "./file-list";
 import { scopedSession, scopedViewTopbar } from "./session-scope";
 import { listRowsTpl } from "./list-page";
+import { createListPagination } from "./list-pagination";
 import { isTouch } from "./viewport";
+import { tip } from "./tooltip";
 
 interface FileItem {
   id: string;
@@ -35,6 +41,7 @@ interface FileItem {
   createdInScope?: string;
   ownerScopeId?: string;
   openable: boolean;
+  canTrash?: boolean;
 }
 interface FileRow extends FileItem {
   kind: "Created" | "Uploaded" | "Shared";
@@ -54,6 +61,10 @@ let filesNextCursor: string | null = null;
 let filesHost: HTMLElement | null = null;
 let filesRequestSeq = 0;
 let filesLoadAllQueued = false;
+let filesTrashView = false;
+let trashRows: FileRow[] = [];
+let trashNextCursor: string | null = null;
+const filesBusy = new Set<string>();
 
 function fileScope(f: FileItem): string | null {
   return f.createdInScope ?? (f.ownerScopeId?.startsWith("personal:") ? f.ownerScopeId : null) ?? personalScopeId();
@@ -130,6 +141,8 @@ function visibleFiles(): FileRow[] {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+const paginateFiles = createListPagination();
+
 function drawFiles(loading = false): void {
   if (appState.currentView !== "files" || !appState.mainEl) return;
   if (!filesHost || filesHost.parentElement !== appState.mainEl) {
@@ -138,94 +151,161 @@ function drawFiles(loading = false): void {
     appState.mainEl.replaceChildren(filesHost);
   }
   const visible = visibleFiles();
-  const groups = groupFilesByScope(visible);
+  const pagination = paginateFiles(
+    visible,
+    JSON.stringify([filesScope, filesQuery, filesType, filesOwnership]),
+    drawFiles,
+    {
+      more: Boolean(filesNextCursor),
+      loading: loading || filesLoadingMore,
+      next: async () => {
+        await loadMoreFiles();
+        return !filesNotice;
+      },
+    },
+  );
+  const groups = groupFilesByScope(pagination.rows);
   const filtered = Boolean(filesScope || filesQuery.trim() || filesType !== "all" || filesOwnership !== "all");
   let dropLabel = isTouch() ? "Choose files to upload" : "Drop files here or choose files";
   if (filesDragActive) dropLabel = "Drop files";
   else if (filesUploading) dropLabel = "Uploading…";
-  const status = filesNotice || (loading && !fileRows.length ? "Loading files…" : "");
+  const emptyLoading = loading && !(filesTrashView ? trashRows : fileRows).length;
+  let loadingLabel = "";
+  if (emptyLoading) loadingLabel = filesTrashView ? "Loading the recycle bin…" : "Loading files…";
+  const status = filesNotice || loadingLabel;
   const scoped = Boolean(scopedSession.active);
   filesHost.classList.toggle("scoped-view", scoped);
   render(
     html`
       ${scopedViewTopbar("files", drawFiles)}
       <div class="list-page-head">
-        <h1 class="pane-title">Files</h1>
-        <label class="list-search"
-          >${icon(Search, 16)}<span class="sr-only">Search files</span
-          ><input
-            type="search"
-            aria-label="Search files"
-            placeholder="Search file names and types…"
-            .value=${filesQuery}
-            @input=${(e: Event) => {
-              filesQuery = (e.currentTarget as HTMLInputElement).value;
-              drawFiles();
-              void loadAllFiles();
-            }}
-        /></label>
+        <h1 class="pane-title">${filesTrashView ? "Recycle bin" : "Files"}</h1>
+        ${
+          filesTrashView
+            ? nothing
+            : html`<label class="list-search"
+                >${icon(Search, 16)}<span class="sr-only">Search files</span
+                ><input
+                  type="search"
+                  aria-label="Search files"
+                  placeholder="Search file names and types…"
+                  .value=${filesQuery}
+                  @input=${(e: Event) => {
+                    filesQuery = (e.currentTarget as HTMLInputElement).value;
+                    drawFiles();
+                    void loadAllFiles();
+                  }}
+              /></label>`
+        }
       </div>
       <div class="list-toolbar">
-        ${selectControl(
-          "Ownership",
-          filesOwnership,
-          [
-            ["all", "All files"],
-            ["owned", "Yours"],
-            ["shared", "Shared"],
-          ],
-          (v) => {
-            filesOwnership = v as typeof filesOwnership;
-            drawFiles();
-            void loadAllFiles();
-          },
-        )}
-        ${selectControl(
-          "Type",
-          filesType,
-          [
-            ["all", "All types"],
-            ["image", "Images"],
-            ["document", "Documents"],
-            ["other", "Other"],
-          ],
-          (v) => {
-            filesType = v as typeof filesType;
-            drawFiles();
-            void loadAllFiles();
-          },
-        )}
+        ${
+          filesTrashView
+            ? nothing
+            : html`${selectControl(
+                "Ownership",
+                filesOwnership,
+                [
+                  ["all", "All files"],
+                  ["owned", "Yours"],
+                  ["shared", "Shared"],
+                ],
+                (v) => {
+                  filesOwnership = v as typeof filesOwnership;
+                  drawFiles();
+                  void loadAllFiles();
+                },
+              )}
+              ${selectControl(
+                "Type",
+                filesType,
+                [
+                  ["all", "All types"],
+                  ["image", "Images"],
+                  ["document", "Documents"],
+                  ["other", "Other"],
+                ],
+                (v) => {
+                  filesType = v as typeof filesType;
+                  drawFiles();
+                  void loadAllFiles();
+                },
+              )}`
+        }
+        <button class="btn" type="button" @click=${() => void setTrashView(!filesTrashView)}>
+          ${icon(filesTrashView ? ArrowLeft : Trash2, 14)}<span
+            >${filesTrashView ? "Back to files" : "Recycle bin"}</span
+          >
+        </button>
       </div>
       ${status ? html`<div class="status" aria-live="polite">${status}</div>` : nothing}
-      <button
-        class="file-drop ${filesDragActive ? "dragging" : ""}"
-        type="button"
-        ?disabled=${filesUploading}
-        @click=${pickFiles}
-        @dragenter=${onFileDrag}
-        @dragover=${onFileDrag}
-        @dragleave=${onFileDragLeave}
-        @drop=${onFileDrop}
-      >
-        ${icon(Upload, 16)}<span>${dropLabel}</span>
-      </button>
       ${
-        visible.length
-          ? html`<div class="file-groups">
-              ${groups.map(
-                (group) =>
-                  html`<section class="file-scope-group">
-                    <h2>${scopeTitle(group.scope)}</h2>
-                    ${listRowsTpl(group.files.map(fileRow), "file-list")}
-                  </section>`,
-              )}
-            </div>`
-          : html`<div class="empty compact">${filtered ? "No files match these filters." : "No files yet."}</div>`
+        filesTrashView
+          ? trashTpl()
+          : html`<button
+                class="file-drop ${filesDragActive ? "dragging" : ""}"
+                type="button"
+                ?disabled=${filesUploading}
+                @click=${pickFiles}
+                @dragenter=${onFileDrag}
+                @dragover=${onFileDrag}
+                @dragleave=${onFileDragLeave}
+                @drop=${onFileDrop}
+              >
+                ${icon(Upload, 16)}<span>${dropLabel}</span>
+              </button>
+              ${pagination.controls}
+              ${
+                visible.length
+                  ? html`<div class="file-groups">
+                      ${groups.map(
+                        (group) =>
+                          html`<section class="file-scope-group">
+                            <h2>${scopeTitle(group.scope)}</h2>
+                            ${listRowsTpl(group.files.map(fileRow), "file-list")}
+                          </section>`,
+                      )}
+                    </div>`
+                  : html`<div class="empty compact">
+                      ${filtered ? "No files match these filters." : "No files yet."}
+                    </div>`
+              }
+              ${pagination.controls}`
       }
-      ${filesNextCursor ? html`<div class="list-footer"><button class="btn" type="button" ?disabled=${filesLoadingMore} @click=${() => void loadMoreFiles()}>${filesLoadingMore ? "Loading…" : "Load more"}</button></div>` : nothing}
     `,
     filesHost,
   );
+}
+
+function trashTpl() {
+  return html`${
+    trashRows.length
+      ? listRowsTpl(trashRows.map(trashRow), "file-list")
+      : html`<div class="empty compact">The recycle bin is empty.</div>`
+  }
+  ${
+    trashNextCursor
+      ? html`<div class="list-footer">
+          <button class="btn" type="button" ?disabled=${filesLoadingMore} @click=${() => void loadMoreTrash()}>
+            ${filesLoadingMore ? "Loading…" : "Load more"}
+          </button>
+        </div>`
+      : nothing
+  }`;
+}
+
+function trashRow(f: FileRow) {
+  const visual = fileVisual(f);
+  return html`<div class="file-row-wrap">
+    <article class="list-row file-row">
+      <span class="file-row-icon ${visual.kind}">${icon(visual.glyph, 18)}</span>
+      <span class="list-row-title" dir="auto">${f.name}</span>
+      <span class="list-row-meta"><span>${formatBytes(f.sizeBytes)}</span><span>${relTime(f.createdAt)}</span></span>
+    </article>
+    <button class="btn compact" type="button" ?disabled=${filesBusy.has(f.id)} @click=${() => void restoreFile(f)}>
+      ${icon(RotateCcw, 14)}<span>Restore</span>
+    </button>
+  </div>`;
 }
 
 function fileRow(f: FileRow) {
@@ -240,7 +320,7 @@ function fileRow(f: FileRow) {
       }</span
     >
   `;
-  return f.openable
+  const row = f.openable
     ? html`<a
         class="list-row file-row"
         href=${contentUrl}
@@ -250,6 +330,66 @@ function fileRow(f: FileRow) {
         >${content}</a
       >`
     : html`<article class="list-row file-row">${content}</article>`;
+  return html`<div class="file-row-wrap">
+    ${row}${
+      f.openable
+        ? html`<a
+            class="icon-btn subtle compact"
+            href=${contentUrl + "?download=1"}
+            download=${f.name}
+            ${tip("Download")}
+            aria-label="Download"
+          >
+            ${icon(Download, 14)}
+          </a>`
+        : nothing
+    }${
+      f.canTrash
+        ? html`<button
+            class="icon-btn subtle compact"
+            type="button"
+            ${tip("Move to recycle bin")}
+            aria-label="Move to recycle bin"
+            ?disabled=${filesBusy.has(f.id)}
+            @click=${() => void trashFile(f)}
+          >
+            ${icon(Trash2, 14)}
+          </button>`
+        : nothing
+    }
+  </div>`;
+}
+
+async function trashFile(f: FileRow): Promise<void> {
+  if (filesBusy.has(f.id)) return;
+  filesBusy.add(f.id);
+  filesNotice = "";
+  drawFiles();
+  try {
+    await api(`/api/files/${encodeURIComponent(f.id)}`, { method: "DELETE" });
+    fileRows = fileRows.filter((r) => r.id !== f.id);
+  } catch (e) {
+    filesNotice = errMessage(e, "Failed to move the file to the recycle bin.");
+  } finally {
+    filesBusy.delete(f.id);
+    drawFiles();
+  }
+}
+
+async function restoreFile(f: FileRow): Promise<void> {
+  if (filesBusy.has(f.id)) return;
+  filesBusy.add(f.id);
+  filesNotice = "";
+  drawFiles();
+  try {
+    await api(`/api/files/${encodeURIComponent(f.id)}/restore`, { method: "POST" });
+    trashRows = trashRows.filter((r) => r.id !== f.id);
+  } catch (e) {
+    filesNotice = errMessage(e, "Failed to restore the file.");
+  } finally {
+    filesBusy.delete(f.id);
+    drawFiles();
+  }
 }
 
 async function fileSha256(file: globalThis.File): Promise<string> {
@@ -361,11 +501,67 @@ async function fetchFilePage(
   return { rows: rowsFromPage(r), nextCursor: r.nextCursor ?? null };
 }
 
+async function fetchTrashPage(cursor?: string): Promise<{ rows: FileRow[]; nextCursor: string | null }> {
+  const q = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  if (cursor) q.set("cursor", cursor);
+  const r = await api<{ owned?: FileItem[]; nextCursor?: string }>(`/api/files/trash?${q.toString()}`);
+  return { rows: rowsFromPage(r), nextCursor: r.nextCursor ?? null };
+}
+
+async function loadMoreTrash(): Promise<void> {
+  if (!trashNextCursor || filesLoadingMore) return;
+  const requestSeq = filesRequestSeq;
+  filesLoadingMore = true;
+  drawFiles();
+  try {
+    const page = await fetchTrashPage(trashNextCursor);
+    if (requestSeq !== filesRequestSeq) return;
+    const byId = new Map(trashRows.map((f) => [f.id, f]));
+    for (const row of page.rows) byId.set(row.id, row);
+    trashRows = [...byId.values()];
+    trashNextCursor = page.nextCursor;
+  } catch (e) {
+    if (requestSeq !== filesRequestSeq) return;
+    filesNotice = errMessage(e, "Failed to load more files.");
+  }
+  if (requestSeq !== filesRequestSeq) return;
+  filesLoadingMore = false;
+  drawFiles();
+}
+
+async function loadTrash(seq: number): Promise<void> {
+  const requestSeq = ++filesRequestSeq;
+  filesLoadAllQueued = false;
+  filesLoadingMore = false;
+  drawFiles(true);
+  try {
+    const page = await fetchTrashPage();
+    if (requestSeq !== filesRequestSeq || seq !== appState.viewRenderSeq || appState.currentView !== "files") return;
+    trashRows = page.rows;
+    trashNextCursor = page.nextCursor;
+  } catch (e) {
+    if (requestSeq !== filesRequestSeq || seq !== appState.viewRenderSeq || appState.currentView !== "files") return;
+    filesNotice = errMessage(e, "Failed to load the recycle bin.");
+  }
+  drawFiles();
+}
+
+async function setTrashView(on: boolean): Promise<void> {
+  filesTrashView = on;
+  filesNotice = "";
+  trashRows = [];
+  trashNextCursor = null;
+  const seq = appState.viewRenderSeq;
+  if (on) await loadTrash(seq);
+  else await loadFiles(seq);
+}
+
 async function loadMoreFiles(): Promise<void> {
   if (!filesNextCursor || filesLoadingMore) return;
   const requestSeq = filesRequestSeq;
   const scope = filesScope;
   filesLoadingMore = true;
+  filesNotice = "";
   drawFiles();
   try {
     const page = await fetchFilePage(filesNextCursor, scope);
@@ -388,6 +584,7 @@ async function loadMoreFiles(): Promise<void> {
 }
 
 async function loadAllFiles(): Promise<void> {
+  if (filesTrashView) return;
   if (!fileListNeedsAllPages({ query: filesQuery, type: filesType, ownership: filesOwnership, sort: "newest" })) return;
   if (filesLoadingMore) {
     filesLoadAllQueued = true;
@@ -455,6 +652,7 @@ export async function renderFiles(): Promise<void> {
     filesNextCursor = null;
   }
   const seq = appState.viewRenderSeq;
+  filesTrashView = false;
   filesNotice = "";
   filesNextCursor = null;
   await loadFiles(seq);

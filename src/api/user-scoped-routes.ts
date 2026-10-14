@@ -39,6 +39,19 @@ const USER_SCOPED: Rule[] = [
   pat("POST", "/v1/sessions/:id/share", { in: "body", name: "principalId" }),
   pat("GET", "/v1/shared-sessions/:token", { in: "query", name: "viewer" }),
   pat("GET", "/v1/shared-sessions/:token/files/:fileId", { in: "query", name: "viewer" }),
+  pat("POST", "/v2/legacy-turn-intents", { in: "body", name: "principalId" }),
+  pat("GET", "/v2/legacy-turn-intents", { in: "query", name: "principalId" }),
+  pat("POST", "/v2/legacy-turn-intents/dismiss", { in: "body", name: "principalId" }),
+  pat("GET", "/v2/turns/receipt", { in: "query", name: "viewer" }),
+  pat("GET", "/v1/web-first-turn", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/notifications/:id/result", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/notifications", { in: "query", name: "principalId" }),
+  pat("POST", "/v1/notifications/read-all", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/notification-preferences", { in: "query", name: "principalId" }),
+  pat("PUT", "/v1/notification-preferences", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/ratings", { in: "query", name: "principalId" }),
+  pat("PUT", "/v1/ratings", { in: "query", name: "principalId" }),
+  pat("POST", "/v1/notifications/:id/read", { in: "query", name: "principalId" }),
   pat("GET", "/v1/sessions/search", { in: "query", name: "principalId" }),
   pat("GET", "/v1/sessions/:id", { in: "query", name: "viewer" }),
   pat("GET", "/v1/sessions/:id/entries/:seq", { in: "query", name: "viewer" }),
@@ -46,6 +59,9 @@ const USER_SCOPED: Rule[] = [
   pat("GET", "/v1/sessions/:id/background", { in: "query", name: "viewer" }),
   pat("GET", "/v1/sessions/:id/background/:pid/output", { in: "query", name: "viewer" }),
   pat("GET", "/v1/files/:id/content", { in: "query", name: "viewer" }),
+  pat("GET", "/v1/files/trash", { in: "query", name: "viewer" }),
+  pat("DELETE", "/v1/files/:id", { in: "query", name: "viewer" }),
+  pat("POST", "/v1/files/:id/restore", { in: "query", name: "viewer" }),
   pat("GET", "/v1/files", { in: "query", name: "viewer" }),
   pat("GET", "/v1/files/upload-client", { in: "query", name: "viewer" }),
   pat("POST", "/v1/files/uploads", { in: "body", name: "principalId" }),
@@ -63,8 +79,14 @@ const USER_SCOPED: Rule[] = [
   pat("GET", "/v1/resources/search", { in: "query", name: "principalId" }),
   pat("GET", "/v1/contexts", { in: "query", name: "principalId" }),
   pat("GET", "/v1/projects", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/project-collaboration", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/project-collaboration/:id", { in: "query", name: "principalId" }),
+  pat("PUT", "/v1/project-collaboration/:id", { in: "body", name: "principalId" }),
   pat("POST", "/v1/projects", { in: "body", name: "principalId" }),
   pat("POST", "/v1/projects/:id/members", { in: "body", name: "principalId" }),
+  pat("GET", "/v1/projects/:id/departments", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/directory/people", { in: "query", name: "principalId" }),
+  pat("POST", "/v1/projects/:id/members/department", { in: "body", name: "principalId" }),
   pat("DELETE", "/v1/projects/:id/members/:memberId", { in: "body", name: "principalId" }),
   pat("GET", "/v1/scope-resources", { in: "query", name: "principalId" }),
   pat("GET", "/v1/memory", { in: "query", name: "principalId" }),
@@ -91,6 +113,8 @@ const USER_SCOPED: Rule[] = [
   pat("POST", "/v1/crons/:id/run", { in: "query", name: "principalId" }),
   pat("POST", "/v1/crons/:id/destination", { in: "query", name: "principalId" }),
   pat("GET", "/v1/crons/:id/runs", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/crons/:id/runs/:fireKey", { in: "query", name: "principalId" }),
+  pat("POST", "/v1/crons/:id/runs/:fireKey/read", { in: "query", name: "principalId" }),
   pat("GET", "/v1/deployments", { in: "query", name: "principalId" }),
   pat("POST", "/v1/deployments", { in: "body", name: "createdBy" }),
   pat("GET", "/v1/user-model-auth/status", { in: "query", name: "principalId" }),
@@ -118,6 +142,13 @@ const USER_SCOPED: Rule[] = [
   pat("GET", "/v1/approvals/:id"),
   pat("GET", "/v1/approvals/pending"),
   pat("GET", "/v1/directory/resolve"),
+  pat("GET", "/v1/announcements"),
+  pat("POST", "/v1/announcements/:id/dismiss"),
+  pat("POST", "/v1/webui-events"),
+  pat("GET", "/v1/me/growth"),
+  pat("POST", "/v1/me/growth/action"),
+  pat("GET", "/v1/me/contact"),
+  pat("PUT", "/v1/me/contact"),
   pat("POST", "/v1/reach"),
   pat("POST", "/v1/share"),
   pat("POST", "/v1/environments"),
@@ -130,7 +161,9 @@ const USER_SCOPED: Rule[] = [
 ];
 
 const SYSTEM: Rule[] = [
+  pat("POST", "/v2/turns"),
   pat("POST", "/v1/turns"),
+  pat("POST", "/v1/web-proactive-opener"),
   pat("POST", "/v1/turns/:id/metrics"),
   pat("POST", "/v1/runs/:id/delivery-state"),
   pat("POST", "/v1/deliveries/:id/ack"),
@@ -151,6 +184,17 @@ const SYSTEM: Rule[] = [
   pat("POST", "/v1/auth/invitations/redeem"),
   pat("POST", "/v1/auth/broker/sessions"),
   pat("POST", "/v1/auth/broker/sessions/use"),
+  pat("POST", "/v1/auth/password/verify"),
+  pat("POST", "/v1/auth/password/session"),
+  pat("POST", "/v1/auth/password/devices"),
+  pat("POST", "/v1/auth/password/set"),
+  pat("PUT", "/v1/auth/password/credential"),
+  pat("GET", "/v1/announcements"),
+  pat("GET", "/v1/webui-home"),
+  pat("GET", "/v1/projects"),
+  pat("POST", "/v1/projects"),
+  pat("POST", "/v1/projects/:id/members"),
+  pat("POST", "/v1/files/upload"),
   pat("PUT", "/v1/deployment-layer"),
   pat("POST", "/v1/background-work"),
   pat("POST", "/v1/deployment/live-session"),
@@ -170,6 +214,10 @@ const WRITE = new Set(["POST", "PUT", "DELETE", "PATCH"]);
 
 export function isUserScoped(method: string, pathname: string): boolean {
   return USER_SCOPED.some((r) => r.method === method && r.re.test(pathname));
+}
+
+export function isSystemRouted(method: string, pathname: string): boolean {
+  return SYSTEM.some((r) => r.method === method && r.re.test(pathname));
 }
 
 export function userScopedField(method: string, pathname: string): Field | undefined {

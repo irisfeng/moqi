@@ -1,0 +1,43 @@
+// qm-cn 单机部署配置示例（已在 macOS + Docker 28 上端到端验证）。
+// 用法：qm init <dir> --target docker --org <org> 生成脚手架后，按本文件修改 qm.config.jsonc。
+// 密钥一律放 .env，不进本文件。
+{
+  "contract": 1,
+  "orgId": "qm-cn",
+
+  // 备案域名（https://qm.example.cn）或纯内网地址（http://10.0.0.5:8082）。
+  // 内网/VPN 访问可免备案；公网域名需完成 ICP 备案后解析到主机。
+  "publicUrl": "http://<主机IP或域名>:8082",
+
+  "target": "docker",
+
+  // 不设 modelProvider：不走 anthropic/openai 厂商密钥，
+  // 模型由管理员注册国产 custom provider（见 providers/ 目录）。
+  // 默认模型经 "model" 字段注入（映射为 PI_MODEL 环境变量）。
+  // 这个 id 必须已在模型注册表中；填了未注册的 id，界面会显示“没有可用的模型”。本地开发时不确定就不要设 PI_MODEL。
+  "model": "deepseek-flash",
+
+  // web-ui 面向全员；admin 面向运营；auth+portal 提供邮箱登录公网入口。
+  // 内网最小集可只保留 ["core", "web-ui"]。
+  "services": ["core", "web-ui", "admin", "auth", "portal"],
+
+  "plugins": [],
+  "skills": [],
+
+  "env": {
+    // 新会话页的三条建议由模型按 SUGGESTED_ACTIVITIES_CONTEXT 生成；不写明语言时，新账号会得到英文建议。
+    // 国内主机连不上 Anthropic/OpenAI，个人 Claude、ChatGPT 账号无法接入：关掉后“设置”里不再显示“AI 访问权限”，全员走公司模型。
+    "core": {
+      "HARNESS": "pi",
+      "PERSONAL_MODEL_ACCOUNTS_ENABLED": "false",
+      "SUGGESTED_ACTIVITIES_CONTEXT": "All staff use the product in Simplified Chinese. Write every title and prompt in Simplified Chinese, using 你 rather than 您."
+    },
+    // 登录邮件走国内企业邮箱 SMTP（值放 .env：SMTP_HOST/SMTP_USERNAME/SMTP_PASSWORD 等）
+    "auth": { "AUTH_EMAIL_TRANSPORT": "smtp", "AUTH_ALLOWED_EMAIL_DOMAIN": "example.cn" }
+  },
+
+  // 本地 Docker 沙箱：每 scope 一个容器 + 持久卷（qm-home-*），零云依赖。
+  // 要求：主机可访问 /var/run/docker.sock；首次部署用 --build-from 构建 core 镜像
+  // （带 docker-cli），并预构建沙箱镜像 qm-sandbox-local:latest（npm run sandbox:local:build）。
+  "sandbox": { "backend": "local" }
+}

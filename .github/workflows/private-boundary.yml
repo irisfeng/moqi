@@ -1,0 +1,25 @@
+name: private-boundary
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Allow only the open part of the organisation layer, and no env files
+        run: |
+          allowed='^deploy/layers/qm-cn/(\.env\.example$|VERSION$|deploy/|pm-ocr/|providers/|sandbox/|scripts/|seed/|skills/|soul/)'
+          tracked="$(git -c core.quotePath=false ls-files | grep -Ei '^deploy/layers/' | grep -Ev "$allowed|^deploy/layers/README\.md$" || true)"
+          envs="$(git -c core.quotePath=false ls-files | grep -Ei '(^|/)(\.env(\..+)?|\.envrc|[^/]+\.env)$' | grep -Evi '(^|/)\.env\.example$' || true)"
+          if [ -n "$tracked$envs" ]; then
+            echo "These files must not be tracked:"
+            printf '%s\n' "$tracked" "$envs"
+            exit 1
+          fi

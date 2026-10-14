@@ -29,7 +29,15 @@ interface CustomModelSpec {
   input?: number;
   /** USD per million output tokens. Defaults to 0. */
   output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  modalities?: ("text" | "image")[];
+  compat?: Record<string, unknown>;
+  thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
 }
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export interface CustomProviderSpec {
   /** Slug: lowercase, digits, hyphens; also the model's `provider` value. */
@@ -42,6 +50,19 @@ export interface CustomProviderSpec {
 
 const SLUG_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const RESERVED = new Set<string>([...PROVIDER_IDS, "mock"]);
+const COMPAT_FLAG_RE = /^[a-z][a-zA-Z0-9]*$/;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPlainJsonValue(value: unknown): boolean {
+  if (typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isPlainJsonValue);
+  if (isPlainObject(value)) return Object.values(value).every(isPlainJsonValue);
+  return false;
+}
 
 export function validateCustomProviderSpec(spec: CustomProviderSpec): void {
   if (!SLUG_RE.test(spec.id)) {
@@ -80,9 +101,46 @@ export function validateCustomProviderSpec(spec: CustomProviderSpec): void {
     for (const [field, v] of [
       ["input", m.input],
       ["output", m.output],
+      ["cacheRead", m.cacheRead],
+      ["cacheWrite", m.cacheWrite],
     ] as const) {
       if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
         throw new Error(`model "${m.id}": ${field} must be a non-negative number`);
+      }
+    }
+    if (m.thinkingLevelMap !== undefined) {
+      if (!isPlainObject(m.thinkingLevelMap)) {
+        throw new Error(`model "${m.id}": thinkingLevelMap must be an object`);
+      }
+      for (const [level, value] of Object.entries(m.thinkingLevelMap)) {
+        if (!(THINKING_LEVELS as readonly string[]).includes(level)) {
+          throw new Error(
+            `model "${m.id}": thinkingLevelMap level "${level}" must be one of ${THINKING_LEVELS.join(", ")}`,
+          );
+        }
+        if (value !== null && typeof value !== "string") {
+          throw new Error(`model "${m.id}": thinkingLevelMap.${level} must be a string or null`);
+        }
+      }
+    }
+    if (m.modalities !== undefined) {
+      const ok =
+        Array.isArray(m.modalities) &&
+        m.modalities.length > 0 &&
+        m.modalities.every((modality) => modality === "text" || modality === "image");
+      if (!ok) {
+        throw new Error(`model "${m.id}": modalities must be a non-empty array of "text" and/or "image"`);
+      }
+    }
+    if (m.compat !== undefined) {
+      if (!isPlainObject(m.compat)) throw new Error(`model "${m.id}": compat must be an object`);
+      for (const [flag, value] of Object.entries(m.compat)) {
+        if (!COMPAT_FLAG_RE.test(flag)) {
+          throw new Error(`model "${m.id}": compat flag "${flag}" must be a camelCase identifier`);
+        }
+        if (!isPlainJsonValue(value)) {
+          throw new Error(`model "${m.id}": compat flag "${flag}" must hold only JSON values`);
+        }
       }
     }
   }
@@ -101,6 +159,8 @@ export interface CustomRuntimeModel {
   baseUrl: string;
   reasoning: boolean;
   input: ("text" | "image")[];
+  compat?: Record<string, unknown>;
+  thinkingLevelMap?: Record<string, string | null>;
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
   contextWindow: number;
   maxTokens: number;
@@ -123,8 +183,15 @@ function toRuntimeModel(provider: CustomProviderSpec, m: CustomModelSpec): Custo
     api: customProviderApi(provider.protocol),
     baseUrl: provider.baseUrl,
     reasoning: m.reasoning ?? false,
-    input: ["text"],
-    cost: { input: m.input ?? 0, output: m.output ?? 0, cacheRead: 0, cacheWrite: 0 },
+    input: m.modalities ?? ["text"],
+    ...(m.compat === undefined ? {} : { compat: m.compat }),
+    ...(m.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: m.thinkingLevelMap }),
+    cost: {
+      input: m.input ?? 0,
+      output: m.output ?? 0,
+      cacheRead: m.cacheRead ?? 0,
+      cacheWrite: m.cacheWrite ?? 0,
+    },
     contextWindow: m.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: m.maxTokens ?? DEFAULT_MAX_TOKENS,
   };
@@ -188,14 +255,20 @@ export function customModelsJson(): { providers: Record<string, unknown> } | und
           name: spec.name,
           baseUrl: spec.baseUrl,
           api: customProviderApi(spec.protocol),
-          models: spec.models.map((m) => ({
-            id: m.id,
-            name: m.name ?? m.id,
-            reasoning: m.reasoning ?? false,
-            contextWindow: m.contextWindow ?? 128_000,
-            maxTokens: m.maxTokens ?? 8_192,
-            cost: { input: m.input ?? 0, output: m.output ?? 0, cacheRead: 0, cacheWrite: 0 },
-          })),
+          models: spec.models.map((m) => {
+            const runtime = toRuntimeModel(spec, m);
+            return {
+              id: runtime.id,
+              name: runtime.name,
+              contextWindow: runtime.contextWindow,
+              maxTokens: runtime.maxTokens,
+              cost: runtime.cost,
+              reasoning: runtime.reasoning,
+              input: runtime.input,
+              ...(runtime.compat === undefined ? {} : { compat: runtime.compat }),
+              ...(runtime.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: runtime.thinkingLevelMap }),
+            };
+          }),
         },
       ]),
     ),

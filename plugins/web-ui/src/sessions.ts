@@ -1,5 +1,7 @@
 import { sessionStatusMark } from "./session-status.ts";
+import { createListPagination } from "./list-pagination";
 import { openSessionShare } from "./session-share";
+import { openBringIntoProject } from "./bring-into-project";
 import { html, nothing, render, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
 import { ref } from "lit/directives/ref.js";
@@ -9,6 +11,9 @@ import {
   Ban,
   Binoculars,
   Bot,
+  Check,
+  Hand,
+  TriangleAlert,
   Target,
   ArchiveRestore,
   ChevronDown,
@@ -63,6 +68,9 @@ import {
   recentProjectSeeds,
   reconcileSessions,
   rowIndicators,
+  runStatus,
+  type RunStatus,
+  pinnedProjectScopes,
   splitPinned,
   withPendingSession,
   withoutUnsentPending,
@@ -70,7 +78,9 @@ import {
   type ChatBrowseStatus,
 } from "./session-list";
 import { tip } from "./tooltip";
-import { errMessage } from "../../chassis/src/errors";
+import { userErrorMessage as errMessage } from "./user-error";
+import { projectSummaries, setProjectPinned } from "./project-collaboration";
+import { closeLegacyReview, openLegacyReview } from "./legacy-review";
 import { copyText, icon, menuSelect, relTime, workingWave } from "./ui";
 import { listPageTpl } from "./list-page";
 import {
@@ -83,8 +93,15 @@ import {
 } from "./contexts";
 import { groupDmLabel, groupDmText } from "./group-dm-label";
 import { transcriptModel } from "./model-options";
-import { appState, closeSidebarOnNarrowView, renderSidebarTop, syncDocumentTitle, syncUrlFromState } from "./shell";
-import { allConversations, isLiveConversation, mainConversation } from "./conversations";
+import {
+  appState,
+  blockUnsentAttachmentNavigation,
+  closeSidebarOnNarrowView,
+  renderSidebarTop,
+  syncDocumentTitle,
+  syncUrlFromState,
+} from "./shell";
+import { allConversations, isLiveConversation, mainConversation, unreadThreadRefs } from "./conversations";
 import type { Conversation } from "./conv-types";
 import {
   startNewChatInCanvas,
@@ -110,9 +127,15 @@ export const sessionsState = {
   openMenuId: null as string | null,
   renamingId: null as string | null,
   openingKey: null as string | null,
+  openGeneration: 0,
   webOnly: true,
   collapsedProjectScopes: new Set<string>(),
 };
+
+export function cancelOpeningSession(): void {
+  sessionsState.openGeneration += 1;
+  sessionsState.openingKey = null;
+}
 
 let selection: SessionSelection = emptySelection();
 type SessionPatch = { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null };
@@ -169,7 +192,6 @@ let showArchived = false;
 const SESSION_BATCH_SIZE = 50;
 let recentLimit = SESSION_BATCH_SIZE;
 let archivedLimit = SESSION_BATCH_SIZE;
-let chatsPageLimit = SESSION_BATCH_SIZE;
 
 let chatsPageScope: string | null = null;
 let chatsPageQuery = "";
@@ -178,6 +200,7 @@ let chatsPageSurface: "all" | "web" | "slack" = "all";
 let chatsPageHost: HTMLElement | null = null;
 
 export function resetSessionsState(): void {
+  closeLegacyReview();
   selection = emptySelection();
   selectColorOpen = false;
   sessionPatchGeneration++;
@@ -192,14 +215,13 @@ export function resetSessionsState(): void {
   sessionRefreshSeq++;
   sessionsState.openMenuId = null;
   sessionsState.renamingId = null;
-  sessionsState.openingKey = null;
+  cancelOpeningSession();
   sessionsState.collapsedProjectScopes.clear();
   renameDraft = "";
   refreshingTitleIds.clear();
   showArchived = false;
   recentLimit = SESSION_BATCH_SIZE;
   archivedLimit = SESSION_BATCH_SIZE;
-  chatsPageLimit = SESSION_BATCH_SIZE;
   chatsPageScope = null;
   chatsPageQuery = "";
   chatsPageStatus = "active";
@@ -259,6 +281,14 @@ function projectName(scopeId: string): string | null {
 
 function projectOf(scopeId: string): CoreProject | null {
   return contextsState.list.find((context) => context.scopeId === scopeId)?.project ?? null;
+}
+
+function projectPins(): { scopeId: string; pinned: boolean }[] {
+  return contextsState.list.flatMap((context) =>
+    context.project
+      ? [{ scopeId: context.scopeId, pinned: projectSummaries.get(context.project.id)?.pinned === true }]
+      : [],
+  );
 }
 
 function projectMenuKey(scopeId: string): string {
@@ -332,7 +362,10 @@ export function renderList(): void {
   const visible = visibleSessions();
   const active = visible.filter((s) => !s.archived);
   const archived = visible.filter((s) => s.archived);
-  const { pinned, rest } = splitPinned(active);
+  const projectScopes = pinnedProjectScopes(active, projectPins());
+  const inPinnedProject = (session: CoreSession): boolean => projectScopes.has(session.scopeId);
+  const projectPinned = active.filter(inPinnedProject);
+  const { pinned, rest } = splitPinned(active.filter((session) => !inPinnedProject(session)));
   const keptIds = new Set([
     ...openConversationIds(),
     ...selection.ids,
@@ -343,11 +376,15 @@ export function renderList(): void {
   const shownThreads = new Set(
     [
       ...rest.slice(0, recentLimit),
+      ...projectPinned,
       ...archived.slice(0, archivedLimit),
       ...visible.filter((session) => !session.id || keptIds.has(session.id)),
     ].map((session) => session.threadRef),
   );
-  const activeItems = recentItemsFor(rest);
+  const isPinnedProject = (item: RecentItem): item is Extract<RecentItem, { kind: "project" }> =>
+    item.kind === "project" && projectScopes.has(item.scopeId);
+  const pinnedProjects = recentItemsFor(projectPinned).filter(isPinnedProject);
+  const activeItems = recentItemsFor(rest).filter((item) => !isPinnedProject(item));
   const archivedItems: RecentItem[] = archived.map((session) => ({
     kind: "session",
     session,
@@ -357,7 +394,7 @@ export function renderList(): void {
     html`
       ${detachDropZone()}
       ${
-        pinned.length
+        pinned.length || pinnedProjects.length
           ? html`
               <div class="recents-group pinned-head">
                 <span class="pinned-head-glyph">${icon(Pin, 11)}</span><span>Pinned</span>
@@ -367,6 +404,11 @@ export function renderList(): void {
                   pinned,
                   (session) => session.threadRef,
                   (session) => sessionRow(session),
+                )}
+                ${repeat(
+                  pinnedProjects,
+                  (item) => projectMenuKey(item.scopeId),
+                  (item) => recentItem(item, shownThreads),
                 )}
               </div>
             `
@@ -473,12 +515,18 @@ function recentItem(item: RecentItem, shownThreads: ReadonlySet<string>): Templa
                 type="button"
                 aria-expanded=${collapsed ? "false" : "true"}
                 aria-controls=${childrenId}
+                aria-label=${collapsed ? `Show conversations in ${name}` : `Hide conversations in ${name}`}
                 @click=${() => toggleRecentProject(item.scopeId)}
               >
-                <span class="recent-project-glyph">
-                  ${glyph && !collapsed ? html`<span class="glyph">${icon(glyph, 14)}</span>` : nothing}
-                  <span class="chev">${icon(collapsed ? ChevronRight : ChevronDown, 13)}</span>
-                </span>
+                ${icon(collapsed ? ChevronRight : ChevronDown, 13)}
+              </button>
+              <button
+                class="recent-project-open"
+                type="button"
+                ${tip(`Open ${name}`)}
+                @click=${() => openRecentProject(item.scopeId)}
+              >
+                ${glyph ? html`<span class="recent-project-glyph">${icon(glyph, 14)}</span>` : nothing}
                 <span class="recent-project-name" dir="auto">${name.replace(/^#/, "")}</span>
               </button>
               <div class="session-menu recent-project-menu ${menuOpen ? "menu-open" : ""}">
@@ -523,6 +571,12 @@ function recentItem(item: RecentItem, shownThreads: ReadonlySet<string>): Templa
   `;
 }
 
+function openRecentProject(scopeId: string): void {
+  if (blockUnsentAttachmentNavigation()) return;
+  closeSidebarOnNarrowView();
+  openProjectDetail(scopeId);
+}
+
 function toggleRecentProject(scopeId: string): void {
   if (sessionsState.collapsedProjectScopes.has(scopeId)) sessionsState.collapsedProjectScopes.delete(scopeId);
   else sessionsState.collapsedProjectScopes.add(scopeId);
@@ -539,6 +593,7 @@ export function startNewChat(
   const pane = startNewChatInCanvas(scopeId ?? undefined, threadRef);
   if (pane) return pane;
   const conv = mainConversation();
+  if (blockUnsentAttachmentNavigation([conv])) return null;
   if (threadRef) conv.mountContinuable(threadRef, null, scopeId, [], name);
   else addPendingSession(conv.newChat(scopeId ? { scopeId, name } : undefined), scopeId, name);
   return conv;
@@ -556,7 +611,9 @@ function startProjectChat(event: Event, scopeId: string, name: string | null): v
 }
 
 function projectMenuPopover(item: Extract<RecentItem, { kind: "project" }>): TemplateResult {
-  const owned = projectOf(item.scopeId)?.ownerId === appState.me?.user;
+  const project = projectOf(item.scopeId);
+  const owned = project?.ownerId === appState.me?.user;
+  const pinned = pinnedProjectScopes(item.sessions, projectPins()).has(item.scopeId);
   return html`
     <div class="session-menu-popover" role="menu" ${ref(placeSessionMenu)} @click=${(e: Event) => e.stopPropagation()}>
       <button
@@ -567,6 +624,18 @@ function projectMenuPopover(item: Extract<RecentItem, { kind: "project" }>): Tem
       >
         ${icon(Folder, 15)}<span>View project</span>
       </button>
+      ${
+        project
+          ? html`<button
+              class="session-menu-option"
+              type="button"
+              role="menuitem"
+              @click=${() => void pinProject(item.scopeId, project, !pinned)}
+            >
+              ${icon(pinned ? PinOff : Pin, 15)}<span>${pinned ? "Unpin project" : "Pin project"}</span>
+            </button>`
+          : nothing
+      }
       ${
         owned
           ? html`<button
@@ -581,6 +650,28 @@ function projectMenuPopover(item: Extract<RecentItem, { kind: "project" }>): Tem
       }
     </div>
   `;
+}
+
+async function pinProject(scopeId: string, project: CoreProject, pinned: boolean): Promise<void> {
+  const generation = sessionPatchGeneration;
+  sessionsState.openMenuId = null;
+  sessionPatchEpoch++;
+  sessionsState.list = sessionsState.list.map((session) =>
+    session.scopeId === scopeId ? { ...session, pinned } : session,
+  );
+  renderList();
+  let failure = "";
+  try {
+    await setProjectPinned(project.id, pinned);
+  } catch (error) {
+    failure = errMessage(error, "Could not save the project pin. Try again.");
+  }
+  if (sessionPatchGeneration !== generation) return;
+  sessionPatchEpoch++;
+  await refreshSessions({ silent: true });
+  if (!failure || sessionPatchGeneration !== generation) return;
+  sessionsNotice = failure;
+  renderList();
 }
 
 function openProjectFromMenu(scopeId: string): void {
@@ -619,6 +710,8 @@ function chatsPageShowing(): boolean {
   return Boolean(chatsPageHost && appState.mainEl && chatsPageHost.parentElement === appState.mainEl);
 }
 
+const paginateChats = createListPagination();
+
 export function drawChatsPage(): void {
   if (appState.currentView !== "chats" || !appState.mainEl || splitState.active) return;
   mainConversation().state.host = null;
@@ -633,23 +726,13 @@ export function drawChatsPage(): void {
     .filter((s) => chatsPageSurface === "all" || surfaceOf(s) === chatsPageSurface)
     .filter((s) => (chatsPageScope ? s.scopeId === chatsPageScope : true))
     .filter((s) => !q || chatMatches(s, q))
-    .sort((a, b) => activityOf(b) - activityOf(a));
-  const rows = matches.slice(0, chatsPageLimit).map((s) => chatPageRow(s));
-  if (matches.length > chatsPageLimit)
-    rows.push(
-      html`<div class="list-footer">
-        <button
-          class="btn"
-          type="button"
-          @click=${() => {
-            chatsPageLimit += SESSION_BATCH_SIZE;
-            drawChatsPage();
-          }}
-        >
-          Show more conversations
-        </button>
-      </div>`,
-    );
+    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || activityOf(b) - activityOf(a));
+  const pagination = paginateChats(
+    matches,
+    JSON.stringify([q, chatsPageStatus, chatsPageSurface, chatsPageScope]),
+    drawChatsPage,
+  );
+  const rows = pagination.rows.map((s) => chatPageRow(s));
   let empty = "No conversations yet. Start a new chat.";
   if (sessionsLoading && sessionsState.list.length === 0) empty = "Loading conversations…";
   else if (chatsPageScope || q || chatsPageStatus !== "active" || chatsPageSurface !== "all") {
@@ -661,16 +744,15 @@ export function drawChatsPage(): void {
       scope: chatsPageScope,
       onScope: (s) => {
         chatsPageScope = s;
-        chatsPageLimit = SESSION_BATCH_SIZE;
         drawChatsPage();
       },
+      controls: html`<button type="button" class="btn" @click=${openLegacyReview}>Old requests to review</button>`,
       action: { label: "New chat", onClick: () => startNewChat() },
       search: {
         value: chatsPageQuery,
         placeholder: "Search chats…",
         onInput: (v) => {
           chatsPageQuery = v;
-          chatsPageLimit = SESSION_BATCH_SIZE;
           drawChatsPage();
         },
       },
@@ -691,7 +773,6 @@ export function drawChatsPage(): void {
                 class=${chatsPageStatus === value ? "active" : ""}
                 @click=${() => {
                   chatsPageStatus = value;
-                  chatsPageLimit = SESSION_BATCH_SIZE;
                   drawChatsPage();
                 }}
               >
@@ -707,7 +788,6 @@ export function drawChatsPage(): void {
             ariaLabel: "Filter by surface",
             onSelect: (value) => {
               chatsPageSurface = (value ?? "all") as typeof chatsPageSurface;
-              chatsPageLimit = SESSION_BATCH_SIZE;
               drawChatsPage();
             },
             options: [
@@ -719,6 +799,7 @@ export function drawChatsPage(): void {
         </div>
       </div>`,
       rows,
+      pagination: pagination.controls,
       empty,
     }),
     chatsPageHost,
@@ -757,10 +838,37 @@ function sessionWorking(s: CoreSession): boolean {
   return rowIndicators(s, liveThreads()).working;
 }
 
-function statusMarks(s: CoreSession): TemplateResult {
+const RUN_STATUS_WORD: Record<RunStatus, string> = {
+  running: "Running",
+  waiting: "Waiting for you",
+  failed: "Failed",
+  done: "Done",
+};
+
+const RUN_STATUS_ICON: Record<Exclude<RunStatus, "running">, IconNode> = {
+  waiting: Hand,
+  failed: TriangleAlert,
+  done: Check,
+};
+
+export function runStatusMark(status: RunStatus | null, worded = false): TemplateResult | typeof nothing {
+  if (!status) return nothing;
+  const word = RUN_STATUS_WORD[status];
+  const glyph =
+    status === "running"
+      ? html`<span class="working-mark" ${ref(syncWorkingPulse)}>${workingWave()}</span>`
+      : icon(RUN_STATUS_ICON[status], 13);
+  return worded
+    ? html`<span class="run-status run-status-${status}">${glyph}<span class="run-status-word">${word}</span></span>`
+    : html`<span class="run-status run-status-${status}" role="img" aria-label=${word} ${tip(word)}>${glyph}</span>`;
+}
+
+function statusMarks(s: CoreSession, worded = false): TemplateResult {
   const ind = rowIndicators(s, liveThreads(), sessionsState.list);
-  return html`${ind.working ? html`<span class="working-mark" ${ref(syncWorkingPulse)}>${workingWave()}</span>` : nothing}${
-    ind.awaiting ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>` : nothing
+  return html`${runStatusMark(runStatus(s, ind), worded)}${
+    unreadThreadRefs().has(s.threadRef) && !isActiveRow(s)
+      ? html`<span class="unread-dot" role="img" aria-label="Unread" ${tip("Unread")}></span>`
+      : nothing
   }${
     ind.background
       ? html`<span
@@ -782,6 +890,7 @@ function statusMarks(s: CoreSession): TemplateResult {
 function openBackgroundInspector(e: Event, s: CoreSession): void {
   e.stopPropagation();
   e.preventDefault();
+  if (blockUnsentAttachmentNavigation()) return;
   if (openBackgroundInCanvas(s)) return;
   mainConversation().requestBackgroundPanel(s.id || null, s.threadRef);
   void openSession(s);
@@ -808,7 +917,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
           void openSession(s);
         }}
       >
-        <span class="list-row-title">${statusMarks(s)}<span dir="auto">${groupDmTitle(s)}</span></span>
+        <span class="list-row-title">${statusMarks(s, true)}<span dir="auto">${groupDmTitle(s)}</span></span>
         <span class="list-row-meta">
           ${sessionStatusMark(s.status)} ${scopeChip(s.scopeId, s.channelName ?? null)}
           ${surfaceOf(s) === "slack" ? html`<span class="surface surface-slack">${slackLogo(13)}</span>` : nothing}
@@ -1176,9 +1285,57 @@ const placeSessionMenu = (el?: Element): void => {
   }
 };
 
+function canBringIntoProject(s: Pick<CoreSession, "id" | "scopeId">, personalScope: string | null): boolean {
+  return Boolean(s.id) && personalScope !== null && s.scopeId === personalScope;
+}
+
+function projectCopiesOf(s: CoreSession): CoreSession[] {
+  return sessionsState.list.filter(
+    (candidate) => candidate.forkedFrom?.sessionId === s.id && candidate.scopeId !== s.scopeId,
+  );
+}
+
+function bringIntoProjectOption(s: CoreSession): TemplateResult | typeof nothing {
+  if (!canBringIntoProject(s, personalScopeId())) return nothing;
+  const copies = projectCopiesOf(s);
+  return html`
+    <button
+      class="session-menu-option"
+      type="button"
+      role="menuitem"
+      @click=${() => {
+        sessionsState.openMenuId = null;
+        renderList();
+        void openBringIntoProject(s, (copy) => {
+          replacePendingSession(copy.threadRef, copy);
+          void openSession(copy);
+        });
+      }}
+    >
+      ${icon(Folder, 15)}<span>Bring into project…</span>
+    </button>
+    ${copies.map(
+      (copy) =>
+        html`<button
+          class="session-menu-option"
+          type="button"
+          role="menuitem"
+          @click=${() => {
+            sessionsState.openMenuId = null;
+            void openSession(copy);
+          }}
+        >
+          ${icon(Folder, 15)}<span>Open copy in ${projectName(copy.scopeId) ?? "project"}</span>
+        </button>`,
+    )}
+  `;
+}
+
 function sessionMenuPopover(s: CoreSession): TemplateResult {
   const archived = Boolean(s.archived);
   const pinned = Boolean(s.pinned);
+  let pinLabel = pinned ? "Unpin" : "Pin";
+  if (projectOf(s.scopeId)) pinLabel = pinned ? "Unpin project" : "Pin project";
   const refreshingTitle = refreshingTitleIds.has(s.id);
   return html`
     <div class="session-menu-popover" role="menu" ${ref(placeSessionMenu)} @click=${(e: Event) => e.stopPropagation()}>
@@ -1186,7 +1343,7 @@ function sessionMenuPopover(s: CoreSession): TemplateResult {
         ${icon(Link, 15)}<span>Copy link</span>
       </button>
       <button class="session-menu-option" type="button" role="menuitem" @click=${() => setPinned(s, !pinned)}>
-        ${pinned ? icon(PinOff, 15) : icon(Pin, 15)}<span>${pinned ? "Unpin" : "Pin"}</span>
+        ${pinned ? icon(PinOff, 15) : icon(Pin, 15)}<span>${pinLabel}</span>
       </button>
       <button class="session-menu-option" type="button" role="menuitem" @click=${() => startRename(s)}>
         ${icon(Pencil, 15)}<span>Rename</span>
@@ -1200,6 +1357,7 @@ function sessionMenuPopover(s: CoreSession): TemplateResult {
       >
         ${icon(RefreshCw, 15)}<span>${refreshingTitle ? "Refreshing title" : "Refresh title"}</span>
       </button>
+      ${bringIntoProjectOption(s)}
       <button class="session-menu-option" type="button" role="menuitem" @click=${() => setArchived(s, !archived)}>
         ${archived ? icon(ArchiveRestore, 15) : icon(Archive, 15)}<span>${archived ? "Unarchive" : "Archive"}</span>
       </button>
@@ -1510,22 +1668,27 @@ async function bulkPatch(patch: SessionPatch): Promise<void> {
   if (patch.archived) for (const id of ids) closeSessionSurfaces(id);
   sessionsState.list = sessionsState.list.map((s) => (ids.includes(s.id) ? { ...s, ...patch } : s));
   redrawSelection();
+  const projectPin =
+    patch.pinned !== undefined && sessionsState.list.some((s) => ids.includes(s.id) && Boolean(projectOf(s.scopeId)));
   const patches = ids.map((id) => queueSessionPatch(id, patch));
   const results = await Promise.allSettled(patches);
-  if (sessionPatchGeneration === generation && results.some((r) => r.status === "rejected"))
+  if (sessionPatchGeneration === generation && (projectPin || results.some((r) => r.status === "rejected")))
     await refreshSessions({ silent: true, patchEpoch: sessionPatchEpoch });
   redrawSelection();
 }
 
 function setArchived(s: CoreSession, archived: boolean): void {
   sessionsState.openMenuId = null;
+  if (archived && blockUnsentAttachmentNavigation()) return;
   if (archived && s.id) closeSessionSurfaces(s.id);
   void persistSessionPatch(s.id, { archived });
 }
 
 function setPinned(s: CoreSession, pinned: boolean): void {
   sessionsState.openMenuId = null;
-  void persistSessionPatch(s.id, { pinned });
+  const project = projectOf(s.scopeId);
+  if (project) void pinProject(s.scopeId, project, pinned);
+  else void persistSessionPatch(s.id, { pinned });
 }
 
 function previewColor(s: CoreSession, color: string): void {
@@ -1739,6 +1902,7 @@ export async function openSession(
   entriesPrefetch?: Promise<TranscriptPage | null>,
   approvalsPrefetch?: Promise<{ approvals: PendingApproval[] } | null>,
 ): Promise<void> {
+  if (blockUnsentAttachmentNavigation()) return;
   if (pendingForkThreads.has(s.threadRef)) return;
   if (appState.currentView !== "chats") {
     appState.currentView = "chats";
@@ -1764,18 +1928,20 @@ export async function openSessionInto(
 ): Promise<void> {
   if (pendingForkThreads.has(s.threadRef)) return;
   if (!s.id) {
-    if (conv.state.threadRef !== s.threadRef) {
+    if (conv.state.threadRef !== s.threadRef && !blockUnsentAttachmentNavigation([conv])) {
       conv.mountContinuable(s.threadRef, null, s.scopeId || null, [], s.channelName ?? null);
       renderList();
     }
     return;
   }
   if (s.id === conv.state.sessionId && !entriesPrefetch) return;
+  if (blockUnsentAttachmentNavigation([conv])) return;
 
   refreshSessionsOnOpen();
 
   const opening = s.id;
   if (tracked) {
+    sessionsState.openGeneration += 1;
     sessionsState.openingKey = opening;
     renderList();
   }

@@ -14,7 +14,8 @@ import { createDirectoryStore, type DirectoryStore } from "../src/directory/dire
 import { createIdentityService } from "../src/identity/identity-service.ts";
 import { createCanReadScope, createCanWriteScope } from "../src/resolution/scope-membership.ts";
 import { createMemorySessionStore } from "../src/sessions/memory-session-store.ts";
-import { mintCapabilityToken, CAPABILITY_TTL_MS, CONTROL_PLANE_AUD } from "../src/auth/capability-token.ts";
+import { signedHeaders } from "../plugins/chassis/src/core-client.ts";
+import { mintPortalIdentity, PORTAL_IDENTITY_HEADER } from "../plugins/chassis/src/portal-identity.ts";
 import { scopeId } from "../src/types.ts";
 
 const SECRET = "deploy-createdin-secret".repeat(3);
@@ -60,34 +61,6 @@ async function fixture() {
   };
 }
 
-const capFor = (actorId: string) =>
-  mintCapabilityToken(
-    {
-      actorId,
-      scopeId: scopeId("personal", actorId),
-      aud: CONTROL_PLANE_AUD,
-      liveActor: true,
-      exp: Date.now() + CAPABILITY_TTL_MS,
-    },
-    SECRET,
-  );
-
-const gitPerm = async (base: string, id: string, actor: string): Promise<{ status: number; permission?: string }> => {
-  const r = await fetch(`${base}/v1/deployments/${encodeURIComponent(id)}/git-url`, {
-    headers: { "x-agent-capability": await capFor(actor) },
-  });
-  if (r.status !== 200) return { status: r.status };
-  return { status: 200, permission: ((await r.json()) as { permission: string }).permission };
-};
-
-const gitUrl = async (base: string, id: string, actor: string): Promise<string> => {
-  const r = await fetch(`${base}/v1/deployments/${encodeURIComponent(id)}/git-url`, {
-    headers: { "x-agent-capability": await capFor(actor) },
-  });
-  if (r.status !== 200) assert.fail(`git URL failed (${r.status}): ${await r.text()}`);
-  return ((await r.json()) as { url: string }).url;
-};
-
 async function pushStatus(url: string): Promise<number> {
   const parsed = new URL(url);
   const authorization = `Basic ${Buffer.from(`${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`).toString("base64")}`;
@@ -131,8 +104,8 @@ async function setup() {
 test("principalGitPermission: a member of the channel the app was created in gets write", async () => {
   const { f, d } = await setup();
   try {
-    assert.equal((await gitPerm(f.base, d.id, "U1")).permission, "write");
-    assert.equal((await gitPerm(f.base, d.id, "U2")).permission, "write");
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U1"), "write");
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U2"), "write");
   } finally {
     await f.close();
   }
@@ -148,9 +121,9 @@ test("principalGitPermission: a member of a channel it was only SHARED into gets
       permission: "read",
       grantedBy: "U1",
     });
-    assert.equal((await gitPerm(f.base, d.id, "U3")).permission, "read");
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U3"), "read");
 
-    assert.notEqual((await gitPerm(f.base, d.id, "U3")).permission, "write");
+    assert.notEqual(await f.app.deploymentGitPermissionFor(d.id, "U3"), "write");
   } finally {
     await f.close();
   }
@@ -159,7 +132,7 @@ test("principalGitPermission: a member of a channel it was only SHARED into gets
 test("principalGitPermission: an unrelated principal is denied (no access)", async () => {
   const { f, d } = await setup();
   try {
-    assert.equal((await gitPerm(f.base, d.id, "U9")).status, 403);
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U9"), null);
   } finally {
     await f.close();
   }
@@ -174,7 +147,7 @@ test("principalGitPermission: org-owned deployment is not manageable by membersh
       entrypoint: "node server.js",
       files: [{ path: "server.js", data: "console.log('v1')" }],
     });
-    assert.equal((await gitPerm(f.base, d.id, "U7")).permission, "read");
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U7"), "read");
   } finally {
     await f.close();
   }
@@ -200,7 +173,7 @@ test("an explicit public-channel write grant retains write permission", async ()
       permission: "write",
       grantedBy: "U1",
     });
-    assert.equal((await gitPerm(f.base, d.id, "U2")).permission, "write");
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U2"), "write");
   } finally {
     await f.close();
   }
@@ -273,7 +246,7 @@ test("an org write grant gives active org members git write and manage authority
       permission: "write",
       grantedBy: "U1",
     });
-    assert.deepEqual(await gitPerm(f.base, d.id, "U9"), { status: 200, permission: "write" });
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U9"), "write");
     assert.equal(await f.deploy.canManageDeployment(d.id, "U9", scopeId("personal", "U9")), true);
   } finally {
     await f.close();
@@ -285,7 +258,8 @@ test("removed channel members keep stale-session read reach but lose write and m
   try {
     const session = await f.sessions.getOrCreateByThread("stale-channel-session", "channel", scopeId("channel", CH));
     await f.sessions.addParticipant(session.id, "U2");
-    const beforeRemovalUrl = await gitUrl(f.base, d.id, "U2");
+    const beforeRemoval = await f.app.deploymentGitUrlFor(d.id, "U2", { secret: SECRET, baseUrl: f.base });
+    assert.ok(beforeRemoval);
     await f.directory.replaceChannels(
       [
         { channelId: CH, name: "built", isPrivate: true },
@@ -297,8 +271,8 @@ test("removed channel members keep stale-session read reach but lose write and m
       ],
     );
 
-    assert.equal((await gitPerm(f.base, d.id, "U2")).status, 403);
-    assert.equal(await pushStatus(beforeRemovalUrl), 403, "a write URL minted before removal is revoked at push time");
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U2"), null);
+    assert.equal(await pushStatus(beforeRemoval.url), 403, "a write URL minted before removal is revoked at push time");
     assert.equal(await f.deploy.canManageDeployment(d.id, "U2", scopeId("personal", "U2")), false);
 
     await f.acl.grant({
@@ -308,7 +282,7 @@ test("removed channel members keep stale-session read reach but lose write and m
       permission: "write",
       grantedBy: "U1",
     });
-    assert.equal((await gitPerm(f.base, d.id, "U2")).status, 403);
+    assert.equal(await f.app.deploymentGitPermissionFor(d.id, "U2"), null);
     assert.equal(await f.deploy.canManageDeployment(d.id, "U2", scopeId("personal", "U2")), false);
   } finally {
     await f.close();
@@ -336,7 +310,10 @@ test("authority follows the person: a creation-channel member manages the app fr
   try {
     const rename = await fetch(`${f.base}/v1/deployments/${d.id}/name`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-agent-capability": await capFor("U2") },
+      headers: {
+        ...signedHeaders(SECRET, "POST", `/v1/deployments/${d.id}/name`, JSON.stringify({ name: "renamed-from-dm" })),
+        [PORTAL_IDENTITY_HEADER]: mintPortalIdentity({ p: "U2", exp: Date.now() + 60_000 }, SECRET),
+      },
       body: JSON.stringify({ name: "renamed-from-dm" }),
     });
     assert.equal(rename.status, 200, await rename.text());
@@ -348,7 +325,10 @@ test("authority follows the person: a creation-channel member manages the app fr
 
     const denied = await fetch(`${f.base}/v1/deployments/${d.id}/archive`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-agent-capability": await capFor("U3") },
+      headers: {
+        ...signedHeaders(SECRET, "POST", `/v1/deployments/${d.id}/archive`, "{}"),
+        [PORTAL_IDENTITY_HEADER]: mintPortalIdentity({ p: "U3", exp: Date.now() + 60_000 }, SECRET),
+      },
       body: "{}",
     });
     assert.equal(denied.status, 403);

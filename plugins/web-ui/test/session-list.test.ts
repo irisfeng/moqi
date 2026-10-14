@@ -16,6 +16,7 @@ import {
   markWorking,
   recencyGroup,
   rowIndicators,
+  runStatus,
   recentProjectSeeds,
   reconcileSessions,
   splitPinned,
@@ -593,4 +594,14 @@ test("a goal lights the background chip with time worked, then the floor", () =>
   assert.equal(row?.goal, true);
   assert.equal(row?.label, "goal · 12m worked · 20m floor");
   assert.equal(backgroundLabel(0, 0, 0, 0, 0, { activeMs: 60_000 }, 9_999_999)?.label, "goal · 1m worked");
+});
+
+test("runStatus names one state per conversation, with waiting ahead of running", () => {
+  const idle = { working: false, awaiting: false };
+  assert.equal(runStatus({}, idle), null);
+  assert.equal(runStatus(null, idle), null);
+  assert.equal(runStatus({ lastTurnAt: 5 }, idle), "done");
+  assert.equal(runStatus({ lastTurnAt: 5, lastTurnFailed: true }, idle), "failed");
+  assert.equal(runStatus({ lastTurnAt: 5, lastTurnFailed: true }, { working: true, awaiting: false }), "running");
+  assert.equal(runStatus({ lastTurnAt: 5 }, { working: true, awaiting: true }), "waiting");
 });

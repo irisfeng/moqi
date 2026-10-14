@@ -1,17 +1,29 @@
 import { createPostgresNotifyBus } from "../persistence/postgres-notify-bus.ts";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { createPgPool } from "../persistence/pg-pool.ts";
+import { createPgPool, withPgTransaction } from "../persistence/pg-pool.ts";
 import { jsonbStringify } from "../persistence/durable-map.ts";
 import { pgTextSafe } from "../util/text.ts";
 import { isObj } from "../util/objects.ts";
 import type { TurnResult } from "../types.ts";
 import type { OrchestratorInput } from "../core/orchestrator.ts";
 import { resolveTurnOrigin } from "../core/turn-origin.ts";
-import type { EnqueueInput, EnqueueResult, ReapEvent, Run, RunDeliveryState, RunStore } from "./run-store.ts";
-import { isTerminal, releasesDedupKey } from "./run-store.ts";
+import type {
+  EnqueueInput,
+  EnqueueResult,
+  ReapEvent,
+  Run,
+  RunDeliveryState,
+  RunOutcome,
+  RunStore,
+} from "./run-store.ts";
+import { isTerminal, releasesDedupKey, runOutcome } from "./run-store.ts";
 import { errMessage, swallow } from "../util/errors.ts";
 import type { LedgerBegin, ToolLedger } from "./tool-ledger.ts";
+
+function likePrefix(prefix: string): string {
+  return `${prefix.replace(/[#%_]/g, (char) => `#${char}`)}%`;
+}
 
 export interface PostgresRuntime {
   runs: RunStore;
@@ -54,7 +66,11 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
   const events = new EventEmitter();
   events.setMaxListeners(0);
 
-  const { query: q, close: closePool } = createPgPool(
+  const {
+    query: q,
+    pool: queryPool,
+    close: closePool,
+  } = createPgPool(
     connectionString,
     [
       {
@@ -130,6 +146,12 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
         id: "runs/store/0006-terminal-finished",
         statements: [
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_terminal_finished ON runs(finished_at, id) WHERE status IN ('done','failed')`,
+        ],
+      },
+      {
+        id: "zz-qm-cn/runs/0001-idempotency-prefix",
+        statements: [
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_idempotency_prefix ON runs(idempotency_key text_pattern_ops)`,
         ],
       },
     ],
@@ -295,8 +317,36 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
     },
     ...(Number.isFinite(maxClaims) ? { maxClaims } : {}),
 
-    async enqueue({ sessionId, request, dedupKey, maxAttempts = 3 }: EnqueueInput): Promise<EnqueueResult> {
+    async enqueue({ sessionId, request, dedupKey, webBaseKey, maxAttempts = 3 }: EnqueueInput): Promise<EnqueueResult> {
       const id = randomUUID();
+      if (webBaseKey) {
+        if (!dedupKey) throw new Error("web send requires a deduplication key");
+        return withPgTransaction(await queryPool(), async (client) => {
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`web-send:${webBaseKey}`]);
+          const { rows: candidates } = await client.query(
+            `SELECT * FROM runs WHERE idempotency_key = $1 OR idempotency_key LIKE $2 ESCAPE '#'
+             ORDER BY created_at, id LIMIT 3`,
+            [webBaseKey, likePrefix(`${webBaseKey}:project-`)],
+          );
+          if (candidates.length)
+            return {
+              run: rowToRun(candidates[0]!),
+              deduped: true,
+              ...(candidates.length > 1 ? { ambiguous: true } : {}),
+            };
+          const inserted = await client.query(
+            `INSERT INTO runs(id, session_id, status, request, idempotency_key, attempts, max_attempts, created_at)
+             VALUES ($1,$2,'pending',$3,$4,0,$5,$6)
+             ON CONFLICT (idempotency_key) DO NOTHING
+             RETURNING *, pg_notify('qm_run_available', 'null')`,
+            [id, sessionId, jsonbStringify(request), dedupKey, maxAttempts, Date.now()],
+          );
+          if (inserted.rows[0]) return { run: rowToRun(inserted.rows[0]), deduped: false };
+          const existing = await client.query("SELECT * FROM runs WHERE idempotency_key = $1", [dedupKey]);
+          if (existing.rows[0]) return { run: rowToRun(existing.rows[0]), deduped: true };
+          throw new Error("web send deduplication could not be verified");
+        });
+      }
       for (;;) {
         const { rows } = await q(
           `INSERT INTO runs(id, session_id, status, request, idempotency_key, attempts, max_attempts, created_at)
@@ -314,6 +364,14 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
     async getByDedupKey(dedupKey) {
       const { rows } = await q(`SELECT * FROM runs WHERE idempotency_key = $1`, [dedupKey]);
       return rows[0] ? rowToRun(rows[0]) : null;
+    },
+
+    async findByDedupKeyPrefix(prefix, limit) {
+      const { rows } = await q(
+        "SELECT * FROM runs WHERE idempotency_key LIKE $1 ESCAPE '#' ORDER BY created_at, id LIMIT $2",
+        [likePrefix(prefix), Math.max(1, Math.min(limit, 3))],
+      );
+      return rows.map(rowToRun);
     },
 
     claim,
@@ -407,6 +465,28 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
         [threadRef, Boolean(opts?.excludePrivateMessages)],
       );
       return rows[0] ? rowToRun(rows[0]) : null;
+    },
+    async latestOutcomes(threadRefs) {
+      const outcomes = new Map<string, RunOutcome>();
+      if (!threadRefs.length) return outcomes;
+      const { rows } = await q(
+        `SELECT wanted.session_id, latest.status, latest.result_status, latest.finished_at
+           FROM unnest($1::text[]) AS wanted(session_id)
+           CROSS JOIN LATERAL (
+             SELECT status, result::jsonb->>'status' AS result_status, finished_at FROM runs
+              WHERE runs.session_id = wanted.session_id ORDER BY created_at DESC, seq DESC LIMIT 1
+           ) latest`,
+        [[...new Set(threadRefs)]],
+      );
+      for (const r of rows) {
+        const outcome = runOutcome({
+          status: r.status as Run["status"],
+          result: r.result_status != null ? ({ status: r.result_status } as TurnResult) : null,
+          finishedAt: r.finished_at != null ? Number(r.finished_at) : null,
+        });
+        if (outcome) outcomes.set(r.session_id as string, outcome);
+      }
+      return outcomes;
     },
     async pendingReturns(limit = 100, afterId = "") {
       const { rows } = await q(

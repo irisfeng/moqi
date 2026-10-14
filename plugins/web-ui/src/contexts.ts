@@ -1,3 +1,4 @@
+import { createListPagination } from "./list-pagination";
 import { previewFile } from "./file-open.ts";
 import { peopleResults, type DirectoryMatch } from "./people-results";
 import { html, nothing, render, type TemplateResult } from "lit";
@@ -7,9 +8,12 @@ import {
   Folder,
   FolderPlus,
   Hash,
+  Flame,
   Lock,
+  Star,
   Plus,
   Search,
+  Trash2,
   User,
   UserPlus,
   Users,
@@ -25,13 +29,20 @@ import {
   type CoreSession,
   fileContentUrl,
 } from "./core-bridge";
-import { UI_BASE } from "./deep-link";
-import { errMessage } from "../../chassis/src/errors";
+import { deepLinkPath, isPlainLeftClick, UI_BASE } from "./deep-link";
+import { splitProjectFiles } from "./project-files.ts";
+import { userErrorMessage as errMessage } from "./user-error";
 import { actionSnippet, fieldSelect, formatBytes, icon, initials, menuSelect, relTime } from "./ui";
-import { appState, replacePanePreservingFocus, switchView, syncUrlFromState } from "./shell";
+import {
+  appState,
+  blockUnsentAttachmentNavigation,
+  replacePanePreservingFocus,
+  switchView,
+  syncUrlFromState,
+} from "./shell";
 import { startNewChat } from "./sessions";
 import { groupDmTitle, openSession, refreshSessions, sessionsState, slackLogo, surfaceOf } from "./sessions";
-import { activityOf } from "./session-list";
+import { activityOf, compareProjects } from "./session-list";
 import type { WebhookView } from "./webhooks";
 import type { CronView } from "./crons";
 import { cronRunSummary, cronRunSummaryTitle, cronScheduleSummary } from "./cron-format";
@@ -40,6 +51,13 @@ import { ambientPolicySection, loadAmbientPolicy, resetAmbientPolicy } from "./a
 import { contextModelSection, loadContextModel, resetContextModel } from "./context-model";
 import { channelHeaderSection, loadChannelHeader, resetChannelHeader } from "./channel-header";
 import { tip } from "./tooltip";
+import { departmentPicker, resetDepartmentPicker } from "./project-department";
+import {
+  loadProjectSummaries,
+  projectPinButton,
+  projectSummaries,
+  resetProjectCollaboration,
+} from "./project-collaboration";
 
 interface ScopeFile {
   id: string;
@@ -48,6 +66,9 @@ interface ScopeFile {
   sizeBytes: number;
   createdAt: number;
   openable: boolean;
+  delivered?: boolean;
+  canTrash?: boolean;
+  session?: { id: string; title: string | null };
 }
 interface ScopeDeployment {
   id: string;
@@ -115,9 +136,16 @@ let contextsResetSeq = 0;
 let contextsFetchSeq = 0;
 let contextsQuery = "";
 let contextsWorkspaceFilter: "active" | "all" = "active";
+let contextsProjectFilter: "all" | "mine" = "all";
 
 async function fetchContexts(): Promise<CoreContext[]> {
   const fetchSeq = ++contextsFetchSeq;
+  if (appState.currentView === "contexts")
+    void loadProjectSummaries()
+      .then(() => {
+        if (fetchSeq === contextsFetchSeq && appState.currentView === "contexts") drawContexts();
+      })
+      .catch(() => undefined);
   const result = await api<{ contexts: CoreContext[] }>("/api/contexts").catch((error: unknown) => {
     if (fetchSeq !== contextsFetchSeq) return null;
     throw error;
@@ -130,6 +158,8 @@ async function fetchContexts(): Promise<CoreContext[]> {
 }
 
 export function resetContextsState(): void {
+  resetProjectCollaboration();
+  resetDepartmentPicker();
   contextsState.list = [];
   contextsState.loaded = false;
   contextsState.loadedAt = 0;
@@ -162,6 +192,7 @@ export function resetContextsState(): void {
   createProjectOpener = null;
   contextsQuery = "";
   contextsWorkspaceFilter = "active";
+  contextsProjectFilter = "all";
 }
 
 export async function renderContexts(): Promise<void> {
@@ -260,6 +291,10 @@ export function scopeTitle(scopeId: string | null, fallbackName?: string | null)
   return metaForScope(scopeId, fallbackName).title;
 }
 
+export function scopeGlyph(scopeId: string | null, fallbackName?: string | null): IconNode {
+  return metaForScope(scopeId, fallbackName).glyph;
+}
+
 export function scopeChip(scopeId: string | null, fallbackName?: string | null): TemplateResult {
   const { title, glyph } = metaForScope(scopeId, fallbackName);
   return html`<span class="scope-chip" ${tip(`In ${title}`)}
@@ -304,6 +339,8 @@ function drawContexts(): void {
   if (dialog && !dialog.open) dialog.showModal();
 }
 
+const paginateProjects = createListPagination();
+
 function gridTpl(): TemplateResult {
   const status = contextsNotice || (contextsLoading && contextsState.list.length === 0 ? "Loading projects…" : "");
   const q = contextsQuery.trim().toLowerCase();
@@ -311,13 +348,18 @@ function gridTpl(): TemplateResult {
     const meta = contextMeta(context);
     return (
       (!q || `${meta.title} ${meta.sub}`.toLowerCase().includes(q)) &&
+      (contextsProjectFilter === "all" || isProjectOwner(context)) &&
       (contextsWorkspaceFilter === "all" ||
         context.kind === "personal" ||
         Boolean(context.project) ||
         Boolean(context.sessionCount))
     );
   };
-  const projects = contextsState.list.filter(matches);
+  const standing = (context: CoreContext) => ({
+    ...(context.project ? projectSummaries.get(context.project.id) : undefined),
+    lastActivityAt: context.lastActivityAt,
+  });
+  const projects = contextsState.list.filter(matches).sort((a, b) => compareProjects(standing(a), standing(b)));
   const groupOf = (context: CoreContext) => {
     if (context.kind === "personal") return "personal";
     return context.project ? "web" : "slack";
@@ -329,20 +371,31 @@ function gridTpl(): TemplateResult {
   ]
     .map((g) => ({ ...g, items: projects.filter((context) => groupOf(context) === g.key) }))
     .filter((g) => g.items.length > 0);
-  const projectsFiltered = Boolean(q);
+  const pagination = paginateProjects(
+    groups.flatMap((g) => g.items),
+    JSON.stringify([q, contextsProjectFilter, contextsWorkspaceFilter]),
+    drawContexts,
+  );
+  const pageItems = new Set(pagination.rows);
+  const pageGroups = groups
+    .map((g) => ({ ...g, items: g.items.filter((item) => pageItems.has(item)) }))
+    .filter((g) => g.items.length > 0);
+  const projectsFiltered = Boolean(q) || contextsProjectFilter === "mine";
   let projectList: TemplateResult | typeof nothing = nothing;
   if (projects.length)
-    projectList = html`<div class="project-list">
-      ${groups.map(
-        (g) =>
-          html`<section class="project-group">
-            <div class="project-group-head">
-              ${g.label} <span class="project-group-count">· ${g.items.length}</span>
-            </div>
-            ${g.items.map(contextRow)}
-          </section>`,
-      )}
-    </div>`;
+    projectList = html`${pagination.controls}
+      <div class="project-list">
+        ${pageGroups.map(
+          (g) =>
+            html`<section class="project-group">
+              <div class="project-group-head">
+                ${g.label} <span class="project-group-count">· ${g.items.length}</span>
+              </div>
+              ${g.items.map(contextRow)}
+            </section>`,
+        )}
+      </div>
+      ${pagination.controls}`;
   else if (!contextsLoading) {
     projectList = html`<div class="empty compact project-empty">
       ${projectsFiltered ? "No projects match your search." : "No projects yet."}
@@ -378,6 +431,22 @@ function gridTpl(): TemplateResult {
       </div>
       <div class="list-toolbar">
         <label class="list-select"
+          ><span>Scope</span>${fieldSelect({
+            compact: true,
+            ariaLabel: "Project scope",
+            focusKey: "contexts-project-filter",
+            value: contextsProjectFilter,
+            onChange: (value) => {
+              contextsProjectFilter = value as typeof contextsProjectFilter;
+              drawContexts();
+            },
+            options: [
+              html`<option value="all" ?selected=${contextsProjectFilter === "all"}>All projects</option>`,
+              html`<option value="mine" ?selected=${contextsProjectFilter === "mine"}>Started by me</option>`,
+            ],
+          })}</label
+        >
+        <label class="list-select"
           ><span>Show</span>${fieldSelect({
             compact: true,
             value: contextsWorkspaceFilter,
@@ -398,16 +467,23 @@ function gridTpl(): TemplateResult {
 function contextRow(c: CoreContext): TemplateResult {
   const { title, sub, glyph } = contextMeta(c);
   const count = c.sessionCount === 1 ? "1 conversation" : `${c.sessionCount} conversations`;
+  const summary = c.project ? projectSummaries.get(c.project.id) : undefined;
   const meta = [c.project ? sub : "", count, c.lastActivityAt ? `active ${relTime(c.lastActivityAt)}` : ""]
     .filter(Boolean)
     .join(" · ");
   return html`
-    <button class="context-row" type="button" ${tip(sub)} @click=${() => selectContext(c.scopeId)}>
-      <span class="context-glyph">${icon(glyph, 15)}</span>
-      <span class="context-row-title" dir="auto">${title}</span>
-      ${c.isPrivate ? html`<span class="context-lock" ${tip("Private channel")}>${icon(Lock, 12)}</span>` : nothing}
-      <span class="context-row-meta">${meta}</span>
-    </button>
+    <div class="context-row-wrap">
+      <button class="context-row" type="button" ${tip(sub)} @click=${() => selectContext(c.scopeId)}>
+        <span class="context-glyph">${icon(glyph, 15)}</span>
+        <span class="context-row-title" dir="auto">${title}</span>
+        ${c.isPrivate ? html`<span class="context-lock" ${tip("Private channel")}>${icon(Lock, 12)}</span>` : nothing}
+        ${summary?.urgent ? html`<span class="context-flag urgent">${icon(Flame, 11)}Urgent</span>` : nothing}
+        ${summary?.important ? html`<span class="context-flag important">${icon(Star, 11)}Important</span>` : nothing}
+        ${(summary?.tags ?? []).map((tag) => html`<span class="context-tag" dir="auto">${tag}</span>`)}
+        <span class="context-row-meta">${meta}</span>
+      </button>
+      ${c.project ? projectPinButton(c.project.id, drawContexts, () => void refreshSessions()) : nothing}
+    </div>
   `;
 }
 
@@ -432,6 +508,7 @@ function detailTpl(c: CoreContext): TemplateResult {
           </div>
         </div>
         <div class="context-detail-actions">
+          ${c.project ? projectPinButton(c.project.id, drawContexts, () => void refreshSessions()) : nothing}
           ${
             c.project
               ? html`<button class="btn context-add-member" type="button" @click=${() => toggleMemberPicker(c)}>
@@ -501,7 +578,7 @@ function projectPeople(context: CoreContext): string[] {
 }
 
 function isProjectOwner(context: CoreContext): boolean {
-  return context.project?.ownerId === appState.me?.user;
+  return Boolean(appState.me?.user) && context.project?.ownerId === appState.me?.user;
 }
 
 function memberLabel(context: CoreContext, principalId: string): string {
@@ -724,11 +801,34 @@ function projectMembersSection(context: CoreContext): TemplateResult {
                     </button>`
                   : nothing
               }
+              ${
+                principalId === appState.me?.user &&
+                principalId !== project.ownerId &&
+                !viaChannel &&
+                !appState.me?.impersonatedBy
+                  ? html`<button
+                      class="btn compact project-leave"
+                      type="button"
+                      ?disabled=${contextsState.memberBusy}
+                      @click=${() => void leaveProject(context)}
+                    >
+                      Leave project
+                    </button>`
+                  : nothing
+              }
             </div>
           `;
         })}
       </div>
       ${pickerOpen ? memberPicker(context) : nothing}
+      ${
+        pickerOpen && isProjectOwner(context) && !appState.me?.impersonatedBy
+          ? departmentPicker(context.project!.id, drawContexts, async () => {
+              await ensureContexts(true);
+              drawContexts();
+            })
+          : nothing
+      }
       ${contextsState.memberError ? html`<div class="project-member-status error" aria-live="polite">${contextsState.memberError}</div>` : nothing}
     </section>
   `;
@@ -763,6 +863,7 @@ function memberPicker(context: CoreContext): TemplateResult {
           .value=${contextsState.memberQuery}
           ?disabled=${contextsState.memberBusy}
           @input=${(event: InputEvent) => {
+            if (event.isComposing) return;
             contextsState.memberQuery = (event.currentTarget as HTMLInputElement).value;
             scheduleMemberSearch(context);
           }}
@@ -813,10 +914,11 @@ function resourceSections(scopeId: string): TemplateResult | typeof nothing {
   }
   const manage = r.manageable;
   return html`
-    ${r.files.length ? resourceGroup("Files", r.files.map(fileRow)) : nothing}
+    ${r.files.length ? filesPanel(scopeId, r.files) : nothing}
     ${
       r.skills.length
         ? resourceGroup(
+            "skills",
             "Skills",
             r.skills.map((s) => skillRow(s, manage)),
           )
@@ -825,13 +927,14 @@ function resourceSections(scopeId: string): TemplateResult | typeof nothing {
     ${
       r.crons.length
         ? resourceGroup(
+            "crons",
             "Crons",
             r.crons.map((c) => cronRow(c, manage)),
           )
         : nothing
     }
-    ${r.webhooks.length ? resourceGroup("Webhooks", r.webhooks.map(webhookRow)) : nothing}
-    ${r.deployments.length ? resourceGroup("Apps", r.deployments.map(deploymentRow)) : nothing}
+    ${r.webhooks.length ? resourceGroup("webhooks", "Webhooks", r.webhooks.map(webhookRow)) : nothing}
+    ${r.deployments.length ? resourceGroup("deploys", "Apps", r.deployments.map(deploymentRow)) : nothing}
   `;
 }
 
@@ -874,10 +977,9 @@ async function deleteScopeSkill(id: string): Promise<void> {
   }
 }
 
-function resourceGroup(label: string, rows: TemplateResult[]): TemplateResult {
-  const view = label === "Apps" ? "deploys" : label.toLowerCase();
+function resourceGroup(view: string, label: string, rows: TemplateResult[]): TemplateResult {
   const scope = contextsState.resourcesScope;
-  const supportsScopeLink = view === "files" || view === "deploys";
+  const supportsScopeLink = view === "deploys";
   const href = `${UI_BASE}/${encodeURIComponent(view)}${scope && supportsScopeLink ? `?scope=${encodeURIComponent(scope)}` : ""}`;
   return html`
     <section class="context-panel context-resource-group">
@@ -890,11 +992,98 @@ function resourceGroup(label: string, rows: TemplateResult[]): TemplateResult {
   `;
 }
 
+let fileQuery = "";
+let fileQueryScope = "";
+
+function filesPanel(scopeId: string, files: ScopeFile[]): TemplateResult {
+  if (fileQueryScope !== scopeId) {
+    fileQueryScope = scopeId;
+    fileQuery = "";
+  }
+  const { deliverables, working } = splitProjectFiles(files, fileQuery);
+  const group = (label: string, rows: ScopeFile[], empty: string): TemplateResult => html`
+    <h3 class="context-file-group">${label} <span class="project-group-count">· ${rows.length}</span></h3>
+    <div class="context-session-list">
+      ${rows.length ? rows.map(fileRow) : html`<div class="empty compact">${empty}</div>`}
+    </div>
+  `;
+  return html`
+    <section class="context-panel context-resource-group">
+      <div class="context-panel-heading context-resource-heading">
+        <h2 class="context-panel-title">Files</h2>
+        <a href=${`${UI_BASE}/files?scope=${encodeURIComponent(scopeId)}`}>View all</a>
+      </div>
+      <label class="list-search context-file-search"
+        >${icon(Search, 16)}<span class="sr-only">Search this project's files</span
+        ><input
+          data-focus-key="context-file-search"
+          type="search"
+          aria-label="Search this project's files"
+          placeholder="Search files…"
+          .value=${fileQuery}
+          @input=${(event: InputEvent) => {
+            fileQuery = (event.currentTarget as HTMLInputElement).value;
+            drawContexts();
+          }}
+      /></label>
+      ${group(
+        "Deliverables",
+        deliverables,
+        fileQuery ? "No deliverables match." : "Files the assistant attaches to a reply appear here.",
+      )}
+      ${group(
+        "Working files",
+        working,
+        fileQuery ? "No working files match." : "Uploads and files written along the way appear here.",
+      )}
+    </section>
+  `;
+}
+
+function fileOrigin(session: NonNullable<ScopeFile["session"]>): TemplateResult {
+  return html`<a
+    class="context-file-origin"
+    href=${deepLinkPath(UI_BASE, "chats", session.id)}
+    dir="auto"
+    ${tip("Open the conversation this file came from")}
+    @click=${(event: MouseEvent) => {
+      if (!isPlainLeftClick(event)) return;
+      if (blockUnsentAttachmentNavigation()) {
+        event.preventDefault();
+        return;
+      }
+      const known = sessionsState.list.find((s) => s.id === session.id);
+      if (!known) return;
+      event.preventDefault();
+      void openFromContext(known);
+    }}
+    >${session.title || "Untitled conversation"}</a
+  >`;
+}
+
+async function trashProjectFile(f: ScopeFile): Promise<void> {
+  const key = `file:${f.id}`;
+  if (resourceBusy.has(key)) return;
+  resourceBusy.add(key);
+  drawContexts();
+  try {
+    await api(`/api/files/${encodeURIComponent(f.id)}`, { method: "DELETE" });
+    const scope = contextsState.resourcesScope;
+    if (scope) await loadScopeResources(scope);
+  } catch (e) {
+    contextsState.resourcesNotice = errMessage(e, "Failed to move the file to the recycle bin.");
+  } finally {
+    resourceBusy.delete(key);
+    drawContexts();
+  }
+}
+
 function fileRow(f: ScopeFile): TemplateResult {
   return html`
     <div class="context-session-row context-resource-row">
       <span class="context-session-title" dir="auto">${f.name}</span>
       <span class="context-session-meta">
+        ${f.session ? fileOrigin(f.session) : nothing}
         <span>${formatBytes(f.sizeBytes)}</span>
         <span>${relTime(f.createdAt)}</span>
         ${
@@ -907,6 +1096,20 @@ function fileRow(f: ScopeFile): TemplateResult {
                 rel="noreferrer"
                 >Open</a
               >`
+            : nothing
+        }
+        ${
+          f.canTrash
+            ? html`<button
+                class="project-icon-button"
+                type="button"
+                aria-label=${`Move ${f.name} to the recycle bin`}
+                ${tip("Move to the recycle bin")}
+                ?disabled=${resourceBusy.has(`file:${f.id}`)}
+                @click=${() => void trashProjectFile(f)}
+              >
+                ${icon(Trash2, 14)}
+              </button>`
             : nothing
         }
       </span>
@@ -1182,6 +1385,7 @@ async function createProject(event: SubmitEvent): Promise<void> {
 }
 
 function toggleMemberPicker(context: CoreContext): void {
+  resetDepartmentPicker();
   memberSearchSeq++;
   cancelMemberSearchTimer();
   contextsState.memberProjectId =
@@ -1201,6 +1405,7 @@ function toggleMemberPicker(context: CoreContext): void {
 }
 
 function closeMemberPicker(): void {
+  resetDepartmentPicker();
   memberSearchSeq++;
   cancelMemberSearchTimer();
   contextsState.memberProjectId = null;
@@ -1309,6 +1514,35 @@ async function addProjectMember(context: CoreContext, member: DirectoryMatch): P
   } catch (error) {
     if (resetSeq !== contextsResetSeq) return;
     contextsState.memberError = errMessage(error, "Couldn't add that person.");
+  } finally {
+    if (resetSeq === contextsResetSeq) {
+      contextsState.memberBusy = false;
+      drawContexts();
+    }
+  }
+}
+
+async function leaveProject(context: CoreContext): Promise<void> {
+  const self = appState.me?.user;
+  if (!context.project || !self || contextsState.memberBusy) return;
+  const name = context.name || "this project";
+  if (!window.confirm(`Leave ${name}? You will no longer see its conversations and files.`)) return;
+  const resetSeq = contextsResetSeq;
+  contextsState.memberBusy = true;
+  contextsState.memberError = "";
+  drawContexts();
+  try {
+    await api(`/api/projects/${encodeURIComponent(context.project.id)}/members/${encodeURIComponent(self)}`, {
+      method: "DELETE",
+    });
+    if (resetSeq !== contextsResetSeq) return;
+    contextsState.memberBusy = false;
+    selectContext(null);
+    await ensureContexts(true);
+    void refreshSessions();
+  } catch (error) {
+    if (resetSeq !== contextsResetSeq) return;
+    contextsState.memberError = errMessage(error, "Couldn't leave the project.");
   } finally {
     if (resetSeq === contextsResetSeq) {
       contextsState.memberBusy = false;

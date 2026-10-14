@@ -36,6 +36,7 @@ export interface ToolPayload {
   unscreened?: boolean;
   quarantined?: boolean;
   action?: string;
+  text?: string;
   process_id?: string;
   sandbox_id?: string | null;
   monitor_id?: string;

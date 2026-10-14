@@ -1,4 +1,5 @@
 import { modelRegistry, lookupRegistryModel, enableBuiltinModel } from "./admin/model-registry.ts";
+import { adoptionReport, adoptionRoster, adoptionScenarioExport } from "./admin/adoption.ts";
 import { type ApiCtx, type Route } from "./route.ts";
 import {
   getAdminResources,
@@ -30,6 +31,8 @@ import {
   listKeychainStatus,
   listUsers,
   resetUserToBrandNew,
+  resetUserPassword,
+  getUserPassword,
   revokeAdminGrant,
   revokeExternalUser,
   searchDirectory,
@@ -57,6 +60,7 @@ import { deleteMcpServer, getMcpServers, putMcpServer } from "./admin/mcp-server
 import { listSecurityFlags, releaseSecurityTaint } from "./admin/security.ts";
 import { spend } from "./admin/spend.ts";
 import { createPrincipalLink, deletePrincipalLink, listPrincipalLinks } from "./admin/principal-links.ts";
+import { createAnnouncement, listAnnouncements, putAnnouncement } from "./admin/announcements.ts";
 
 const timed =
   (handle: (ctx: ApiCtx) => void | Promise<void>) =>
@@ -80,6 +84,13 @@ const routes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "POST", path: "/v1/slack/managed/installation", auth: "public", handle: managedSlackRequest },
   { method: "DELETE", path: "/v1/slack/managed/installation", auth: "public", handle: managedSlackRequest },
   { method: "POST", path: "/v1/slack/managed/events", auth: "public", handle: managedSlackRequest },
+  { method: "GET", path: "/v1/admin/users/:principalId/password", auth: "source", handle: getUserPassword },
+  { method: "POST", path: "/v1/admin/users/:principalId/password-reset", auth: "source", handle: resetUserPassword },
+  { method: "GET", path: "/v1/admin/adoption", auth: "source", handle: adoptionReport },
+  { method: "GET", path: "/v1/admin/adoption/export", auth: "source", handle: adoptionReport },
+  { method: "GET", path: "/v1/admin/adoption/scenarios/export", auth: "source", handle: adoptionScenarioExport },
+  { method: "GET", path: "/v1/admin/adoption/roster", auth: "source", handle: adoptionRoster },
+  { method: "PUT", path: "/v1/admin/adoption/roster", auth: "source", handle: adoptionRoster },
   { method: "GET", path: "/v1/admin/slack-installation", auth: "either", handle: getSlackInstallation },
   { method: "GET", path: "/v1/admin/slack-emoji", auth: "either", handle: getSlackEmojiList },
   { method: "PUT", path: "/v1/admin/slack-installation", auth: "either", handle: putSlackInstallation },
@@ -167,6 +178,9 @@ const routes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "DELETE", path: "/v1/admin/external-users/:email", auth: "either", handle: revokeExternalUser },
   { method: "POST", path: "/v1/admin/impersonate/stop", auth: "either", handle: stopImpersonation },
   { method: "POST", path: "/v1/admin/impersonate", auth: "either", handle: startImpersonation },
+  { method: "POST", path: "/v1/admin/announcements", auth: "either", handle: createAnnouncement },
+  { method: "GET", path: "/v1/admin/announcements", auth: "either", handle: listAnnouncements },
+  { method: "PUT", path: "/v1/admin/announcements/:id", auth: "either", handle: putAnnouncement },
 ];
 
 export const adminRoutes: ReadonlyArray<Route<ApiCtx>> = routes.map((r) => ({ ...r, handle: timed(r.handle) }));

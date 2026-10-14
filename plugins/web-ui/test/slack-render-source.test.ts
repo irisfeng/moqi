@@ -48,7 +48,7 @@ test("read-only slack sessions strip directives and decode user wire at render",
   assert.match(chat, /return isReadOnlySlackView\(\) \? stripSlackDirectives\(text\) : text;/, "assistant text strips");
   assert.match(
     chat,
-    /isReadOnlySlackView\(\) \? slackWireBubble\(messageText\(message\)\) : markdown\(messageText\(message\)\)/,
+    /isReadOnlySlackView\(\) \? slackWireBubble\(messageText\(message\)\) : userText\(messageText\(message\)\)/,
     "user bubbles wire-decode in a read-only Slack view",
   );
 });

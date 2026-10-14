@@ -689,6 +689,31 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
     ),
   },
   {
+    id: "webui-home",
+    kind: "custom",
+    target: "org",
+    clearable: true,
+    label:
+      "Web UI home experience (welcome content, example cards, tips, nav grouping) as org-level JSON. Clear to restore built-in default behavior.",
+    apply: async (ctx, _actor, scope) => {
+      const bad = orgOnly(scope, "webui-home is org-wide");
+      if (bad) return bad;
+      if (!ctx.deps.webuiHome) return { error: "webui-home store unavailable", status: 404 };
+      const body = ctx.body as { home?: unknown; clear?: unknown };
+      const value = body.clear === true ? null : body.home;
+      if (value === undefined) return { error: "webui-home requires { home: object } or { clear: true }" };
+      if (value !== null) {
+        if (typeof value !== "object" || value === null || !("welcome" in value))
+          return { error: "home must be an object with a welcome field" };
+        if (JSON.stringify(value).length > 200_000) return { error: "home must be at most 200000 characters of JSON" };
+        await ctx.deps.webuiHome.put(scope, value);
+      } else {
+        await ctx.deps.webuiHome.delete(scope);
+      }
+      return { ok: true };
+    },
+  },
+  {
     id: "people-directory-url",
     kind: "string",
     target: "org",

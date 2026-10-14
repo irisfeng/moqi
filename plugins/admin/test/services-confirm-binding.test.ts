@@ -6,7 +6,7 @@ const html = readAdminSource();
 
 test("view services wrap window.confirm instead of passing it detached", () => {
   assert.doesNotMatch(html, /^\s+confirm,\s*$/m);
-  assert.equal(html.match(/confirm: \(message\) => window\.confirm\(message\)/g)?.length, 2);
+  assert.equal(html.match(/confirm: \(message\) => window\.confirm\(message\)/g)?.length, 4);
 });
 
 test("calling services.confirm as a method reaches window.confirm", () => {

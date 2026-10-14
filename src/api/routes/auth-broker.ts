@@ -102,6 +102,7 @@ async function brokerSession(ctx: ApiCtx): Promise<void> {
   if (ctx.pathname.endsWith("/revoke")) {
     if (ctx.actor?.p.toLowerCase() !== email && !(await authorizeAdmin(ctx, orgScope()))) return;
     await deps.brokerSessions.revoke(email);
+    await deps.loginPasswords?.revokeAllSessions(email);
     audit(deps, {
       principalId: ctx.actor?.p ?? "admin",
       action: "auth.broker.revoke",

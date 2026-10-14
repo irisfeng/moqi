@@ -49,8 +49,18 @@ test("ORG_BRAND_* parses into a validated branding default", () => {
   );
   assert.equal(loadConfig({ ORG_BRAND_ACCENT: "#abcde" }).brandingDefault, undefined);
   assert.deepEqual(loadConfig({ ORG_BRAND_MARK: 'a"bc' }).brandingDefault, { mark: "ab" });
+  assert.deepEqual(loadConfig({ ORG_BRAND_MARK_URL: "https://cdn.example.com/mark.svg" }).brandingDefault, {
+    markUrl: "https://cdn.example.com/mark.svg",
+  });
+  assert.equal(loadConfig({ ORG_BRAND_MARK_URL: "http://cdn.example.com/mark.svg" }).brandingDefault, undefined);
   assert.equal(loadConfig({ ORG_BRAND_SELF_LABEL: "x".repeat(80) }).brandingDefault?.selfLabel?.length, 40);
   assert.deepEqual(loadConfig({ ORG_BRAND_ORG_NAME: "Acme Corp" }).brandingDefault, { orgName: "Acme Corp" });
+  assert.deepEqual(
+    loadConfig({ ORG_BRAND_THEME: '{"light":{"background":"#f6f4ee","bad":"x"},"dark":{"background":"#15181c"}}' })
+      .brandingDefault,
+    { theme: { light: { background: "#f6f4ee" }, dark: { background: "#15181c" } } },
+  );
+  assert.throws(() => loadConfig({ ORG_BRAND_THEME: "{light" }), /ORG_BRAND_THEME must be JSON/);
   assert.equal(loadConfig({ ORG_BRAND_ORG_NAME: "x".repeat(80) }).brandingDefault?.orgName?.length, 40);
   assert.deepEqual(loadConfig({ ORG_BRAND_SELF_LABEL: "{{straylight}}" }).brandingDefault, { selfLabel: "straylight" });
 });
