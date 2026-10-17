@@ -75,11 +75,19 @@ test("the sidebar mark is drawn by the stylesheet, so the organisation's text ma
   const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
   assert.match(css, /\.brand-mark::before \{\s*content: var\(--brand-mark\);/);
   assert.match(css, /\.brand-mark-half \{[^}]*var\(--brand-mark-image, url\("\.\/assets\/brand-mark\.svg"\)\)/);
-  assert.match(css, /\.brand-mark-half:first-child \{\s*clip-path: inset\(0 42% 0 0\);/);
   assert.match(
     css,
-    /\.brand-mark-half:last-child \{\s*clip-path: inset\(0 0 0 58%\);/,
-    "the halves meet without a gap",
+    /\.brand-mark-half:first-child \{\s*clip-path: polygon\(0 0, 42% 0, 42% 46%, 58% 46%, 58% 100%, 0 100%\);/,
+  );
+  assert.match(
+    css,
+    /\.brand-mark-half:last-child \{\s*clip-path: polygon\(42% 0, 100% 0, 100% 100%, 58% 100%, 58% 46%, 42% 46%\);/,
+    "the halves meet along the tally's seam without a gap",
+  );
+  assert.match(
+    css,
+    /\.dark \.brand-mark-half \{\s*background-image: var\(--brand-mark-image, url\("\.\/assets\/brand-mark-dark\.svg"\)\);/,
+    "dark mode swaps to the light-on-dark mark unless the organisation set its own image",
   );
   assert.match(css, /\.brand-mark::before \{[^}]*z-index: 1;/, "a text mark covers the image halves");
 });

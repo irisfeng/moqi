@@ -42,6 +42,21 @@ test("tracked pack: fast-path skips reconcile when HEAD == last good commit", as
   assert.deepEqual(calls, [], "an unchanged tracked pack is not reconciled (no full clone)");
 });
 
+test("tracked pack on a commit ref: the commit cannot move, so it is not re-imported every tick", async () => {
+  const packs = createSkillPackStore();
+  const pinned = "0123456789abcdef0123456789abcdef01234567";
+  const s = await packs.create({ ...base, ref: pinned.slice(0, 12) });
+  await packs.recordImport(s.id, { at: 0, commit: pinned, status: "ok" });
+  const calls: string[] = [];
+  const engine = createSkillSyncEngine({
+    packs,
+    fetcher: fakeFetcher({ [s.id]: "f".repeat(40) }),
+    reconcile: async (id) => void calls.push(id),
+  });
+  await engine.tick();
+  assert.deepEqual(calls, [], "a tracked commit is already imported; the branch HEAD is irrelevant");
+});
+
 test("tracked pack: reconciles when HEAD has advanced", async () => {
   const packs = createSkillPackStore();
   const s = await packs.create(base);

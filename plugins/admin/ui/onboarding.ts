@@ -1,4 +1,5 @@
 import { html, nothing, render } from "lit";
+import { slackOff } from "./shared.ts";
 type Data = Record<string, any>;
 const providerLabels: Record<string, string> = {
   anthropic: "Anthropic",
@@ -438,20 +439,25 @@ export class Onboarding {
     return html`<label>${fieldLabels[name]} ${input}</label>`;
   }
   template(kind: string) {
-    if (kind === "steps")
+    if (kind === "steps") {
+      const keys = slackOff() ? ["model", "oauth"] : ["model", "slack", "oauth"];
+      const titles = slackOff()
+        ? ["1. Model provider", "2. OAuth apps"]
+        : ["1. Model provider", "2. Slack app", "3. OAuth apps"];
       return html`<div class="setup-grid">
-        ${["model", "slack", "oauth"].map(
+        ${keys.map(
           (key, i) =>
             html`<section class="setup-step">
               <span class=${"badge " + this.steps[key].tone} id=${"onboarding-" + key + "-badge"}
                 >${this.steps[key].text}</span
               >
-              <h2>${["1. Model provider", "2. Slack app", "3. OAuth apps"][i]}</h2>
+              <h2>${titles[i]}</h2>
               <p id=${"onboarding-" + key + "-summary"}>${this.steps[key].summary}</p>
               ${key === "slack" ? html`<div class="foot"><a class="header-button" id="onboarding-slack-create" href=${this.steps.slack.url} target="_blank" rel="noopener noreferrer">Create Slack app ↗</a><button type="button" data-onboarding-target="slack" @click=${() => this.context.navigate("slack")}>Enter Slack tokens</button></div>` : nothing}${key === "oauth" ? html`<div class="foot"><button type="button" data-onboarding-target="oauth" @click=${() => this.context.navigate("oauth")}>Configure OAuth apps</button></div>` : nothing}
             </section>`,
         )}
       </div>`;
+    }
     if (kind === "provider") {
       const choices = this.providers.length
         ? this.providers

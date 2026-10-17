@@ -32,6 +32,7 @@ EMAIL_DOMAINS = {
     "acme.com",
     "b.com",
     "li.example",
+    "partner.com",
     "users.noreply.github.com",
 }
 EMAIL_TLDS = {"test", "example", "invalid", "localhost", "internal", "local"}

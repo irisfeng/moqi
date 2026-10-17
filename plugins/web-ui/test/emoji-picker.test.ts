@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filterEmoji, groupEmoji, matchesQuery } from "../src/emoji-picker.ts";
+import { emojiSuggestions, emojiToken, filterEmoji, groupEmoji, matchesQuery } from "../src/emoji-picker.ts";
 import { EMOJI_GROUPS, EMOJI_ROWS } from "../src/emoji-data.ts";
 
 test("the curated emoji map is built with short names, unicode chars, and known groups", () => {
@@ -43,4 +43,48 @@ test("grouping keeps the configured group order and drops empty groups", () => {
   const expected = EMOJI_GROUPS.filter((g) => order.includes(g));
   assert.deepEqual(order, expected);
   for (const g of grouped) assert.ok(g.rows.length > 0);
+});
+
+test("a bare colon after a space, at the start or after Chinese punctuation opens the common emoji", () => {
+  for (const value of ["hello :", ":", "好的，:", "hello ："]) {
+    const token = emojiToken(value, value.length);
+    assert.equal(token?.query, "", value);
+    assert.equal(token?.complete, false, value);
+  }
+  assert.deepEqual(
+    emojiSuggestions("").map((row) => row.c),
+    ["👍", "😄", "😂", "❤️", "🎉", "🙏", "👌", "🔥"],
+  );
+});
+
+test("one letter is enough, a full-width colon works, and a closing colon completes", () => {
+  assert.deepEqual(emojiToken("hi :s", 5), { start: 3, end: 5, query: "s", complete: false, text: ":s" });
+  assert.ok(emojiSuggestions("s").length > 0);
+  assert.equal(emojiToken("hi ：sm", 6)?.query, "sm");
+  assert.deepEqual(emojiToken("hi :smile:", 10), {
+    start: 3,
+    end: 10,
+    query: "smile",
+    complete: true,
+    text: ":smile:",
+  });
+  assert.equal(emojiToken("hi ：smile：", 10)?.complete, true);
+  assert.equal(emojiSuggestions("smile")[0]?.c, "😄");
+});
+
+test("ordinary colons in Chinese text, times and links open nothing", () => {
+  for (const value of [
+    "注意：",
+    "注意:",
+    "12:30",
+    "at 12:3",
+    "http:",
+    "见 https://x",
+    "a:b",
+    "a[:",
+    "{:",
+    "f(:",
+    '"key":',
+  ])
+    assert.equal(emojiToken(value, value.length), null, value);
 });

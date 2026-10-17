@@ -217,7 +217,7 @@ export function packs(root: HTMLElement, rows: Data[], c: Context) {
       return;
     }
     if (pending.has(s.id)) return;
-    if (action === "remove" && !confirm("Remove this pack and archive its imported skills?")) {
+    if (action === "remove" && !confirm("Remove this pack and delete its imported skills?")) {
       draw();
       return;
     }

@@ -49,7 +49,18 @@ import { listBackLink } from "./list-page";
 import { registerPaneKind } from "./pane-kinds";
 import { exitSplitIfActive, notifyPanesChanged } from "./split";
 import { tip } from "./tooltip";
-import { brandName, fieldSelect, menuSelect, icon, initials, relTime, sheenLabel, slackMark, workingWave } from "./ui";
+import {
+  brandName,
+  fieldSelect,
+  menuSelect,
+  icon,
+  initials,
+  relTime,
+  sheenLabel,
+  slackMark,
+  slackOff,
+  workingWave,
+} from "./ui";
 import { assistantSidebar, assistantMessage } from "./assistant-sidebar";
 import { inboxChat } from "./inbox-chat";
 
@@ -167,8 +178,12 @@ const DEFAULT_VIEWS: InboxView[] = [
   { id: "sent", name: "Sent", sources: [] },
 ];
 
+function defaultViews(): InboxView[] {
+  return DEFAULT_VIEWS.filter((view) => !(slackOff() && view.id === "slack"));
+}
+
 function isInboxViewId(value: string | null): value is string {
-  return value !== null && [...DEFAULT_VIEWS, ...inboxViews()].some((view) => view.id === value);
+  return value !== null && [...defaultViews(), ...inboxViews()].some((view) => view.id === value);
 }
 
 function inboxViewIdForSegment(segment: string | null): string | null {
@@ -179,7 +194,7 @@ function inboxViewIdForSegment(segment: string | null): string | null {
 
 function inboxViewSegment(viewId: string): string {
   if (viewId === "gmail") return "email";
-  return DEFAULT_VIEWS.some((view) => view.id === viewId) ? viewId : `loop-${viewId}`;
+  return defaultViews().some((view) => view.id === viewId) ? viewId : `loop-${viewId}`;
 }
 
 const INBOX_FILTERS = [

@@ -81,7 +81,7 @@ import { tip } from "./tooltip";
 import { userErrorMessage as errMessage } from "./user-error";
 import { projectSummaries, setProjectPinned } from "./project-collaboration";
 import { closeLegacyReview, openLegacyReview } from "./legacy-review";
-import { copyText, icon, menuSelect, relTime, workingWave } from "./ui";
+import { copyText, icon, menuSelect, relTime, slackOff, workingWave } from "./ui";
 import { listPageTpl } from "./list-page";
 import {
   contextsState,
@@ -794,7 +794,7 @@ export function drawChatsPage(): void {
               { value: "all", label: "All surfaces" },
               { value: "web", label: "Web" },
               { value: "slack", label: "Slack" },
-            ],
+            ].filter((option) => !(slackOff() && option.value === "slack")),
           })}
         </div>
       </div>`,
@@ -1289,6 +1289,19 @@ function canBringIntoProject(s: Pick<CoreSession, "id" | "scopeId">, personalSco
   return Boolean(s.id) && personalScope !== null && s.scopeId === personalScope;
 }
 
+function startBringIntoProject(s: CoreSession): void {
+  void openBringIntoProject(s, (copy) => {
+    replacePendingSession(copy.threadRef, copy);
+    void openSession(copy);
+  });
+}
+
+export function bringIntoProjectAction(sessionId: string): (() => void) | null {
+  const s = sessionsState.list.find((row) => row.id === sessionId);
+  if (!s || !canBringIntoProject(s, personalScopeId())) return null;
+  return () => startBringIntoProject(s);
+}
+
 function projectCopiesOf(s: CoreSession): CoreSession[] {
   return sessionsState.list.filter(
     (candidate) => candidate.forkedFrom?.sessionId === s.id && candidate.scopeId !== s.scopeId,
@@ -1303,13 +1316,11 @@ function bringIntoProjectOption(s: CoreSession): TemplateResult | typeof nothing
       class="session-menu-option"
       type="button"
       role="menuitem"
+      data-testid="bring-into-project-open"
       @click=${() => {
         sessionsState.openMenuId = null;
         renderList();
-        void openBringIntoProject(s, (copy) => {
-          replacePendingSession(copy.threadRef, copy);
-          void openSession(copy);
-        });
+        startBringIntoProject(s);
       }}
     >
       ${icon(Folder, 15)}<span>Bring into project…</span>

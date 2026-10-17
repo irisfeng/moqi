@@ -1,5 +1,5 @@
 import { html } from "lit";
-import { table, card, renderer } from "./shared.ts";
+import { table, card, renderer, slackOff } from "./shared.ts";
 
 type Services = Record<string, any>;
 export class UsersView {
@@ -369,15 +369,19 @@ export class UsersView {
                       >.`,
                   },
                 ],
-                [
-                  "Slack email allowlist",
-                  this.data.access?.slackAllowFrom?.length
-                    ? this.data.access.slackAllowFrom
-                        .map((rule: string) => (rule.includes("@") ? rule : "@" + rule))
-                        .join(", ")
-                    : { node: html`<span class="subline">Not configured</span>` },
-                  "Controls who the bot treats as an internal employee in shared Slack workspaces.",
-                ],
+                ...(slackOff()
+                  ? []
+                  : [
+                      [
+                        "Slack email allowlist",
+                        this.data.access?.slackAllowFrom?.length
+                          ? this.data.access.slackAllowFrom
+                              .map((rule: string) => (rule.includes("@") ? rule : "@" + rule))
+                              .join(", ")
+                          : { node: html`<span class="subline">Not configured</span>` },
+                        "Controls who the bot treats as an internal employee in shared Slack workspaces.",
+                      ],
+                    ]),
               ],
               "",
             ),

@@ -281,7 +281,7 @@ body.resizing-sidebar {
   flex: 0 0 22px;
   overflow: hidden;
   border-radius: 5px;
-  background: var(--brand-accent);
+  background: transparent;
   color: white;
   font-size: var(--font-16);
   font-weight: 500;
@@ -292,11 +292,14 @@ body.resizing-sidebar {
   inset: 0;
   background: var(--brand-mark-image, url("./assets/brand-mark.svg")) center / cover no-repeat;
 }
+.dark .brand-mark-half {
+  background-image: var(--brand-mark-image, url("./assets/brand-mark-dark.svg"));
+}
 .brand-mark-half:first-child {
-  clip-path: inset(0 42% 0 0);
+  clip-path: polygon(0 0, 42% 0, 42% 46%, 58% 46%, 58% 100%, 0 100%);
 }
 .brand-mark-half:last-child {
-  clip-path: inset(0 0 0 58%);
+  clip-path: polygon(42% 0, 100% 0, 100% 100%, 58% 100%, 58% 46%, 42% 46%);
 }
 .brand-mark::before {
   content: var(--brand-mark);

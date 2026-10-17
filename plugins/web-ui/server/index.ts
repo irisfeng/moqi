@@ -31,7 +31,7 @@ import {
   serveFavicon,
 } from "../../chassis/src/http.ts";
 import { verifyPortalIdentity, PORTAL_IDENTITY_HEADER } from "../../chassis/src/portal-identity.ts";
-import { createBrandingCache, injectBranding, type OrgTheme } from "../../chassis/src/branding.ts";
+import { createBrandingCache, injectBranding, markSlackOff, type OrgTheme } from "../../chassis/src/branding.ts";
 import { parseSuggestedActivities } from "../../chassis/src/suggested-activities.ts";
 import { principalInAllowlist } from "../../chassis/src/principal-allowlist.ts";
 
@@ -128,7 +128,11 @@ async function serveWebManifest(res: ServerResponse): Promise<void> {
 
 async function brandIndexHtml(html: string): Promise<string> {
   const branding = await brandingCache.forRender();
-  return injectBranding(html, branding, { titleSuffix: "· Web", keepIcon: Boolean(process.env.WEB_UI_FAVICON_SVG) });
+  const branded = injectBranding(html, branding, {
+    titleSuffix: "· Web",
+    keepIcon: Boolean(process.env.WEB_UI_FAVICON_SVG),
+  });
+  return markSlackOff(branded, process.env.QM_SLACK === "off");
 }
 
 const portalTokenStore = new AsyncLocalStorage<string | undefined>();

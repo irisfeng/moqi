@@ -3,7 +3,16 @@ import { html, nothing, render, type TemplateResult } from "lit";
 import { Check, ChevronDown, Plus } from "lucide";
 import { api } from "./core-bridge";
 import { userErrorMessage as errMessage } from "./user-error.ts";
-import { actionSnippet, closeFormMenus, copyText, icon, relTime, setFormMenuValue, toggleFormMenu } from "./ui";
+import {
+  actionSnippet,
+  closeFormMenus,
+  copyText,
+  icon,
+  relTime,
+  setFormMenuValue,
+  slackOff,
+  toggleFormMenu,
+} from "./ui";
 import { listBackLink, listPageTpl } from "./list-page";
 import { ensureContexts, scopeChip } from "./contexts";
 import { appState } from "./shell";
@@ -400,7 +409,7 @@ function webhookForm() {
           </button>
           <div class="menu-popover" role="menu" hidden>
             <div class="menu-title">Verification</div>
-            ${WEBHOOK_SCHEMES.map(
+            ${WEBHOOK_SCHEMES.filter((scheme) => !(slackOff() && scheme.value === "slack")).map(
               (scheme) => html`
                 <button
                   class="menu-option ${scheme.value === "hmac-sha256" ? "active" : ""}"

@@ -15,6 +15,7 @@ export async function openBringIntoProject(session: CoreSession, onDone: (copy: 
   const dialog = document.createElement("dialog");
   dialog.className = "project-dialog bring-into-project-dialog";
   dialog.setAttribute("aria-labelledby", "bring-into-project-heading");
+  dialog.dataset.testid = "bring-into-project-dialog";
   document.body.append(dialog);
   let projects: ProjectChoice[] = [];
   let loading = true;
@@ -50,7 +51,14 @@ export async function openBringIntoProject(session: CoreSession, onDone: (copy: 
       html`
         <div class="project-dialog-head">
           <div><h2 id="bring-into-project-heading">Bring into project</h2></div>
-          <button class="chip-x" type="button" aria-label="Close" ?disabled=${busy} @click=${close}>
+          <button
+            class="chip-x"
+            type="button"
+            aria-label="Close"
+            data-testid="bring-into-project-close"
+            ?disabled=${busy}
+            @click=${close}
+          >
             ${icon(X, 16)}
           </button>
         </div>
@@ -62,11 +70,15 @@ export async function openBringIntoProject(session: CoreSession, onDone: (copy: 
         </ul>
         ${
           loading
-            ? html`<p role="status">Loading projects…</p>`
+            ? html`<p role="status" data-testid="bring-into-project-loading">Loading projects…</p>`
             : html`<div class="bring-into-project-list" role="radiogroup" aria-label="Project">
                 ${projects.map(
                   (project) =>
-                    html`<label class="bring-into-project-option">
+                    html`<label
+                      class="bring-into-project-option"
+                      data-testid="bring-into-project-option"
+                      data-scope=${project.scopeId}
+                    >
                       <input
                         type="radio"
                         name="bring-into-project"
@@ -82,11 +94,19 @@ export async function openBringIntoProject(session: CoreSession, onDone: (copy: 
                 )}
               </div>`
         }
-        ${!loading && !projects.length ? html`<p role="status">You are not a member of any project yet.</p>` : ""}
-        ${error ? html`<div class="composer-error" role="alert">${error}</div>` : ""}
+        ${!loading && !projects.length ? html`<p role="status" data-testid="bring-into-project-empty">You are not a member of any project yet.</p>` : ""}
+        ${error ? html`<div class="composer-error" role="alert" data-testid="bring-into-project-error">${error}</div>` : ""}
         <div class="project-dialog-actions actions">
-          <button class="btn" type="button" ?disabled=${busy} @click=${close}>Cancel</button>
-          <button class="btn primary" type="button" ?disabled=${!chosen || busy} @click=${() => void confirm()}>
+          <button class="btn" type="button" data-testid="bring-into-project-cancel" ?disabled=${busy} @click=${close}>
+            Cancel
+          </button>
+          <button
+            class="btn primary"
+            type="button"
+            data-testid="bring-into-project-confirm"
+            ?disabled=${!chosen || busy}
+            @click=${() => void confirm()}
+          >
             ${icon(Folder, 14)}${busy ? "Copying…" : "Bring into project"}
           </button>
         </div>

@@ -16,6 +16,7 @@ import {
   Cog,
   Expand,
   Files,
+  Folder,
   KeyRound,
   Link,
   Maximize2,
@@ -57,7 +58,7 @@ import { paneKindByKey, paneKindEntry } from "./pane-kinds";
 import { focusComposerOnPaneClick, focusPaneComposer, preservingFocus } from "./pane-focus";
 import { attachTooltip, tip } from "./tooltip";
 import { icon } from "./ui";
-import { contextsState, scopeGlyph, scopeTitle } from "./contexts";
+import { contextsState, personalScopeId, scopeGlyph, scopeTitle } from "./contexts";
 import type { DensityTier } from "./density";
 import { appState, hasDestination } from "./shell-state";
 import {
@@ -76,6 +77,7 @@ import {
 } from "./conversations";
 import type { Conversation } from "./conv-types";
 import {
+  bringIntoProjectAction,
   openSession,
   openSessionInto,
   refreshSessions,
@@ -133,6 +135,7 @@ let paneDrag: PaneDrag | null = null;
 let toastMsg = "";
 let toastTimer: number | null = null;
 let headerSignature = "";
+let headerScope: string | null = null;
 let persistTimer: number | null = null;
 let remoteTimer: number | null = null;
 let remotePayload: { updatedAt: number } | null = null;
@@ -830,7 +833,9 @@ function computeHeaderSignature(): string {
 
 export function notifyPanesChanged(): void {
   if (!splitState.active || !dockApi) return;
-  if (computeHeaderSignature() === headerSignature) return;
+  const scope = personalScopeId();
+  if (computeHeaderSignature() === headerSignature && scope === headerScope) return;
+  headerScope = scope;
   refreshHeaders();
 }
 
@@ -1114,6 +1119,15 @@ type SessionAction = { label: string; aria?: string; glyph: Parameters<typeof ic
 function sessionActionItems(sessionId: string, panelId: string): SessionAction[] {
   const parent = sessionParent(sessionId);
   const items: SessionAction[] = [];
+  const bringIntoProject = bringIntoProjectAction(sessionId);
+  if (bringIntoProject) {
+    items.push({
+      label: "Bring into project…",
+      glyph: Folder,
+      cls: "split-tab-bring-into-project",
+      run: bringIntoProject,
+    });
+  }
   if (parent) {
     items.push({
       label: `Back to ${sessionTitle(parent)}`,

@@ -8,6 +8,10 @@ import { brandName } from "./brand-name.ts";
 
 export { brandName };
 
+export function slackOff(): boolean {
+  return document.documentElement.dataset.slack === "off";
+}
+
 export function brandMark(): TemplateResult {
   return html`<span class="brand-mark" aria-hidden="true"
     ><span class="brand-mark-half"></span><span class="brand-mark-half"></span

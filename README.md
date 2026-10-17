@@ -1,5 +1,10 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./deploy/layers/qm-cn/deploy/brand/moqi-lockup-dark.svg">
+  <img src="./deploy/layers/qm-cn/deploy/brand/moqi-lockup.svg" alt="默契 Moqi" height="72">
+</picture>
+
 # Moqi · 默契
 
 ### A self-hosted AI coworker for teams that work in Chinese

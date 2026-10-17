@@ -163,6 +163,7 @@ import {
   icon,
   relTime,
   sheenLabel,
+  slackOff,
   waveLoader,
   workingWave,
 } from "./ui";
@@ -2512,6 +2513,7 @@ export function createChatSurface(
   }
 
   function connectorWidget(link: ConnectorLink): TemplateResult {
+    if (slackOff() && (link.provider === "slack-bot" || link.provider === "slack")) return html``;
     if (link.provider === "slack-bot") return html`<qm-slack-setup></qm-slack-setup>`;
     return connectorCard(link, connectedConnectors.has(link.provider), withReturnTo);
   }

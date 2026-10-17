@@ -9,7 +9,7 @@ import {
 } from "./connection-return";
 import { LitElement, html, nothing } from "lit";
 import { Check } from "lucide";
-import { icon } from "./ui";
+import { icon, slackOff } from "./ui";
 import { mountConnectionPicker, type ConnectionService } from "./connection-picker";
 import type { Me } from "./shell-state";
 import "./onboarding-welcome.css";
@@ -117,7 +117,12 @@ export class OnboardingWelcome extends LitElement {
     return `${this.me?.org}:${this.me?.user}`;
   }
   private async refreshWorkspace(): Promise<void> {
-    if (this.widget === "apps" || (this.widget !== "slack-account" && this.me?.permissions?.includes("admin"))) return;
+    if (
+      slackOff() ||
+      this.widget === "apps" ||
+      (this.widget !== "slack-account" && this.me?.permissions?.includes("admin"))
+    )
+      return;
     try {
       const response = await fetch(`${this.base}api/composio/slack`, {
         cache: "no-store",
@@ -471,7 +476,7 @@ export class OnboardingWelcome extends LitElement {
               }`
       }
       ${
-        !["apps", "slack-account"].includes(this.widget) && this.me?.permissions?.includes("admin")
+        !slackOff() && !["apps", "slack-account"].includes(this.widget) && this.me?.permissions?.includes("admin")
           ? html`<qm-onboarding-slack
               class="welcome-beat"
               style=${`--welcome-delay:${cohort ? 3050 : 900}ms`}

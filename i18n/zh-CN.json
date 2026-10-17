@@ -1651,7 +1651,7 @@
     "help: \"Held back: contains binary files (import is text-only).\",": "help: \"已暂缓：包含二进制文件（导入仅支持文本）。\",",
     "help: \"Held back: declares a personal/owner scope, so it isn't imported as a shared pack skill.\",": "help: \"已暂缓：声明了个人/所有者范围，因此不会作为共享技能包技能导入。\",",
     "help: \"Held back: the name matches an existing platform or seed skill.\",": "help: \"已暂缓：名称与现有平台或种子技能相同。\",",
-    "if (action === \"remove\" && !confirm(\"Remove this pack and archive its imported skills?\")) {": "if (action === \"remove\" && !confirm(\"移除此技能包并归档其导入的技能？\")) {",
+    "if (action === \"remove\" && !confirm(\"Remove this pack and delete its imported skills?\")) {": "if (action === \"remove\" && !confirm(\"移除此技能包并删除其导入的技能？\")) {",
     "if (action === \"sync\") statuses.set(s.id, { text: \"syncing…\", tone: \"saving\" });": "if (action === \"sync\") statuses.set(s.id, { text: \"同步中…\", tone: \"saving\" });",
     "if (k.pack) return \"from \" + (c.packRepoLabel(k.pack.url) || \"pack \" + c.shortId(k.pack.id, 8));": "if (k.pack) return \"来自 \" + (c.packRepoLabel(k.pack.url) || \"技能包 \" + c.shortId(k.pack.id, 8));",
     "label: \"binary files\",": "label: \"二进制文件\",",
@@ -2420,7 +2420,8 @@
     ": \"Key saved, but the base model could not be changed.\";": ": \"密钥已保存，但无法更改基础模型。\";",
     ": \"Model verified and enabled with organization credentials. Personal-key access may differ.\";": ": \"模型已使用组织凭据验证并启用。个人密钥的访问权限可能有所不同。\";",
     "<button ?disabled=${this.registryBusy} @click=${() => this.reset(spec)}>Edit</button": "<button ?disabled=${this.registryBusy} @click=${() => this.reset(spec)}>编辑</button",
-    "<h2>${[\"1. Model provider\", \"2. Slack app\", \"3. OAuth apps\"][i]}</h2>": "<h2>${[\"1. 模型供应商\", \"2. Slack 应用\", \"3. OAuth 应用\"][i]}</h2>",
+    "? [\"1. Model provider\", \"2. OAuth apps\"]": "? [\"1. 模型供应商\", \"2. OAuth 应用\"]",
+    ": [\"1. Model provider\", \"2. Slack app\", \"3. OAuth apps\"];": ": [\"1. 模型供应商\", \"2. Slack 应用\", \"3. OAuth 应用\"];",
     "<h2>Base model</h2>": "<h2>基础模型</h2>",
     "<h2>Models on existing providers</h2>": "<h2>现有供应商上的模型</h2>",
     "<h3>Complete missing information</h3>": "<h3>补充缺失信息</h3>",
@@ -2660,7 +2661,7 @@
     "<option value=\"external_app_sharing\">External app sharing (public links, outside emails)</option>": "<option value=\"external_app_sharing\">外部应用共享（公开链接、外部邮件）</option>",
     "<option value=\"inbox_loops\">Inbox Loops</option>": "<option value=\"inbox_loops\">收件箱循环</option>",
     "<option value=\"persistent_subagents\">Persistent subagents</option>": "<option value=\"persistent_subagents\">持久化子助手</option>",
-    "<option value=\"slack_loading_indicator\">Slack loading indicator (experimental)</option>": "<option value=\"slack_loading_indicator\">Slack 加载指示器（实验性）</option>",
+    "${slackOff() ? nothing : html`<option value=\"slack_loading_indicator\">Slack loading indicator (experimental)</option>`}": "${slackOff() ? nothing : html`<option value=\"slack_loading_indicator\">Slack 加载指示器（实验性）</option>`}",
     "<p>Enable a feature for selected scopes. Changes apply on the next turn without a restart.</p>": "<p>为选定的范围启用功能。更改将在下一轮生效，无需重启。</p>",
     ">Feature<select": ">功能<select",
     "Disable": "停用",
@@ -3423,15 +3424,15 @@
   },
   "plugins/web-ui/src/bring-into-project.ts": {
     "<div><h2 id=\"bring-into-project-heading\">Bring into project</h2></div>": "<div><h2 id=\"bring-into-project-heading\">带入项目</h2></div>",
-    "<button class=\"chip-x\" type=\"button\" aria-label=\"Close\" ?disabled=${busy} @click=${close}>": "<button class=\"chip-x\" type=\"button\" aria-label=\"关闭\" ?disabled=${busy} @click=${close}>",
+    "aria-label=\"Close\"": "aria-label=\"关闭\"",
     "<li>This makes a copy of the whole conversation in the project, including tool output and attachments.</li>": "<li>这会在项目中创建整个会话的副本，包括工具输出和附件。</li>",
     "<li>Every current and future member of the project will be able to see it.</li>": "<li>项目的所有现有成员和未来成员都能看到这份副本。</li>",
     "<li>Your personal memory is not carried over.</li>": "<li>你的个人记忆不会被带入项目。</li>",
     "<li>The original conversation stays private and unchanged.</li>": "<li>原会话保持私密，内容不变。</li>",
-    "? html`<p role=\"status\">Loading projects…</p>`": "? html`<p role=\"status\">正在加载项目…</p>`",
+    "? html`<p role=\"status\" data-testid=\"bring-into-project-loading\">Loading projects…</p>`": "? html`<p role=\"status\" data-testid=\"bring-into-project-loading\">正在加载项目…</p>`",
     ": html`<div class=\"bring-into-project-list\" role=\"radiogroup\" aria-label=\"Project\">": ": html`<div class=\"bring-into-project-list\" role=\"radiogroup\" aria-label=\"项目\">",
-    "${!loading && !projects.length ? html`<p role=\"status\">You are not a member of any project yet.</p>` : \"\"}": "${!loading && !projects.length ? html`<p role=\"status\">你还不是任何项目的成员。</p>` : \"\"}",
-    "<button class=\"btn\" type=\"button\" ?disabled=${busy} @click=${close}>Cancel</button>": "<button class=\"btn\" type=\"button\" ?disabled=${busy} @click=${close}>取消</button>",
+    "${!loading && !projects.length ? html`<p role=\"status\" data-testid=\"bring-into-project-empty\">You are not a member of any project yet.</p>` : \"\"}": "${!loading && !projects.length ? html`<p role=\"status\" data-testid=\"bring-into-project-empty\">你还不是任何项目的成员。</p>` : \"\"}",
+    "Cancel": "取消",
     "${icon(Folder, 14)}${busy ? \"Copying…\" : \"Bring into project\"}": "${icon(Folder, 14)}${busy ? \"正在复制…\" : \"带入项目\"}",
     "error = errMessage(e, \"Could not bring this conversation into the project.\");": "error = errMessage(e, \"无法将此会话带入项目。\");",
     "if (!contextsState.loaded) error = \"Could not load your projects.\";": "if (!contextsState.loaded) error = \"无法加载你的项目。\";"
@@ -5534,7 +5535,8 @@
     "{ tool: \"keychain\", glyph: KeyRound, label: \"Your keychain\" },": "{ tool: \"keychain\", glyph: KeyRound, label: \"你的密钥串\" },",
     "{ tool: \"memory\", glyph: Brain, label: \"Memory\" },": "{ tool: \"memory\", glyph: Brain, label: \"记忆\" },",
     "{ tool: \"skills\", glyph: Box, label: \"Skills\" },": "{ tool: \"skills\", glyph: Box, label: \"技能\" },",
-    ">${icon(paneScopeGlyph(panel), 11)}<span dir=\"auto\">${crumb ?? \"Personal\"}</span></span": ">${icon(paneScopeGlyph(panel), 11)}<span dir=\"auto\">${crumb ?? \"个人\"}</span></span"
+    ">${icon(paneScopeGlyph(panel), 11)}<span dir=\"auto\">${crumb ?? \"Personal\"}</span></span": ">${icon(paneScopeGlyph(panel), 11)}<span dir=\"auto\">${crumb ?? \"个人\"}</span></span",
+    "label: \"Bring into project…\",": "label: \"带入项目…\","
   },
   "plugins/web-ui/src/suggested-activities.ts": {
     "aria-label=\"Suggested activities\"": "aria-label=\"推荐活动\""

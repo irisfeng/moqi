@@ -1,28 +1,13 @@
 import { html, nothing, render } from "lit";
 import { AsyncDirective } from "lit/async-directive.js";
 import { directive, type ElementPart } from "lit/directive.js";
-import { EMOJI_ROWS, type EmojiRow } from "./emoji-data";
-import { filterEmoji, rowForName } from "./emoji-picker";
-
-export function emojiToken(
-  value: string,
-  caret: number,
-): { start: number; end: number; query: string; complete: boolean } | null {
-  const complete = value[caret - 1] === ":";
-  const end = complete ? caret - 1 : caret;
-  let start = end;
-  while (start > 0 && "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-".includes(value[start - 1]!))
-    start--;
-  if (start === end || value[start - 1] !== ":") return null;
-  start--;
-  if (start > 0 && !" \n\t([{\"'".includes(value[start - 1]!)) return null;
-  return { start, end: caret, query: value.slice(start + 1, end), complete };
-}
+import type { EmojiRow } from "./emoji-data";
+import { emojiSuggestions, emojiToken, rowForName, type EmojiToken } from "./emoji-picker";
 
 class EmojiCompletion extends AsyncDirective {
   private input!: HTMLTextAreaElement;
   private popup: HTMLDivElement | null = null;
-  private token: ReturnType<typeof emojiToken> = null;
+  private token: EmojiToken | null = null;
   private matches: EmojiRow[] = [];
   private active = 0;
   private id = `emoji-${crypto.randomUUID()}`;
@@ -42,6 +27,7 @@ class EmojiCompletion extends AsyncDirective {
 
   private listen() {
     this.input.addEventListener("input", this.onInput, true);
+    this.input.addEventListener("compositionend", this.onInput, true);
     this.input.addEventListener("keydown", this.onKeydown, true);
     this.input.addEventListener("click", this.close);
     this.input.addEventListener("blur", this.close);
@@ -76,11 +62,7 @@ class EmojiCompletion extends AsyncDirective {
       }
       return;
     }
-    if (this.token.query.length < 2) return;
-    const query = this.token.query;
-    this.matches = filterEmoji(EMOJI_ROWS, query).slice(0, 8);
-    const exact = rowForName(query);
-    if (exact) this.matches = [exact, ...this.matches.filter((row) => row !== exact)].slice(0, 8);
+    this.matches = emojiSuggestions(this.token.query);
     this.active = 0;
     if (this.matches.length) this.draw();
   };
@@ -103,7 +85,7 @@ class EmojiCompletion extends AsyncDirective {
     if (
       this.input.selectionStart !== token.end ||
       this.input.selectionEnd !== token.end ||
-      this.input.value.slice(token.start, token.end) !== `:${token.query}${token.complete ? ":" : ""}`
+      this.input.value.slice(token.start, token.end) !== token.text
     ) {
       this.close();
       return false;
@@ -168,6 +150,7 @@ class EmojiCompletion extends AsyncDirective {
   protected override disconnected() {
     this.close();
     this.input.removeEventListener("input", this.onInput, true);
+    this.input.removeEventListener("compositionend", this.onInput, true);
     this.input.removeEventListener("keydown", this.onKeydown, true);
     this.input.removeEventListener("click", this.close);
     this.input.removeEventListener("blur", this.close);

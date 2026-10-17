@@ -7,6 +7,7 @@ const sessions = read("src/sessions.ts");
 const dialog = read("src/bring-into-project.ts");
 const bridge = read("src/core-bridge.ts");
 const server = read("server/index.ts");
+const split = read("src/split.ts");
 
 const fn = (src: string, name: string): string => {
   const body = src.match(new RegExp(`^(?:export )?(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`, "m"))?.[0] ?? "";
@@ -49,4 +50,31 @@ test("the target scope travels through the client and the relay", () => {
     server,
     /if \(targetScopeId !== undefined && resolveIdentity\(req\)\?\.impersonator !== null\)\s*return json\(res, 403, \{ error: "impersonation_forbidden" \}\);/,
   );
+});
+
+test("the dialog keeps stable test ids for automated checks", () => {
+  assert.match(fn(sessions, "bringIntoProjectOption"), /data-testid="bring-into-project-open"/);
+  assert.match(dialog, /dialog\.dataset\.testid = "bring-into-project-dialog"/);
+  for (const id of ["close", "loading", "option", "empty", "error", "cancel", "confirm"])
+    assert.match(dialog, new RegExp(`data-testid="bring-into-project-${id}"`), id);
+  assert.match(dialog, /data-testid="bring-into-project-option"\s+data-scope=\$\{project\.scopeId\}/);
+});
+
+test("a personal chat's header offers Bring into project first, through the same dialog as the menu", () => {
+  const action = fn(sessions, "bringIntoProjectAction");
+  assert.match(action, /if \(!s \|\| !canBringIntoProject\(s, personalScopeId\(\)\)\) return null;/);
+  assert.match(action, /return \(\) => startBringIntoProject\(s\);/);
+  assert.match(fn(sessions, "bringIntoProjectOption"), /startBringIntoProject\(s\);/);
+  const items = fn(split, "sessionActionItems");
+  assert.match(
+    items,
+    /const items: SessionAction\[\] = \[\];\s+const bringIntoProject = bringIntoProjectAction\(sessionId\);/,
+  );
+  assert.match(items, /label: "Bring into project…",\s+glyph: Folder,\s+cls: "split-tab-bring-into-project",/);
+});
+
+test("the header redraws once the person's scope is known, so a cold load still shows the button", () => {
+  const notify = split.match(/^export function notifyPanesChanged\(\)[\s\S]*?\n\}/m)?.[0] ?? "";
+  assert.match(notify, /if \(computeHeaderSignature\(\) === headerSignature && scope === headerScope\) return;/);
+  assert.match(notify, /headerScope = scope;\s+refreshHeaders\(\);/);
 });

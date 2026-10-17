@@ -1,5 +1,5 @@
-import { mountTemplate } from "./shared.ts";
-import { html } from "lit";
+import { mountTemplate, slackOff } from "./shared.ts";
+import { html, nothing } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { repeat } from "lit/directives/repeat.js";
 let config: any;
@@ -137,7 +137,7 @@ function template() {
             <option value="persistent_subagents">Persistent subagents</option>
             <option value="app_annotations">App annotations</option>
             <option value="inbox_loops">Inbox Loops</option>
-            <option value="slack_loading_indicator">Slack loading indicator (experimental)</option>
+            ${slackOff() ? nothing : html`<option value="slack_loading_indicator">Slack loading indicator (experimental)</option>`}
             <option value="external_app_sharing">External app sharing (public links, outside emails)</option>
             <option value="loop_triage">Loop triage (prioritize and consolidate)</option>
           </select></label

@@ -1,6 +1,10 @@
 import { html, render, nothing } from "lit";
 import { ifDefined } from "lit/directives/if-defined.js";
 
+export function slackOff(): boolean {
+  return document.documentElement.dataset.slack === "off";
+}
+
 export function node(template: unknown): HTMLElement {
   const fragment = document.createDocumentFragment();
   render(template, fragment);

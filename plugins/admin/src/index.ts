@@ -8,7 +8,7 @@ import { createGzip, gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { signedRequestHeaders, withSourceAuthNonce } from "../../chassis/src/core-client.ts";
 import { json, readBody, cookie, gzipAccepted } from "../../chassis/src/http.ts";
-import { createBrandingCache, injectBranding, type OrgBranding } from "../../chassis/src/branding.ts";
+import { createBrandingCache, injectBranding, markSlackOff, type OrgBranding } from "../../chassis/src/branding.ts";
 import { verifyPortalIdentity, PORTAL_IDENTITY_HEADER } from "../../chassis/src/portal-identity.ts";
 import { errMessage } from "../../chassis/src/errors.ts";
 import { principalInAllowlist } from "../../chassis/src/principal-allowlist.ts";
@@ -81,7 +81,10 @@ let shellCache: Shell | null = null;
 function brandedShell(branding: OrgBranding): Shell {
   const key = JSON.stringify([branding.accent, branding.mark, branding.markUrl, branding.selfLabel]);
   if (shellCache?.key === key) return shellCache;
-  const html = injectBranding(BASE_HTML, branding, { titleSuffix: "Admin" });
+  const html = markSlackOff(
+    injectBranding(BASE_HTML, branding, { titleSuffix: "Admin" }),
+    process.env.QM_SLACK === "off",
+  );
   const digest = createHash("sha256").update(html).digest("hex").slice(0, 16);
   shellCache = { key, html, gzip: gzipSync(html), etag: `"${digest}"`, gzipEtag: `"${digest}-gzip"` };
   return shellCache;

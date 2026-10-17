@@ -142,6 +142,10 @@ export async function resolvePackAuth(
 }
 
 const SHA_RE = /^[0-9a-f]{7,40}$/;
+
+export function isCommitRef(ref: string): boolean {
+  return SHA_RE.test(ref.trim());
+}
 const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
 const execFileP = promisify(execFile);

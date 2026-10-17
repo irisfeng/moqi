@@ -4555,6 +4555,11 @@
       #view-governance .environment-notice.hidden {
         display: none;
       }
+      html[data-slack="off"] #card-slack-installation,
+      html[data-slack="off"] #card-external-slack,
+      html[data-slack="off"] #governance-status-audience {
+        display: none !important;
+      }
       #card-security-posture > .head p,
       #card-external-slack > .head p {
         display: none;
@@ -7257,6 +7262,7 @@
           }
           s.views.forEach((v) => {
             if (v === "design-system" && !permissions.includes("inbox")) return;
+            if (slackOff() && (v === "slack" || v === "slack-settings")) return;
             const b = document.createElement("button");
             b.className = "tab" + (s.label ? "" : " tab-top") + (v === view ? " active" : "");
             if (v === "design-system") b.classList.add("tab-footer");
@@ -7330,6 +7336,10 @@
           return null;
         }
       }
+      function slackOff() {
+        return globalThis.document?.documentElement?.dataset.slack === "off";
+      }
+
       function urlToState() {
         const p = new URLSearchParams(location.search);
 
@@ -7538,6 +7548,7 @@
       $("onboarding-add-custom-provider").onclick = () => openCustomProviderEditor();
       function route() {
         const st = urlToState();
+        if (slackOff() && (st.view === "slack" || st.view === "slack-settings")) st.view = DEFAULT_VIEW;
         if (st.view === "history" && st.session) {
           const list = { ...st, session: null, turn: null };
           history.replaceState(list, "", stateToUrl(list));

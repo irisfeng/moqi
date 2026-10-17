@@ -30,10 +30,27 @@
     "core": {
       "HARNESS": "pi",
       "PERSONAL_MODEL_ACCOUNTS_ENABLED": "false",
-      "SUGGESTED_ACTIVITIES_CONTEXT": "All staff use the product in Simplified Chinese. Write every title and prompt in Simplified Chinese, using 你 rather than 您."
+      "SUGGESTED_ACTIVITIES_CONTEXT": "All staff use the product in Simplified Chinese. Write every title and prompt in Simplified Chinese, using 你 rather than 您.",
+      "ORG_BRAND_SELF_LABEL": "默契"
+    },
+    // 不接 Slack：网页和后台不显示任何 Slack 入口。
+    // 浏览器标签页图标：默契的符契标志，随系统深浅色切换；三个入口各设一次，不设置时默认显示一个 emoji。
+    "web-ui": {
+      "WEB_UI_FAVICON_SVG": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><style>.l{fill:#1f2328}.r{fill:#1c6a8a}@media (prefers-color-scheme:dark){.l{fill:#ecebe6}.r{fill:#6bb6d3}}</style><path class=\"l\" d=\"M23 0H39V49H55V100H23A23 23 0 0 1 0 77V23A23 23 0 0 1 23 0Z\"/><path class=\"r\" d=\"M45 0H77A23 23 0 0 1 100 23V77A23 23 0 0 1 77 100H61V43H45Z\"/></svg>",
+      "QM_SLACK": "off"
+    },
+    "admin": {
+      "QM_SLACK": "off"
     },
     // 登录邮件走国内企业邮箱 SMTP（值放 .env：SMTP_HOST/SMTP_USERNAME/SMTP_PASSWORD 等）
-    "auth": { "AUTH_EMAIL_TRANSPORT": "smtp", "AUTH_ALLOWED_EMAIL_DOMAIN": "example.cn" }
+    "auth": {
+      "AUTH_EMAIL_TRANSPORT": "smtp",
+      "AUTH_ALLOWED_EMAIL_DOMAIN": "example.cn",
+      "AUTH_FAVICON_SVG": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><style>.l{fill:#1f2328}.r{fill:#1c6a8a}@media (prefers-color-scheme:dark){.l{fill:#ecebe6}.r{fill:#6bb6d3}}</style><path class=\"l\" d=\"M23 0H39V49H55V100H23A23 23 0 0 1 0 77V23A23 23 0 0 1 23 0Z\"/><path class=\"r\" d=\"M45 0H77A23 23 0 0 1 100 23V77A23 23 0 0 1 77 100H61V43H45Z\"/></svg>"
+    },
+    "portal": {
+      "PORTAL_FAVICON_SVG": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><style>.l{fill:#1f2328}.r{fill:#1c6a8a}@media (prefers-color-scheme:dark){.l{fill:#ecebe6}.r{fill:#6bb6d3}}</style><path class=\"l\" d=\"M23 0H39V49H55V100H23A23 23 0 0 1 0 77V23A23 23 0 0 1 23 0Z\"/><path class=\"r\" d=\"M45 0H77A23 23 0 0 1 100 23V77A23 23 0 0 1 77 100H61V43H45Z\"/></svg>"
+    }
   },
 
   // 本地 Docker 沙箱：每 scope 一个容器 + 持久卷（qm-home-*），零云依赖。

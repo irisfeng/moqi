@@ -2,7 +2,7 @@ import { html, render, type TemplateResult } from "lit";
 import { KeyRound, Link } from "lucide";
 import { api } from "./core-bridge";
 import { userErrorMessage as errMessage } from "./user-error";
-import { icon } from "./ui";
+import { icon, slackOff } from "./ui";
 import { connectorLogo } from "./connector-logo";
 import { appState, replacePanePreservingFocus } from "./shell";
 import { scopedSession, scopedViewTopbar } from "./session-scope";
@@ -397,7 +397,7 @@ function drawConnectors(): void {
   const accountsLoading = connectorsLoading && !connectorsEverLoaded;
   const keysLoadingFresh = keysLoading && !keysEverLoaded;
   const loading = accountsLoading || keysLoadingFresh;
-  const entries = Object.entries(connectorProviders);
+  const entries = Object.entries(connectorProviders).filter(([id]) => !(slackOff() && id === "slack"));
   const connectorCards = entries.map(([id, p]) => {
     const meta = CONNECTOR_LABELS[id] ?? { name: id, hosts: "" };
     const connected = Boolean(p.connected);

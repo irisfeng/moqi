@@ -1,7 +1,7 @@
 import { html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { ifDefined } from "lit/directives/if-defined.js";
-import { card, bareCard, pager, table, renderer } from "./shared.ts";
+import { card, bareCard, pager, table, renderer, slackOff } from "./shared.ts";
 import { mountPacks, skillDetail, removeSkill } from "./artifacts-skills.ts";
 export type Data = Record<string, any>;
 export type Context = Record<string, any>;
@@ -709,7 +709,10 @@ function cronDetail(root: HTMLElement, cron: Data | undefined, id: string, c: Co
     error = "",
     total = 0;
   const draft = {
-    type: cron.destination?.type === "principal" ? "principal" : "slack",
+    type:
+      cron.destination?.type === "principal" || (slackOff() && cron.destination?.type !== "slack")
+        ? "principal"
+        : "slack",
     target: cron.destination?.target || "",
     audienceScopeId: cron.destination?.audienceScopeId || "",
     onBehalfOf: cron.destination?.onBehalfOf || "",
@@ -786,7 +789,7 @@ function cronDetail(root: HTMLElement, cron: Data | undefined, id: string, c: Co
                   <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(160px, 1fr));gap:10px">
                     <label
                       >Type<select .value=${draft.type} @change=${change("type")}>
-                        <option value="slack" .selected=${draft.type === "slack"}>slack</option>
+                        ${slackOff() && cron.destination?.type !== "slack" ? nothing : html`<option value="slack" .selected=${draft.type === "slack"}>slack</option>`}
                         <option value="principal" .selected=${draft.type === "principal"}>principal</option>
                       </select></label
                     ><label
@@ -845,7 +848,10 @@ function cronDetail(root: HTMLElement, cron: Data | undefined, id: string, c: Co
             ?disabled=${saving}
             @click=${() => {
               Object.assign(draft, {
-                type: cron.destination?.type === "principal" ? "principal" : "slack",
+                type:
+                  cron.destination?.type === "principal" || (slackOff() && cron.destination?.type !== "slack")
+                    ? "principal"
+                    : "slack",
                 target: cron.destination?.target || "",
                 audienceScopeId: cron.destination?.audienceScopeId || "",
                 onBehalfOf: cron.destination?.onBehalfOf || "",

@@ -1,5 +1,5 @@
 import type { SkillPackStore } from "./skill-pack-store.ts";
-import type { SkillPackFetcher } from "./pack-fetcher.ts";
+import { isCommitRef, type SkillPackFetcher } from "./pack-fetcher.ts";
 import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
 import { createSweeper } from "../util/sweeper.ts";
 import { errMessage, reportFailureAs } from "../util/errors.ts";
@@ -27,8 +27,8 @@ export function createSkillSyncEngine(deps: SkillSyncDeps): SkillSyncEngine {
     const pack = await deps.packs.get(packId);
     if (!pack) return;
     if (pack.syncMode === "tracked") {
-      const head = await deps.fetcher.resolveRef(pack);
-      if (pack.lastImport?.status === "ok" && head === pack.lastImport.commit) return;
+      const head = isCommitRef(pack.ref) ? pack.ref.trim() : await deps.fetcher.resolveRef(pack);
+      if (pack.lastImport?.status === "ok" && pack.lastImport.commit.startsWith(head)) return;
       await deps.reconcile(packId);
     } else {
       const head = await deps.fetcher.resolveRef(pack);

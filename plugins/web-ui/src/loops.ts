@@ -3,7 +3,7 @@ import { html, nothing, render, type TemplateResult } from "lit";
 import { CheckCircle2, ChevronDown, ChevronRight, CornerUpLeft, Pause, Play, Zap } from "lucide";
 import { api } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
-import { fieldSelect, icon } from "./ui";
+import { fieldSelect, icon, slackOff } from "./ui";
 import { listBackLink, listPageTpl } from "./list-page";
 import { appState, can } from "./shell";
 import { tip } from "./tooltip";
@@ -687,6 +687,7 @@ function ingestionTpl(loop: LoopView): TemplateResult {
           ${Object.entries(names)
             .filter(
               ([kind]) =>
+                !(slackOff() && kind === "slack") &&
                 !ingestion?.sources.some((source) => source.kind === kind) &&
                 (!loop.sources?.length ? true : kind !== "webhook" && loop.sources.includes(kind)),
             )

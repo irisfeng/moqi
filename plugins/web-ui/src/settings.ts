@@ -4,7 +4,7 @@ import { openModelConnectManager, type StatusResponse } from "./model-connect";
 import { api, fetchUiState, putUiState, withBase } from "./core-bridge";
 import { html, nothing, render, type TemplateResult } from "lit";
 import { Download, ExternalLink, LogOut, Monitor, Moon, ShieldUser, Sun, type IconNode } from "lucide";
-import { icon } from "./ui";
+import { icon, slackOff } from "./ui";
 import { ADMIN_HOME_URL, appState, can, signOut } from "./shell";
 import { sessionsState, setWebOnly } from "./sessions";
 import { errMessage } from "../../chassis/src/errors";
@@ -508,11 +508,16 @@ function settingsPane(): TemplateResult {
     </div>
     <div class="settings-group">
       ${appState.me?.personalModelAccounts === false ? nothing : aiAccountsRow()} ${themeRow()} ${paletteRow()}
-      ${openBehaviorRow()} ${sidebarSurfaceRow()} ${can("admin") ? adminRow() : nothing} ${desktopRow()} ${accountRow()}
+      ${openBehaviorRow()} ${slackOff() ? nothing : sidebarSurfaceRow()} ${can("admin") ? adminRow() : nothing}
+      ${desktopRow()} ${accountRow()}
       <qm-contact-row class="settings-row settings-contact"></qm-contact-row> ${versionRow()}
-      <div class="settings-row settings-slack-account">
-        <qm-slack-account .user=${`${appState.me?.org}:${appState.me?.user}`}></qm-slack-account>
-      </div>
+      ${
+        slackOff()
+          ? nothing
+          : html`<div class="settings-row settings-slack-account">
+              <qm-slack-account .user=${`${appState.me?.org}:${appState.me?.user}`}></qm-slack-account>
+            </div>`
+      }
       <div class="settings-row">
         <qm-onboarding-welcome
           .me=${appState.me}

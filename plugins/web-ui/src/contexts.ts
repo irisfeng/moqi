@@ -32,7 +32,7 @@ import {
 import { deepLinkPath, isPlainLeftClick, UI_BASE } from "./deep-link";
 import { splitProjectFiles } from "./project-files.ts";
 import { userErrorMessage as errMessage } from "./user-error";
-import { actionSnippet, fieldSelect, formatBytes, icon, initials, menuSelect, relTime } from "./ui";
+import { actionSnippet, fieldSelect, formatBytes, icon, initials, menuSelect, relTime, slackOff } from "./ui";
 import {
   appState,
   blockUnsentAttachmentNavigation,
@@ -552,8 +552,9 @@ function detailTpl(c: CoreContext): TemplateResult {
           }
         </div>
         <aside class="context-settings" aria-label=${c.project ? "Project settings" : "Context settings"}>
-          ${c.project ? projectMembersSection(c) : nothing} ${c.project ? projectSlackSection(c) : nothing}
-          ${contextModelSection(c.scopeId)} ${channelHeaderSection(c.scopeId)} ${ambientPolicySection(c.scopeId)}
+          ${c.project ? projectMembersSection(c) : nothing}
+          ${c.project && !slackOff() ? projectSlackSection(c) : nothing} ${contextModelSection(c.scopeId)}
+          ${channelHeaderSection(c.scopeId)} ${ambientPolicySection(c.scopeId)}
         </aside>
       </div>
     </div>

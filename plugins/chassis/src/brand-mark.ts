@@ -1,12 +1,11 @@
 const BRAND_MARK_GEOMETRY = {
-  viewBox: "0 0 64 64",
-  background: "#181d23",
-  outerPath: "M43 18.5a18 18 0 1 0 0 27",
-  outerStroke: "#f7f8f9",
-  outerStrokeWidth: "7.5",
-  checkPath: "m24.5 32.5 5.5 5.5 11.5-12",
-  checkStroke: "#4f7fff",
-  checkStrokeWidth: "5",
+  viewBox: "0 0 100 100",
+  leftPath: "M23 0H39V49H55V100H23A23 23 0 0 1 0 77V23A23 23 0 0 1 23 0Z",
+  rightPath: "M45 0H77A23 23 0 0 1 100 23V77A23 23 0 0 1 77 100H61V43H45Z",
+  light: { left: "#1f2328", right: "#1c6a8a" },
+  dark: { left: "#ecebe6", right: "#6bb6d3" },
 } as const;
 
-export const BRAND_MARK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${BRAND_MARK_GEOMETRY.viewBox}"><rect width="64" height="64" rx="16" fill="${BRAND_MARK_GEOMETRY.background}"/><path d="${BRAND_MARK_GEOMETRY.outerPath}" fill="none" stroke="${BRAND_MARK_GEOMETRY.outerStroke}" stroke-linecap="round" stroke-width="${BRAND_MARK_GEOMETRY.outerStrokeWidth}"/><path d="${BRAND_MARK_GEOMETRY.checkPath}" fill="none" stroke="${BRAND_MARK_GEOMETRY.checkStroke}" stroke-linecap="round" stroke-linejoin="round" stroke-width="${BRAND_MARK_GEOMETRY.checkStrokeWidth}"/></svg>`;
+const { light, dark } = BRAND_MARK_GEOMETRY;
+
+export const BRAND_MARK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${BRAND_MARK_GEOMETRY.viewBox}"><style>.l{fill:${light.left}}.r{fill:${light.right}}@media (prefers-color-scheme:dark){.l{fill:${dark.left}}.r{fill:${dark.right}}}</style><path class="l" d="${BRAND_MARK_GEOMETRY.leftPath}"/><path class="r" d="${BRAND_MARK_GEOMETRY.rightPath}"/></svg>`;
