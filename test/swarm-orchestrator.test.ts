@@ -136,7 +136,7 @@ test("wired swarm outbox drives the real orchestrator, durable runs, and authent
     });
     assert.equal(rootTurn.status, "ok");
     const root = (await built.sessions.get(rootTurn.sessionId!))!;
-    await built.memory.replace(root.scopeId, "# Memory\n- Root memory remains in the authorized notebook.");
+    await built.memory.capture(root.scopeId, ["Root memory remains in the authorized notebook."], Date.now());
     const rootRun = (await built.runs.list()).find((run) => run.request.conversation.threadRef === root.threadRef)!;
     const forum = await built.sandboxResources.create("U1", root.scopeId, "sprites", "Integration forum");
     const service = built.app.swarms!;
@@ -197,6 +197,8 @@ for (const storage of ["memory", "postgres"] as const) {
     async () => {
       let databaseUrl: string | undefined;
       let cleanupDatabase = async () => {};
+      let recordedErrors: (() => Promise<number>) | undefined;
+      let errorsAfterStop: number | undefined;
       if (storage === "postgres") {
         const { default: pg } = await import("pg");
         const url = new URL(process.env.SWARM_TEST_DATABASE_URL!);
@@ -205,6 +207,8 @@ for (const storage of ["memory", "postgres"] as const) {
         await pool.query(`CREATE SCHEMA ${schema}`);
         url.searchParams.set("options", `-c search_path=${schema}`);
         databaseUrl = url.toString();
+        recordedErrors = async () =>
+          Number((await pool.query(`SELECT COUNT(*) AS n FROM ${schema}.error_events`)).rows[0].n);
         cleanupDatabase = async () => {
           try {
             await pool.query(`DROP SCHEMA ${schema} CASCADE`);
@@ -436,8 +440,10 @@ for (const storage of ["memory", "postgres"] as const) {
         exerciseTurn = undefined;
         await new Promise<void>((resolve) => server.close(() => resolve()));
         await built.runtime.stop();
+        errorsAfterStop = await recordedErrors?.();
         await cleanupDatabase();
       }
+      if (storage === "postgres") assert.ok(errorsAfterStop! > 0);
     },
   );
 }

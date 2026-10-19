@@ -4,7 +4,8 @@ import { api } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
 import { groupPeople, type DirectoryPerson } from "./people-groups.ts";
 import { appState } from "./shell-state";
-import { copyText, icon } from "./ui";
+import { copyText } from "./ui";
+import { icon } from "./icons";
 
 let host: HTMLDivElement | null = null;
 let people: DirectoryPerson[] = [];

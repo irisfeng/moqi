@@ -21,7 +21,8 @@ import {
 } from "lucide";
 import { api, fileContentUrl, webFetch, withBase } from "./core-bridge";
 import { userErrorMessage as errMessage } from "./user-error.ts";
-import { browserRenderableImage, fieldSelect, formatBytes, icon, relTime } from "./ui";
+import { browserRenderableImage, fieldSelect, formatBytes, relTime } from "./ui";
+import { icon } from "./icons";
 import { contextsState, ensureContexts, personalScopeId, scopeTitle } from "./contexts";
 import { appState } from "./shell";
 import { fileListNeedsAllPages } from "./file-list";

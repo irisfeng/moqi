@@ -1,10 +1,13 @@
 import "dockview-core/dist/styles/dockview.css";
+import "./model-picker.css";
+import "./tooltip.css";
 import "./shell.css";
 import "./shell-extras.css";
 import "./home-shell.css";
 import "./growth.css";
 import "./home-chat.css";
 import "./scenario-cards.css";
+import "./typography-zh.css";
 import { observeMobileViewport } from "./mobile-viewport";
 import { bootSafely, closeUserMenu } from "./shell";
 import { registerChatSearchHotkey } from "./search";

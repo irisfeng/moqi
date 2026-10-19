@@ -1,4 +1,5 @@
 import type { TeamStore } from "../teams/teams.ts";
+import type { DecisionStore } from "../decisions/store.ts";
 import type { ExternalSlackPolicies } from "../resolution/external-slack.ts";
 import type { ProviderKeys } from "../harness/pi-harness.ts";
 import type { ModelGatewayTransportConfig } from "../model/provider-endpoints.ts";
@@ -82,6 +83,7 @@ import type { AmbientJudgmentStore } from "../surface-cache/ambient-judgment-sto
 import type { AckEmojiPickStore } from "../surface-cache/ack-emoji-pick-store.ts";
 import type { ChannelPolicyStore } from "../surface-cache/channel-policy-store.ts";
 import type { UiStateStore } from "../surfaces/ui-state.ts";
+import type { SessionStateBus } from "../runs/session-state-bus.ts";
 import type { ConnectorTokenSource, SlackUserClient } from "../loops/sources/adapter.ts";
 import type { RateLimiter } from "../ratelimit/rate-limiter.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
@@ -136,6 +138,7 @@ export interface ServerDeps {
   credentialUsage?: CredentialUsageSink;
   featureFlags?: FeatureFlagStore;
   teams?: TeamStore;
+  decisions?: DecisionStore;
   egressAudit?: EgressAuditSink;
   brokerFetch?: BrokerFetch;
   gitHttpFetch?: GitHttpFetch;
@@ -173,6 +176,7 @@ export interface ServerDeps {
   firstWebTurns?: DurableMap<FirstWebTurnRecord>;
   firstWebTurnsDurable?: boolean;
   legacyTurnIntents?: LegacyTurnIntentStore;
+  sessionStateBus?: SessionStateBus;
   workspace?: WorkspaceStore;
   files?: FileArtifactStore;
   fileUploads?: DirectFileUploads;

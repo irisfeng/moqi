@@ -216,6 +216,7 @@ async function boot(options: BootOptions): Promise<Boot> {
     },
     resizeComposer: () => {},
     currentModelOption: () => ({ model: "test-model", harnessId: "test" }),
+    followsDefault: () => false,
     carryModelPick: () => {},
     refreshRuntimeSelection: async () => {},
     onDragEnter: () => {},
@@ -258,6 +259,7 @@ async function boot(options: BootOptions): Promise<Boot> {
       suppressProactiveOpener: (threadRef: string) => void;
     };
     const surface = createChatSurface(ctx);
+    ctx.chat = surface;
     return {
       vite,
       container: containerEl,

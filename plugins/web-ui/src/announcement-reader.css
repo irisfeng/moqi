@@ -67,7 +67,7 @@
   margin-bottom: 20px;
 }
 .announcement-reader-head h1 {
-  font-family: var(--font-heading, "Songti SC", serif);
+  font-family: var(--font-heading, var(--app-font));
   font-size: 26px;
   line-height: 1.45;
   letter-spacing: 0;
@@ -98,7 +98,7 @@
 }
 .announcement-prose {
   padding: 20px 40px 32px;
-  font-family: var(--font-heading, "Songti SC", serif);
+  font-family: var(--font-heading, var(--app-font));
   font-size: 17px;
   line-height: 1.95;
   overflow-wrap: anywhere;

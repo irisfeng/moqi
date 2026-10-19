@@ -1,6 +1,6 @@
 import { html, render } from "lit";
 import { X, Folder } from "lucide";
-import { icon } from "./ui";
+import { icon } from "./icons";
 import { forkSession, type CoreSession } from "./core-bridge";
 import { contextsState, ensureContexts } from "./contexts";
 import { userErrorMessage as errMessage } from "./user-error";

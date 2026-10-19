@@ -15,9 +15,11 @@ import type {
   Run,
   RunDeliveryState,
   RunOutcome,
+  RunStop,
   RunStore,
 } from "./run-store.ts";
-import { isTerminal, releasesDedupKey, runOutcome } from "./run-store.ts";
+import type { RunPriority } from "./run-store.ts";
+import { countedClaims, isTerminal, releasesDedupKey, runOutcome, runPriority } from "./run-store.ts";
 import { errMessage, swallow } from "../util/errors.ts";
 import type { LedgerBegin, ToolLedger } from "./tool-ledger.ts";
 
@@ -49,12 +51,15 @@ function rowToRun(r: Record<string, unknown>): Run {
     attempts: Number(r.attempts),
     errorAttempts: Number(r.error_attempts),
     maxAttempts: Number(r.max_attempts),
+    priority: Number(r.claim_priority) as RunPriority,
+    preemptions: Number(r.preemptions),
     leaseToken: (r.lease_token as string | null) ?? null,
     leaseExpiresAt: r.lease_expires_at === null ? null : Number(r.lease_expires_at),
     workerId: (r.worker_id as string | null) ?? null,
     createdAt: Number(r.created_at),
     startedAt: r.started_at === null ? null : Number(r.started_at),
     finishedAt: r.finished_at === null ? null : Number(r.finished_at),
+    lastStop: r.last_stop != null ? (JSON.parse(r.last_stop as string) as RunStop) : null,
   };
 }
 
@@ -146,6 +151,24 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
         id: "runs/store/0006-terminal-finished",
         statements: [
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_terminal_finished ON runs(finished_at, id) WHERE status IN ('done','failed')`,
+        ],
+      },
+      {
+        id: "runs/store/0007-last-stop",
+        statements: [`SET LOCAL lock_timeout = '3s'`, `ALTER TABLE runs ADD COLUMN IF NOT EXISTS last_stop TEXT`],
+      },
+      {
+        id: "runs/store/0008-claim-priority",
+        statements: [
+          `SET LOCAL lock_timeout = '3s'`,
+          `ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_priority SMALLINT NOT NULL DEFAULT 2`,
+          `ALTER TABLE runs ADD COLUMN IF NOT EXISTS preemptions INT NOT NULL DEFAULT 0`,
+        ],
+      },
+      {
+        id: "runs/store/0009-claim-priority-index",
+        statements: [
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_pending_priority ON runs(claim_priority, created_at, seq) WHERE status='pending'`,
         ],
       },
       {
@@ -241,24 +264,31 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
     run: Run,
     error: string,
     retry: boolean,
-    opts?: { ifExpiredAt?: number; countsAsError?: boolean; retryAfterMs?: number },
+    opts?: { ifExpiredAt?: number; countsAsError?: boolean; retryAfterMs?: number; stop?: RunStop },
   ): Promise<{ requeued: boolean; applied: boolean }> {
     const ifExpiredAt = opts?.ifExpiredAt ?? null;
     const countsAsError = opts?.countsAsError ?? false;
     const errorAttemptsAfter = run.errorAttempts + (countsAsError ? 1 : 0);
-    const overClaimed = run.attempts >= maxClaims;
+    const overClaimed = countedClaims(run) >= maxClaims;
     if (retry && errorAttemptsAfter < run.maxAttempts && !overClaimed) {
       const { rowCount } = await q(
         `UPDATE runs SET status='pending', lease_token=NULL, lease_expires_at=NULL, worker_id=NULL,
-           error_attempts=error_attempts+$4, retry_after=$5
+           error_attempts=error_attempts+$4, retry_after=$5, last_stop=$6
          WHERE id=$1 AND lease_token=$2 AND status='running' AND ($3::bigint IS NULL OR lease_expires_at <= $3) RETURNING pg_notify('qm_run_available', 'null')`,
-        [run.id, run.leaseToken, ifExpiredAt, countsAsError ? 1 : 0, Date.now() + Math.max(0, opts?.retryAfterMs ?? 0)],
+        [
+          run.id,
+          run.leaseToken,
+          ifExpiredAt,
+          countsAsError ? 1 : 0,
+          Date.now() + Math.max(0, opts?.retryAfterMs ?? 0),
+          JSON.stringify(opts?.stop ?? (countsAsError ? { kind: "error" } : { kind: "lease_expired" })),
+        ],
       );
       return { requeued: rowCount > 0, applied: rowCount > 0 };
     }
     const reason =
       !countsAsError && overClaimed && retry && errorAttemptsAfter < run.maxAttempts
-        ? `run parked after ${run.attempts} claims without completing (suspected crash loop)`
+        ? `run parked after ${countedClaims(run)} claims without completing (suspected crash loop)`
         : error;
     const result: TurnResult = { status: "failed", sessionId: run.sessionId, reason };
     const { rowCount } = await q(
@@ -271,6 +301,13 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
     return { requeued: false, applied: rowCount > 0 };
   }
 
+  const claimable = (now: string) => `candidate.status='pending' AND candidate.retry_after <= ${now}
+    AND NOT EXISTS (
+      SELECT 1 FROM runs sibling WHERE sibling.session_id=candidate.session_id
+        AND (sibling.status='running' OR (sibling.status='pending'
+          AND (sibling.retry_after > ${now} OR (sibling.created_at, sibling.seq) < (candidate.created_at, candidate.seq))))
+    )`;
+
   async function claim(workerId: string, ttlMs: number, runId?: string, sessionId?: string): Promise<Run | null> {
     const token = randomUUID();
     const now = Date.now();
@@ -279,16 +316,10 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
         `UPDATE runs SET status='running', lease_token=$1, lease_expires_at=$2, worker_id=$3,
            attempts=attempts+1, started_at=COALESCE(started_at,$4)
          WHERE id = (
-           SELECT candidate.id FROM runs candidate WHERE candidate.status='pending'
-             AND candidate.retry_after <= $4
+           SELECT candidate.id FROM runs candidate WHERE ${claimable("$4")}
              AND ($5::text IS NULL OR candidate.id=$5)
              AND ($6::text IS NULL OR candidate.session_id=$6)
-             AND NOT EXISTS (
-               SELECT 1 FROM runs sibling WHERE sibling.session_id=candidate.session_id
-                 AND (sibling.status='running' OR (sibling.status='pending'
-                   AND (sibling.retry_after > $4 OR (sibling.created_at, sibling.seq) < (candidate.created_at, candidate.seq))))
-             )
-           ORDER BY candidate.created_at ASC, candidate.seq ASC FOR UPDATE SKIP LOCKED LIMIT 1
+           ORDER BY candidate.claim_priority ASC, candidate.created_at ASC, candidate.seq ASC FOR UPDATE SKIP LOCKED LIMIT 1
          ) RETURNING *`,
         [token, now + ttlMs, workerId, now, runId ?? null, sessionId ?? null],
       );
@@ -319,6 +350,8 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
 
     async enqueue({ sessionId, request, dedupKey, webBaseKey, maxAttempts = 3 }: EnqueueInput): Promise<EnqueueResult> {
       const id = randomUUID();
+      const delegating = request.delegatingRunId ? await getRun(request.delegatingRunId) : null;
+      const priority = runPriority(request, delegating?.priority ?? null);
       if (webBaseKey) {
         if (!dedupKey) throw new Error("web send requires a deduplication key");
         return withPgTransaction(await queryPool(), async (client) => {
@@ -335,11 +368,11 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
               ...(candidates.length > 1 ? { ambiguous: true } : {}),
             };
           const inserted = await client.query(
-            `INSERT INTO runs(id, session_id, status, request, idempotency_key, attempts, max_attempts, created_at)
-             VALUES ($1,$2,'pending',$3,$4,0,$5,$6)
+            `INSERT INTO runs(id, session_id, status, request, idempotency_key, attempts, max_attempts, created_at, claim_priority)
+             VALUES ($1,$2,'pending',$3,$4,0,$5,$6,$7)
              ON CONFLICT (idempotency_key) DO NOTHING
              RETURNING *, pg_notify('qm_run_available', 'null')`,
-            [id, sessionId, jsonbStringify(request), dedupKey, maxAttempts, Date.now()],
+            [id, sessionId, jsonbStringify(request), dedupKey, maxAttempts, Date.now(), priority],
           );
           if (inserted.rows[0]) return { run: rowToRun(inserted.rows[0]), deduped: false };
           const existing = await client.query("SELECT * FROM runs WHERE idempotency_key = $1", [dedupKey]);
@@ -349,11 +382,11 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
       }
       for (;;) {
         const { rows } = await q(
-          `INSERT INTO runs(id, session_id, status, request, idempotency_key, attempts, max_attempts, created_at)
-           VALUES ($1,$2,'pending',$3,$4,0,$5,$6)
+          `INSERT INTO runs(id, session_id, status, request, idempotency_key, attempts, max_attempts, created_at, claim_priority)
+           VALUES ($1,$2,'pending',$3,$4,0,$5,$6,$7)
            ON CONFLICT (idempotency_key) DO NOTHING
            RETURNING *, pg_notify('qm_run_available', 'null')`,
-          [id, sessionId, jsonbStringify(request), dedupKey ?? null, maxAttempts, Date.now()],
+          [id, sessionId, jsonbStringify(request), dedupKey ?? null, maxAttempts, Date.now(), priority],
         );
         if (rows[0]) return { run: rowToRun(rows[0]), deduped: false };
         const existing = await runs.getByDedupKey(dedupKey!);
@@ -378,6 +411,16 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
 
     claimById: (runId, workerId, ttlMs) => claim(workerId, ttlMs, runId),
     claimForSession: (sessionId, workerId, ttlMs) => claim(workerId, ttlMs, undefined, sessionId),
+    async personWaiting(createdBefore) {
+      const { rows } = await q(
+        `SELECT EXISTS (
+           SELECT 1 FROM runs candidate WHERE ${claimable("$2")}
+             AND candidate.claim_priority=0 AND candidate.created_at <= $1
+         ) AS waiting`,
+        [createdBefore, Date.now()],
+      );
+      return rows[0]?.waiting === true;
+    },
 
     async heartbeat(runId, leaseToken, ttlMs): Promise<boolean> {
       const { rowCount } = await q(
@@ -387,10 +430,10 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
       return rowCount > 0;
     },
 
-    async releaseLease(runId, leaseToken): Promise<boolean> {
+    async releaseLease(runId, leaseToken, stop): Promise<boolean> {
       const { rowCount } = await q(
-        "UPDATE runs SET status='pending', lease_token=NULL, lease_expires_at=NULL, worker_id=NULL WHERE id=$1 AND lease_token=$2 AND status='running' RETURNING pg_notify('qm_run_available', 'null')",
-        [runId, leaseToken],
+        "UPDATE runs SET status='pending', lease_token=NULL, lease_expires_at=NULL, worker_id=NULL, last_stop=COALESCE($3, last_stop), preemptions=preemptions+$4 WHERE id=$1 AND lease_token=$2 AND status='running' RETURNING pg_notify('qm_run_available', 'null')",
+        [runId, leaseToken, stop ? JSON.stringify(stop) : null, stop?.kind === "parked" ? 1 : 0],
       );
       return rowCount > 0;
     },
@@ -414,7 +457,11 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
       if (!run || run.leaseToken !== leaseToken) return { requeued: false };
       return {
         requeued: (
-          await retire(run, error, opts?.retry !== false, { countsAsError: true, retryAfterMs: opts?.retryAfterMs })
+          await retire(run, error, opts?.retry !== false, {
+            countsAsError: true,
+            retryAfterMs: opts?.retryAfterMs,
+            ...(opts?.stop ? { stop: opts.stop } : {}),
+          })
         ).requeued,
       };
     },

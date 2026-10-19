@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { markSlackOff } from "../../chassis/src/branding.ts";
+import { markDesktopOff, markSlackOff } from "../../chassis/src/branding.ts";
 
 function read(name: string): string {
   return readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8");
@@ -98,4 +98,26 @@ test("a loop offers no Slack events ingestion source", () => {
 test("the webhook form drops the Slack scheme", () => {
   assert.match(body(read("webhooks.ts"), "function webhookForm()"), /scheme\.value === "slack"/);
   assert.match(body(read("webhooks.ts"), "function webhookForm()"), /slackOff\(\)/);
+});
+
+test("markDesktopOff marks the page alongside the Slack flag, and leaves it unchanged when off", () => {
+  const page = '<!doctype html><html lang="en"><head></head></html>';
+  assert.equal(
+    markDesktopOff(markSlackOff(page, true), true),
+    '<!doctype html><html data-desktop="off" data-slack="off" lang="en"><head></head></html>',
+  );
+  assert.equal(markDesktopOff(page, false), page);
+});
+
+test("the web UI server marks the page on QM_DESKTOP, and Settings then drops the Mac download row", () => {
+  const server = readFileSync(new URL("../server/index.ts", import.meta.url), "utf8");
+  assert.match(
+    server,
+    /markDesktopOff\(markSlackOff\(branded, process\.env\.QM_SLACK === "off"\), process\.env\.QM_DESKTOP === "off"\)/,
+  );
+  assert.match(
+    read("ui.ts"),
+    /export function desktopOff\(\): boolean \{\s*return document\.documentElement\.dataset\.desktop === "off";/,
+  );
+  assert.match(body(read("settings.ts"), "function settingsPane()"), /desktopOff\(\) \? nothing : desktopRow\(\)/);
 });

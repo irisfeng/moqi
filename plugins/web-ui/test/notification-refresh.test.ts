@@ -370,7 +370,11 @@ test("notification refresh loads latest read-only messages and reports network f
     assert.equal(appState.me, null);
     assert.ok(conversations.allConversations().every((conv) => conv.mountedThreadRef() === null));
     const bridge = (await vite.ssrLoadModule("/src/core-bridge.ts")) as typeof import("../src/core-bridge.ts");
-    bridge.reportSigninRequired({ mode: "dev", reason: "unauthenticated" });
+    const beforeSigninFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({ mode: "dev", reason: "unauthenticated" }, { status: 401 })) as typeof fetch;
+    await bridge.webFetch("/api/me");
+    globalThis.fetch = beforeSigninFetch;
     appState.me = { user: "new-login@fixture", org: "o" };
     shell.mountShell();
     const privateContent = document.createElement("div");

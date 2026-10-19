@@ -1,4 +1,5 @@
 import { adminOperations } from "../tools/admin.ts";
+import { handbackStop } from "../runs/run-store.ts";
 import { MAX_OUTBOUND_FILES, type OutboundFile } from "../core/attachments.ts";
 import { MaskedExecutionError } from "../security/secret-masking.ts";
 import type { DocumentInput } from "../core/document-inputs.ts";
@@ -17,6 +18,8 @@ import { classifyScopeLabel } from "../classify/scope-classifier.ts";
 import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { splitToScope } from "../api/artifact-share.ts";
 import { errMessage } from "../util/errors.ts";
+import { MemoryFactsMissing } from "../memory/facts.ts";
+import { MemoryDisclosureDenied } from "../memory/disclosure.ts";
 import { computerVerdict } from "../sandbox/sandbox.ts";
 import { redactCommand } from "../sandbox/exec-process-session.ts";
 import { redactSecrets } from "./redact-secrets.ts";
@@ -25,8 +28,10 @@ import { BOT_MODES } from "../surface-cache/channel-policy-store.ts";
 import { headSlice, tailSlice } from "../util/text.ts";
 import {
   applyGovernorVerdict,
+  cancelGoal,
   createGoalRecord,
   goalFloorMeter,
+  goalIsOpen,
   goalReport,
   GOAL_STEP_BACK_PROMPT,
   type GoalGovernor,
@@ -83,7 +88,6 @@ export interface ToolContextRef {
   emit?: (entry: { type: EntryType; payload: unknown; scopeLabel: ScopeId }) => void | Promise<unknown>;
   scopeLabel?: ScopeId;
   orgScopeId?: ScopeId;
-  tapeResultScopes?: Map<string, ScopeId>;
   llmCapture?: Array<{
     envelope: unknown;
     truncated: boolean;
@@ -107,6 +111,8 @@ export interface ToolContextRef {
   silentRequested?: boolean;
 
   goal?: GoalRecord | null;
+  saveGoal?: (goal: GoalRecord) => Promise<void>;
+  goalOpenedThisTurn?: boolean;
 
   goalRound?: number;
 
@@ -167,44 +173,6 @@ function capPayloadStrings(v: unknown): unknown {
 
 function capText(t: string): string {
   return t.length > MAX_TOOL_RESULT_CHARS ? `${t.slice(0, MAX_TOOL_RESULT_CHARS)}…[truncated]` : t;
-}
-
-function contentFactLines(content: string): string[] {
-  return content
-    .split(/\r?\n/)
-    .map((line) =>
-      line
-        .trim()
-        .replace(/^[-*]\s+/, "")
-        .trim(),
-    )
-    .filter(Boolean);
-}
-
-function passedRememberFields(params: { facts?: unknown; content?: unknown; query?: unknown }): string {
-  const fields = ["facts", "content", "query"].filter((field) => params[field as keyof typeof params] !== undefined);
-  return fields.length ? fields.join(", ") : "none";
-}
-
-function rememberFacts(params: { facts?: unknown; content?: unknown; query?: unknown }): {
-  facts: string[];
-  coercedFrom?: "facts" | "content" | "query";
-} {
-  if (typeof params.facts === "string") {
-    const fact = params.facts.trim();
-    if (fact) return { facts: [fact], coercedFrom: "facts" };
-  }
-  const facts = Array.isArray(params.facts) ? params.facts.map((fact) => String(fact).trim()).filter(Boolean) : [];
-  if (facts.length) return { facts };
-  if (typeof params.content === "string") {
-    const contentFacts = contentFactLines(params.content);
-    if (contentFacts.length) return { facts: contentFacts, coercedFrom: "content" };
-  }
-  if (typeof params.query === "string") {
-    const fact = params.query.trim();
-    if (fact) return { facts: [fact], coercedFrom: "query" };
-  }
-  return { facts: [] };
 }
 
 function fmtStatus(s: { state: "running" } | { state: "exited"; code: number }): string {
@@ -420,11 +388,10 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       orgScopeId: ref.orgScopeId ?? ref.scopeLabel,
       sourceScopeId,
     });
-    if (type === "tool_result" && scopeLabel !== ref.scopeLabel) {
-      const callId = (payload as { callId?: unknown } | null)?.callId;
-      if (typeof callId === "string" && callId) (ref.tapeResultScopes ??= new Map()).set(callId, scopeLabel);
+    if (type === "tool_result" && isObj(payload)) {
+      if (ref.shutdown?.aborted) payload = { ...payload, interrupted: true, stop: handbackStop(ref.shutdown) };
+      else if (ref.abortSignal?.aborted) payload = { ...payload, stopped: true };
     }
-    if (type === "tool_result" && ref.shutdown?.aborted && isObj(payload)) payload = { ...payload, interrupted: true };
     await ref.emit({ type, payload, scopeLabel });
   };
 
@@ -709,6 +676,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         ...(ref.abortSignal ? { signal: ref.abortSignal } : {}),
       };
       const r = await tc.execute(params.command, Object.keys(execOpts).length ? execOpts : undefined);
+      const { stdout: _stdout, stderr: _stderr, ...execMeta } = r;
       const parts = [r.stdout, r.stderr ? `[stderr]\n${r.stderr}` : ""].filter(Boolean).join("\n");
       const reachedPrefix = r.reached ? `[ran on ${r.reached.label}'s computer]\n` : "";
       const localExec = !route?.scratch && !route?.ownerAuth && route?.reachTarget === undefined && !r.reached;
@@ -718,7 +686,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           : "";
       return recordResult(
         callId,
-        { tool: "execute", ...scopeNote, ...r },
+        { tool: "execute", ...scopeNote, ...execMeta },
         {
           content: [
             {
@@ -1185,6 +1153,26 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     },
   });
 
+  const installCanvas = defineTool({
+    name: "install_canvas",
+    label: "install_canvas",
+    description:
+      "Replace this person's always-on canvas with a copy of an always-on canvas someone shared with them as a Files record. Always asks them to approve first.",
+    parameters: Type.Object({ id: Type.String({ description: "Files ID of the shared canvas." }) }),
+    async execute(callId, params) {
+      const tc = ref.current;
+      if (!tc?.installSharedCanvas) return text("[error] installing a shared canvas isn't available on this turn");
+      await recordCall(callId, { tool: "files", action: "install_canvas", id: params.id });
+      const error = await tc.installSharedCanvas(params.id);
+      return recordResult(
+        callId,
+        { tool: "files", action: "install_canvas", id: params.id, ...(error ? { error } : {}) },
+        text(error ? `[error] ${error}` : "Installed the shared canvas as their always-on canvas."),
+        Boolean(error),
+      );
+    },
+  });
+
   const write = defineTool({
     name: "write",
     label: "write",
@@ -1348,44 +1336,58 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     description:
       "Your durable memory of the person or team you work for — the ONE way to read or change it. " +
       "It is NOT a file: writing MEMORY.md with files or the shell does not touch it. It persists across every conversation and surface (continuity — " +
-      "you're a colleague who remembers, not a fresh chat each time); this conversation can only " +
-      "ever touch its OWN memory, no one else's, by design. " +
+      "you're a colleague who remembers, not a fresh chat each time). Reads may span authorized " +
+      "notebooks; writes only change this conversation's own notebook. " +
       'action="search" finds remembered facts matching every word of `query` (case-insensitive) ' +
       "across every notebook this conversation may read — check what you already know before asking. " +
-      "Every line is loaded into your context on every future turn, so memory is your most " +
-      "expensive storage: it is an index, not a datastore. Save pointers to data, never the data " +
+      "Only a bounded selection of memories is loaded into context; search the full notebooks " +
+      "for facts missing from that selection. Keep memory concise. Save pointers to data, never the data " +
       "itself — working state (queues, backlogs, watermarks, ID lists, logs, per-item status) " +
       "belongs in a file written with the files tool, with at most one memory line naming that file and what " +
       "it holds. If a fact is a list that grows, it's a file. Files are this " +
       "conversation's own (a pointer read from another conversation is a hint of where state " +
       "lives, not a path you can open). " +
-      'action="remember" appends durable `facts` now — short, self-contained bullets (a preference, ' +
+      'action="add" saves new `facts` ([{text}, …]) now — short, self-contained facts (a preference, ' +
       "an identifier, an ongoing project, how they like to work); never secrets, credentials, " +
       "one-off trivia, or anything already recorded somewhere you can look up. " +
-      'action="read" returns the whole notebook. ' +
-      'action="rewrite" REPLACES the whole notebook with `content` — for curation (merge ' +
-      "duplicates, update or delete stale and wrong lines): read first, then write back the full " +
-      "corrected notebook, never a fragment.",
+      'action="read" lists this conversation\'s notebook, each fact with its #id; pass `scope` from a search result to read another authorized notebook. ' +
+      'action="edit" replaces the text of existing facts (`facts`: [{id, text}, …]); ' +
+      'action="delete" forgets facts by `ids`. Fix a fact that changed instead of adding a contradicting one, ' +
+      "and delete what is wrong or stale. Ids come from search or read; an edit or delete that names any id " +
+      "not in this conversation's notebook changes nothing and says which ids were bad.",
     parameters: Type.Object({
       action: Type.Union(
-        [Type.Literal("search"), Type.Literal("remember"), Type.Literal("read"), Type.Literal("rewrite")],
-        {
-          description: "search remembered facts, remember new facts, read the whole notebook, or rewrite (replace) it.",
-        },
+        [
+          Type.Literal("search"),
+          Type.Literal("read"),
+          Type.Literal("add"),
+          Type.Literal("edit"),
+          Type.Literal("delete"),
+        ],
+        { description: "search facts, read this notebook, or add, edit, or delete facts." },
       ),
       query: Type.Optional(
         Type.String({ description: "search only: words to look for among your remembered facts (all must match)." }),
       ),
       limit: Type.Optional(Type.Integer({ description: "search only: max facts to return (default 20)." })),
-      facts: Type.Optional(
-        Type.Array(Type.String(), {
+      scope: Type.Optional(
+        Type.String({
           description:
-            "remember only: the durable facts to save, one short self-contained sentence each — pointers to data, never the data itself.",
+            "search/read only: exact notebook scope ID from a search result. Omit to search all authorized notebooks or read your own.",
         }),
       ),
-      content: Type.Optional(
-        Type.String({ description: "rewrite only: the FULL new notebook content (replaces the whole notebook)." }),
+      facts: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.Optional(Type.String({ description: "edit only: the fact's id, e.g. #42." })),
+            text: Type.String({
+              description: "one short self-contained fact — a pointer to data, never the data itself.",
+            }),
+          }),
+          { description: "add: [{text}, …]; edit: [{id, text}, …]." },
+        ),
       ),
+      ids: Type.Optional(Type.Array(Type.String(), { description: "delete only: ids of the facts to forget." })),
     }),
     async execute(callId, params) {
       const tc = ref.current;
@@ -1394,11 +1396,14 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       await recordCall(callId, {
         tool: "memory",
         action,
+        ...(params.scope !== undefined ? { scope: params.scope } : {}),
         ...(params.query !== undefined ? { query: params.query } : {}),
         ...(params.limit !== undefined ? { limit: params.limit } : {}),
         ...(params.facts !== undefined ? { facts: params.facts } : {}),
-        ...(typeof params.content === "string" ? { chars: params.content.length } : {}),
+        ...(params.ids !== undefined ? { ids: params.ids } : {}),
       });
+      const fail = (error: string) =>
+        recordResult(callId, { tool: "memory", action, error }, text(`[error] ${error}`), true);
       const unavailable = () =>
         recordResult(
           callId,
@@ -1406,7 +1411,15 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           text("[memory isn't available in this conversation]"),
           true,
         );
-      if (opts?.readOnly && (action === "remember" || action === "rewrite")) {
+      if (params.scope !== undefined && action !== "search" && action !== "read") {
+        return recordResult(
+          callId,
+          { tool: "memory", action, error: "scope is read-only" },
+          text("[error] scope is only allowed for memory search/read; writes stay in this conversation."),
+          true,
+        );
+      }
+      if (opts?.readOnly && action !== "search" && action !== "read") {
         return recordResult(
           callId,
           { tool: "memory", action, readOnly: true },
@@ -1414,76 +1427,68 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           true,
         );
       }
-      switch (action) {
-        case "search": {
-          const query = params.query ?? "";
-          if (!query.trim())
+      const facts = (params.facts ?? []).map((fact) => ({ id: fact.id?.trim() ?? "", text: fact.text.trim() }));
+      try {
+        switch (action) {
+          case "search": {
+            const query = params.query ?? "";
+            if (!query.trim()) return fail("memory search requires `query`.");
+            const hits = await tc.memorySearch(query, params.limit, params.scope);
+            if (hits === null) return unavailable();
             return recordResult(
               callId,
-              { tool: "memory", action, error: "query required" },
-              text("[error] memory search requires `query`."),
-              true,
-            );
-          const hits = await tc.memorySearch(query, params.limit);
-          if (hits === null) return unavailable();
-          return recordResult(
-            callId,
-            { tool: "memory", action, query, count: hits.length },
-            text(hits.length ? hits.map((h) => `- ${h}`).join("\n") : `[no remembered facts match "${query}"]`),
-          );
-        }
-        case "read": {
-          const body = await tc.memoryRead();
-          if (body === null) return unavailable();
-          return recordResult(
-            callId,
-            { tool: "memory", action, chars: body.length },
-            text(body.trim() ? body : "(you have nothing remembered here yet)"),
-          );
-        }
-        case "remember": {
-          const resolved = rememberFacts(params);
-          const { facts } = resolved;
-          if (!facts.length)
-            return recordResult(
-              callId,
-              { tool: "memory", action, error: "facts required" },
-              text(
-                `[error] memory remember requires \`facts\` (a non-empty list). Received: ${passedRememberFields(
-                  params,
-                )} (use facts instead).`,
-              ),
-              true,
-            );
-          const added = await tc.memoryRemember(facts);
-          if (added === null) return unavailable();
-          return recordResult(
-            callId,
-            { tool: "memory", action, added, ...(resolved.coercedFrom ? { coercedFrom: resolved.coercedFrom } : {}) },
-            text(
-              added
-                ? `Remembered ${added} fact${added === 1 ? "" : "s"}.`
-                : "Already remembered — nothing new to save.",
-            ),
-          );
-        }
-        case "rewrite": {
-          if (typeof params.content !== "string") {
-            return recordResult(
-              callId,
-              { tool: "memory", action, error: "content required" },
-              text("[error] memory rewrite requires `content` (the full new notebook)."),
-              true,
+              { tool: "memory", action, query, count: hits.length },
+              text(hits.length ? hits.join("\n") : `[no remembered facts match "${query}"]`),
             );
           }
-          const ok = await tc.memoryRewrite(params.content);
-          if (ok === null) return unavailable();
-          return recordResult(
-            callId,
-            { tool: "memory", action, rewritten: true },
-            text("Rewrote your memory notebook."),
-          );
+          case "read": {
+            const body = await tc.memoryRead(params.scope);
+            if (body === null) return unavailable();
+            return recordResult(
+              callId,
+              { tool: "memory", action, chars: body.length },
+              text(body.trim() ? body : "(you have nothing remembered here yet)"),
+            );
+          }
+          case "add": {
+            const texts = facts.map((fact) => fact.text).filter(Boolean);
+            if (!texts.length) return fail("memory add requires `facts` (a non-empty list of {text}).");
+            const added = await tc.memoryAdd(texts);
+            if (added === null) return unavailable();
+            return recordResult(
+              callId,
+              { tool: "memory", action, added },
+              text(
+                added
+                  ? `Remembered ${added} fact${added === 1 ? "" : "s"}.`
+                  : "Already remembered — nothing new to save.",
+              ),
+            );
+          }
+          case "edit": {
+            if (!facts.length || facts.some((fact) => !fact.id || !fact.text))
+              return fail("memory edit requires `facts` as a non-empty list of {id, text}.");
+            if ((await tc.memoryEdit(facts)) === null) return unavailable();
+            return recordResult(
+              callId,
+              { tool: "memory", action, edited: facts.length },
+              text(`Updated ${facts.length} fact${facts.length === 1 ? "" : "s"}.`),
+            );
+          }
+          case "delete": {
+            const ids = (params.ids ?? []).map((id) => id.trim()).filter(Boolean);
+            if (!ids.length) return fail("memory delete requires `ids` (a non-empty list).");
+            if ((await tc.memoryDelete(ids)) === null) return unavailable();
+            return recordResult(
+              callId,
+              { tool: "memory", action, deleted: ids.length },
+              text(`Forgot ${ids.length} fact${ids.length === 1 ? "" : "s"}.`),
+            );
+          }
         }
+      } catch (e) {
+        if (e instanceof MemoryFactsMissing || e instanceof MemoryDisclosureDenied) return fail(e.message);
+        throw e;
       }
     },
   });
@@ -1561,7 +1566,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     name: "subagents",
     label: "subagents",
     description:
-      "Start and coordinate subagents: background workers you spawn for a task. A subagent does not get its own sidebar entry and does not inherit this conversation, so give it a complete standalone task with the context and authorization it needs. Its final answer comes back to you as an internal message. " +
+      "Start and coordinate subagents: background workers you spawn for a task. A subagent does not get its own sidebar entry or see this conversation, so pass what it needs to know. Brief it as you would a colleague just as capable as you are, if not more so: the goal, why it matters, what you already know, and any real limits. Leave the approach to them; keep it short and state preferences as preferences. Its final answer comes back to you as an internal message. " +
       "`open` starts a subagent with `task`. `followup_task` gives an existing subagent more work in `task` and starts a turn if it is idle; active work is queued safely. " +
       '`send_message` passes information to one of your subagents, a sibling subagent, or your parent (target="parent") without starting a turn; with interrupt:true it stops a subagent\'s current run. ' +
       "`read` with no target lists your subagents; with a target it reads that subagent's transcript. " +
@@ -1591,7 +1596,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       ),
       task: Type.Optional(
         Type.String({
-          description: "open and followup_task: the complete standalone instruction the subagent works from.",
+          description: "open and followup_task: the short task brief, with relevant context and real limits.",
         }),
       ),
       name: Type.Optional(Type.String({ description: "open: short title for the subagent (default: from task)." })),
@@ -1929,9 +1934,10 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         ...(params.sandbox_id ? { sandboxId: params.sandbox_id } : {}),
         ...(params.credentials?.length ? { credentials: params.credentials } : {}),
       });
+      const { output: _output, ...startMeta } = r;
       return recordResult(
         callId,
-        { tool: "execute", background: true, ...r },
+        { tool: "execute", background: true, ...startMeta },
         {
           content: [
             {
@@ -2091,9 +2097,10 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
               ...(params.max_bytes !== undefined ? { maxBytes: params.max_bytes } : {}),
               ...(params.wait_seconds !== undefined ? { waitSeconds: params.wait_seconds } : {}),
             });
+            const { chunks: _chunks, ...pollMeta } = r;
             return recordResult(
               callId,
-              { tool: "background", action: params.action, ...r },
+              { tool: "background", action: params.action, ...pollMeta },
               {
                 content: [
                   { type: "text" as const, text: `${r.chunks}\n[cursor ${r.cursor} | ${fmtStatus(r.status)}]` },
@@ -2342,16 +2349,10 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       '— it runs at their own personal scope and DMs them, even from a channel. Don\'t bury "send this to Slack" inside `task`; a cron with no destination ' +
       "runs but has nowhere external to post. Use action=retarget to move an existing cron's delivery to a " +
       "different destinationKey. Pass unfurlLinks=false when Slack should not show link previews for the delivered message.\n" +
-      "MODE (runAs) — who can edit it and whose access it runs with. A cron always runs with the combined " +
-      "keychain of its owner and its scope:\n" +
-      "  • a cron in your DM is just you — your access, only you can edit it.\n" +
-      '  • a cron in a channel/group defaults to "scopeShared": it runs with YOUR keychain plus what the ' +
-      "scope shares, any member can edit it, and you're notified of every edit you didn't make. This is the " +
-      "default for a shared scope and is usually what you want.\n" +
-      '  • pass runAs="owner" to keep a channel cron editable only by you (still your access).\n' +
-      '  • pass runAs="scopeFloor" to run with ONLY what the whole scope shares, excluding your personal ' +
-      "keychain — for team crons that shouldn't touch your private access.\n" +
-      "The mode is editable later via action=patch (runAs=...), but only by the cron's owner.\n" +
+      "ACCESS — a cron belongs to whoever creates it and runs as them, with what its conversation has been granted " +
+      "plus, where they share Open with it, their own keychain. Everyone in the conversation " +
+      "can see it; only its owner can change it unless they share write access (action=share, permission=write). " +
+      "If the owner leaves the conversation, the cron is deleted.\n" +
       "action=list pages through your crons (and ones visible through shared scopes), 25 per page — enabled first, " +
       "newest first, long task text trimmed; when there's more, a footer line names the offset for the next page. " +
       "action=get inspects one in full; " +
@@ -2439,7 +2440,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       scope: Type.Optional(
         Type.Literal("personal", {
           description:
-            "create: run privately at the asker's OWN personal scope (delivers to their DM), even from a channel. Don't combine with recipient/channel/participants/destinationKey or runAs=scopeFloor.",
+            "create: run privately at the asker's OWN personal scope (delivers to their DM), even from a channel. Don't combine with recipient/channel/participants/destinationKey.",
         }),
       ),
       participants: Type.Optional(
@@ -2463,12 +2464,6 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
             "create/patch: Slack-only delivery option. false suppresses link/media previews; omit to keep the default or existing setting.",
         }),
       ),
-      runAs: Type.Optional(
-        Type.Union([Type.Literal("owner"), Type.Literal("scopeFloor"), Type.Literal("scopeShared")], {
-          description:
-            'create or patch: the cron\'s mode. "scopeShared" (default in a channel/group) = your keychain + the scope\'s, any member edits, you\'re notified of others\' edits; "owner" = your access, only you edit (the default in a DM); "scopeFloor" = only what the whole scope shares, any member edits. On patch, only the owner may change the mode.',
-        }),
-      ),
       note: Type.Optional(
         Type.String({
           maxLength: CRON_FIRE_NOTE_MAX_CHARS,
@@ -2482,12 +2477,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           [
             Type.Null(),
             Type.Object({
-              harnessId: Type.Union([
-                Type.Literal("pi"),
-                Type.Literal("opencode"),
-                Type.Literal("codex"),
-                Type.Literal("claude"),
-              ]),
+              harnessId: Type.Union([Type.Literal("pi"), Type.Literal("claude")]),
               modelId: Type.String(),
               effortLevel: Type.Optional(
                 Type.Union([
@@ -2557,7 +2547,6 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
             ...(params.scope !== undefined ? { scope: params.scope } : {}),
             ...(Array.isArray(params.participants) ? { participants: params.participants } : {}),
             ...(params.destinationKey !== undefined ? { destinationKey: params.destinationKey } : {}),
-            ...(params.runAs !== undefined ? { runAs: params.runAs } : {}),
             ...(params.unfurlLinks !== undefined ? { unfurlLinks: params.unfurlLinks } : {}),
             ...(params.session !== undefined ? { session: params.session } : {}),
           });
@@ -2689,7 +2678,6 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
             ...(params.enabled !== undefined ? { enabled: params.enabled } : {}),
             ...(params.archived !== undefined ? { archived: params.archived } : {}),
             ...(params.unfurlLinks !== undefined ? { unfurlLinks: params.unfurlLinks } : {}),
-            ...(params.runAs !== undefined ? { runAs: params.runAs } : {}),
             ...(params.session !== undefined ? { session: params.session } : {}),
           });
           if (isUnavailable(r)) return unavailable(callId, "cron");
@@ -2971,7 +2959,9 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       "context it is shared by ALL of that person's sessions, not tied to the session that " +
       "wrote it. Never store session pins or 'for this session' notes here: ALL pinning goes " +
       "through the pins self-API (POST /v1/pins), which routes by context — the session's own " +
-      "pins in the web UI, native pinning in Slack. `edit` swaps one exact passage `old` for `new` " +
+      "pins in the web UI, native pinning in Slack. To keep a skill in this scope's per-turn skills shortlist, " +
+      'pin it instead of writing guidance: PUT $AGENT_API_URL/v1/pinned-skills with header "x-agent-capability: $AGENT_API_TOKEN" ' +
+      'and body {"names": [...]}, the full list. `edit` swaps one exact passage `old` for `new` ' +
       "and fails unless `old` appears exactly once in that scope's guidance; prefer it for small changes. " +
       "`replace` REPLACES that scope's entire guidance with `content` — include everything that " +
       "should remain. Org-wide policy is always layered above and " +
@@ -3940,11 +3930,13 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     async execute(callId, params) {
       const p = params as { objective: string; floor?: Record<string, number>; token_cap?: number };
       await recordCall(callId, { tool: "goal", action: "create", objective: p.objective });
-      if (ref.goal && (ref.goal.status === "active" || ref.goal.status === "paused")) {
+      if (goalIsOpen(ref.goal)) {
         return recordCoreAuthoredResult(
           callId,
           { tool: "goal", action: "create", error: "goal_exists" },
-          text("A goal is already registered (active or paused) — goal action get shows it."),
+          text(
+            'A goal is already registered (active or paused) — goal action get shows it. If the user asked to replace it, cancel it first (goal action update "cancel").',
+          ),
           true,
         );
       }
@@ -3964,6 +3956,8 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         );
       }
       ref.goal = record;
+      ref.goalOpenedThisTurn = true;
+      await ref.saveGoal?.(record);
       return recordCoreAuthoredResult(
         callId,
         { tool: "goal", action: "create", goal: record },
@@ -4001,12 +3995,14 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       "workspace files you name in `files` (the harness reads them for it — name deliverables, never paste them into the note), and " +
       "decides; if it rejects, the goal stays active and its reasons come back to you. You cannot block or pause a goal; " +
       'only the user stops it. A paused goal resumes (status "resume") only when the person in this turn explicitly asks ' +
-      "to resume it; never resume one on your own initiative. Resume keeps the objective, floor and cap.",
+      "to resume it; never resume one on your own initiative. Resume keeps the objective, floor and cap. " +
+      'Cancel (status "cancel") ends an active or paused goal without completing it, only when the person in this turn ' +
+      "explicitly asks to cancel, drop or replace it; never to escape unfinished work.",
     parameters: Type.Object({
-      status: Type.Union([Type.Literal("complete"), Type.Literal("resume")]),
+      status: Type.Union([Type.Literal("complete"), Type.Literal("resume"), Type.Literal("cancel")]),
       note: Type.String({
         description:
-          "complete: the concrete evidence (commands, output, results, links) that proves the objective is achieved. resume: quote the user's request to resume.",
+          "complete: the concrete evidence (commands, output, results, links) that proves the objective is achieved. resume or cancel: quote the user's request.",
       }),
       files: Type.Optional(
         Type.Array(Type.String(), {
@@ -4017,8 +4013,13 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       sandbox_id: sandboxSelector("Sandbox holding `files`; omit for the default."),
     }),
     async execute(callId, params) {
-      const p = params as { status?: "complete" | "resume"; note: string; files?: string[]; sandbox_id?: string };
-      const status = p.status === "resume" ? "resume" : "complete";
+      const p = params as {
+        status?: "complete" | "resume" | "cancel";
+        note: string;
+        files?: string[];
+        sandbox_id?: string;
+      };
+      const status = p.status === "resume" || p.status === "cancel" ? p.status : "complete";
       await recordCall(callId, {
         tool: "goal",
         action: "update",
@@ -4026,6 +4027,35 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         ...(p.note ? { note: p.note } : {}),
       });
       const goal = ref.goal;
+      if (status === "cancel") {
+        if (!goalIsOpen(goal)) {
+          return recordCoreAuthoredResult(
+            callId,
+            { tool: "goal", action: "update", error: "no_open_goal" },
+            text("No active or paused goal to cancel."),
+            true,
+          );
+        }
+        if (ref.current?.humanTurn !== true || (ref.goalRound ?? 0) > 0 || ref.goalOpenedThisTurn) {
+          return recordCoreAuthoredResult(
+            callId,
+            { tool: "goal", action: "update", error: "human_required" },
+            text(
+              "Only the user's own message can cancel a goal, and the message you are answering is not one that came after this goal started (it is a keep-going prompt, an automated run, or the goal was started or resumed this turn). The goal is unchanged. If the user asked to cancel, tell them to use the cancel button on the goal bar, or to stop this reply and ask again.",
+            ),
+            true,
+          );
+        }
+        cancelGoal(goal, p.note);
+        await ref.saveGoal?.(goal);
+        return recordCoreAuthoredResult(
+          callId,
+          { tool: "goal", action: "update", goal },
+          text(
+            "The goal is cancelled at the user's request: it is no longer enforced and was not completed. A new goal can be registered now if the user asked for one.",
+          ),
+        );
+      }
       if (status === "resume") {
         if (goal?.status !== "paused") {
           return recordCoreAuthoredResult(
@@ -4049,8 +4079,10 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         }
         goal.status = "active";
         goal.updatedAt = goal.activeSince = Date.now();
+        ref.goalOpenedThisTurn = true;
         delete goal.pauseReason;
         delete goal.governor;
+        await ref.saveGoal?.(goal);
         return recordCoreAuthoredResult(
           callId,
           { tool: "goal", action: "update", goal },
@@ -4104,6 +4136,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           };
       if (verdict.verdict !== "complete") {
         const applied = applyGovernorVerdict(goal, verdict);
+        await ref.saveGoal?.(goal);
         let message = `The governor did not accept completion; the goal stays active. Reasons: ${verdict.reasons}`;
         if (applied.verdict === "step_back") message += `\n${GOAL_STEP_BACK_PROMPT}`;
         if (applied.verdict === "pause")
@@ -4119,6 +4152,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       goal.status = "complete";
       goal.updatedAt = Date.now();
       goal.completionNote = p.note;
+      await ref.saveGoal?.(goal);
       return recordCoreAuthoredResult(
         callId,
         { tool: "goal", action: "update", goal },
@@ -4182,6 +4216,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
               callId,
               d.timeoutMs ?? CLIENT_TOOL_DEFAULT_TIMEOUT_MS,
               ref.abortSignal,
+              d.name,
             );
             if (outcome === "timeout" || outcome === "cancelled")
               return recordCoreAuthoredResult(
@@ -4195,6 +4230,10 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
               { tool: d.name, client: true },
               {
                 ...text(outcome.content || "[empty result]"),
+                content: [
+                  ...text(outcome.content || "[empty result]").content,
+                  ...(outcome.images ?? []).map((image) => ({ type: "image" as const, ...image })),
+                ],
                 ...(outcome.structured === undefined ? {} : { details: { structured: outcome.structured } }),
               },
               "client page",
@@ -4255,7 +4294,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     async execute(callId, params) {
       const request = params as RuntimeRequest;
       await recordCall(callId, { tool: "runtime", ...request });
-      if (request.action !== "get" && ref.goal && (ref.goal.status === "active" || ref.goal.status === "paused")) {
+      if (request.action !== "get" && goalIsOpen(ref.goal)) {
         return recordCoreAuthoredResult(
           callId,
           { tool: "runtime", error: "goal_in_progress" },
@@ -4294,7 +4333,12 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       read: skill,
       ...(controlTools ? { share: sharingTool("skill"), move: sharingTool("skill", true) } : {}),
     }),
-    resourceTool("files", { read, write, ...(controlTools ? { share: sharingTool("file") } : {}) }),
+    resourceTool("files", {
+      read,
+      write,
+      ...(controlTools ? { share: sharingTool("file") } : {}),
+      ...(ref.current?.installSharedCanvas ? { install_canvas: installCanvas } : {}),
+    }),
     resourceTool("apps", {
       publish,
       ...(controlTools ? { share: sharingTool("deploy"), move: sharingTool("deploy", true) } : {}),
@@ -4399,15 +4443,14 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
   };
   const mcpNames = new Set(mcpTools.map((t) => t.name));
   const active = opts?.readOnly ? tools.filter((t) => READ_ONLY_TOOL_NAMES.has(t.name) || mcpNames.has(t.name)) : tools;
-  return active.map((t) =>
-    withRetrySafety(
-      withRuntimeBarrier(
-        withToolBodyTiming(withToolApprovalGate(validateSandboxTool(t), ref, { recordCall, recordResult }), ref),
-        ref,
-      ),
-      retryMarks,
-    ),
-  );
+  const clientNames = new Set(clientTools.map((tool) => tool.name));
+  return active.map((tool) => {
+    const wrapped = withRuntimeBarrier(
+      withToolBodyTiming(withToolApprovalGate(validateSandboxTool(tool), ref, { recordCall, recordResult }), ref),
+      ref,
+    );
+    return clientNames.has(tool.name) ? wrapped : withRetrySafety(wrapped, retryMarks);
+  });
 }
 
 const RETRY_SAFE_FIELD = "retrySafe";
@@ -4463,6 +4506,15 @@ function withRetrySafety(tool: ToolDefinition, marks: Map<string, RetryMark>): T
 }
 
 const TOOL_APPROVAL_EXEMPT = new Set(["finish_silently"]);
+export const GATED_TOOL_APPROVALS: Record<
+  string,
+  { reason: string; summary: (params: Record<string, unknown>) => string }
+> = {
+  "files:install_canvas": {
+    reason: "install an always-on canvas someone shared with you; its code runs in your QM web UI",
+    summary: (params) => `file ${String(params.id)}`,
+  },
+};
 const STRICT_TOOL_APPROVAL_REASON = "strict posture: this tool call requires human approval";
 
 function withToolApprovalGate(
@@ -4497,12 +4549,18 @@ function withToolApprovalGate(
         : tool.name;
       const commandLabel = resourceAction ? `${tool.name} ${resourceAction}` : tool.name;
       if (gate && !gate(approvalIdentity)) {
+        const gated = GATED_TOOL_APPROVALS[approvalIdentity];
+        const reason = gated?.reason ?? STRICT_TOOL_APPROVAL_REASON;
+        let summary: string | undefined;
+        if (gated && isObj(params)) summary = gated.summary(params);
+        else if (params !== undefined) summary = redactCommand(redactSecrets(JSON.stringify(params)));
         ref.pendingApprovals?.push({
           command: commandLabel,
-          reason: STRICT_TOOL_APPROVAL_REASON,
+          reason,
           kind: "approval",
           approvalKey: `tool:${approvalIdentity}`,
-          ...(params === undefined ? {} : { summary: redactCommand(redactSecrets(JSON.stringify(params))) }),
+          ...(gated ? { grantModes: { session: false, always: false } } : {}),
+          ...(summary === undefined ? {} : { summary }),
           ...(isObj(params) && typeof params.purpose === "string" ? { purpose: params.purpose } : {}),
         });
         ref.pausedOnApproval = true;
@@ -4511,7 +4569,7 @@ function withToolApprovalGate(
           ...(resourceAction ? { action: resourceAction } : {}),
           ...(isObj(params) && typeof params.purpose === "string" ? { purpose: params.purpose } : {}),
           blocked: "needs_approval",
-          reason: STRICT_TOOL_APPROVAL_REASON,
+          reason,
         });
         return rec.recordResult(
           callId,
@@ -4519,12 +4577,10 @@ function withToolApprovalGate(
             tool: tool.name,
             ...(resourceAction ? { action: resourceAction } : {}),
             blocked: "needs_approval",
-            reason: STRICT_TOOL_APPROVAL_REASON,
+            reason,
           },
           {
-            content: [
-              { type: "text" as const, text: `[blocked: needs human approval] ${STRICT_TOOL_APPROVAL_REASON}` },
-            ],
+            content: [{ type: "text" as const, text: `[blocked: needs human approval] ${reason}` }],
             details: {},
             terminate: true,
           },

@@ -2,11 +2,14 @@ import { DEFAULT_CRON_TIMEZONE } from "../cron/schedule.ts";
 import { createAdminCall } from "../tools/admin.ts";
 import { scopeTeamsToTurn } from "../teams/teams.ts";
 import { externalSlackRequestAllowed, currentExternalSlackRun } from "../resolution/external-slack.ts";
+import { desktopComputerTool } from "../../plugins/chassis/src/desktop-computer.ts";
 import { externalTools } from "./orchestrator/external-tools.ts";
 import { memoryBoundedEntries, memoryContextPayload, nextMemoryContext } from "../memory/context-boundary.ts";
 import { isBackendCredential } from "../credentials/keychain.ts";
 import { resolveBrowserModel } from "../model/browser-model.ts";
 import { memoryRecallDelta } from "../memory/recall-delta.ts";
+import { UNTRACKED_PROVENANCE } from "../memory/facts.ts";
+import { memoryRecallQuery } from "../memory/semantic-recall.ts";
 import { requiresDelegation, delegatedAuthorizationOrigin } from "../sessions/session-syscalls.ts";
 import {
   MAX_DOCUMENT_BYTES,
@@ -16,8 +19,9 @@ import {
   loadDocumentInputs,
 } from "./document-inputs.ts";
 import { recoveredRuntime } from "../harness/runtime-recovery.ts";
-import { createCanWriteScope, withLiveTurnMembership } from "../resolution/scope-membership.ts";
-import { goalViewFromEntry } from "../runs/turn-stream.ts";
+import { createCanWriteScope, rosterAdmits, withLiveTurnMembership } from "../resolution/scope-membership.ts";
+import { goalView } from "../runs/turn-stream.ts";
+import { openGoal } from "../harness/goal.ts";
 import type {
   CommandApprovalGrant,
   DeliveryProvenance,
@@ -27,11 +31,12 @@ import type {
   SessionEntry,
   SessionType,
   TurnResult,
+  TurnRuntime,
   PendingApproval,
   PendingApprovalRecord,
 } from "../types.ts";
 import { scopeId as toScopeId, personalScope } from "../types.ts";
-import { turnOriginRequestFields } from "./turn-origin.ts";
+import { desktopClientForTurn, isSessionTurn, turnOriginRequestFields } from "./turn-origin.ts";
 import { resolveTurnFastMode, turnRuntimePurpose } from "./turn-options.ts";
 import { orgId } from "../config.ts";
 import { renderGatewayContext } from "./gateway-context.ts";
@@ -44,17 +49,10 @@ import { reachEnqueue } from "../reach/reach.ts";
 import { turnDeliveryProvenance } from "../delivery/delivery-store.ts";
 import type { DirectoryStore, DirectoryChannel, DirectoryMember } from "../directory/directory-store.ts";
 import { resolveEnvironmentId } from "../environments/environment-store.ts";
-import type { GapPhase, Lease, LeaseAttempt, SessionStore } from "../sessions/session-store.ts";
+import type { GapPhase, Lease, LeaseAttempt } from "../sessions/session-store.ts";
 import { SESSION_BUSY_FIRE_TEXT, SESSION_BUSY_USER_TEXT } from "./failure-copy.ts";
 import { CONFIG_DEFAULTS } from "../config.ts";
-import {
-  acquireLeaseWithin,
-  entrySecurityTainted,
-  isOverheardEntry,
-  TAPE_IMPORT_MAX_ENTRIES,
-  tapeCheckpointPayload,
-  tapeEntryMirrorRecord,
-} from "../sessions/session-store.ts";
+import { acquireLeaseWithin, isOverheardEntry } from "../sessions/session-store.ts";
 import { supportsProcessSessions, supportsScopeProfile } from "../sandbox/sandbox.ts";
 import { createBackgroundBroker } from "../connectors/background-exec-broker.ts";
 import { createMonitorBroker, readBackgroundOutputTail } from "../monitors/monitor-broker.ts";
@@ -120,20 +118,10 @@ import { skillsIndex } from "../skills/materialize.ts";
 import { isIdeasConversation, PROACTIVE_OPENER_PROMPT } from "../onboarding/onboarding.ts";
 import { createToolContext, NeedsApproval, CommandDenied, type CommandCredential } from "../tools/primitives.ts";
 import type { FileArtifact } from "../files/file-artifact-store.ts";
+import { artifactImageLoader } from "../harness/replay-images.ts";
 import { filterHistoryForAudience, principalEntitledToScope } from "../resolution/context-filter.ts";
-import {
-  filterTapeForAudience,
-  foldTape,
-  healFoldInterrupt,
-  openTapeToolCalls,
-  lastImportLacksScopes,
-  lintFold,
-  rehydrateFoldImages,
-  tapeEventsEntitled,
-  tapeNeedsInterruptHeal,
-} from "../harness/tape-fold.ts";
 import { openSessionEntry, searchSessionEntries } from "../sessions/history-search.ts";
-import { createTranscriptSource } from "../harness/tape-projection.ts";
+import { createTranscriptSource } from "../sessions/transcript-source.ts";
 import { defaultPublishAudience } from "../resolution/publish-audience.ts";
 import {
   INBOX_DIR,
@@ -143,7 +131,6 @@ import {
   inboundIssueList,
   inboundManifest,
   isVisionAttachment,
-  MAX_HISTORY_IMAGE_BYTES,
   materializeInbound,
   safeAttachmentName,
   senderNote,
@@ -153,16 +140,21 @@ import {
   withoutAlreadyIngested,
 } from "./attachments.ts";
 import { parseRef } from "../acl/resource-ref.ts";
-import { findTrailingPartialTurn, resumeNote, resumeStrategy, turnAtSeq } from "./turn-resume.ts";
+import {
+  findTrailingPartialTurn,
+  resumeStrategy,
+  runtimeSwitchNote,
+  turnAtSeq,
+  unrecordedResultEntries,
+} from "./turn-resume.ts";
 import type { RecordedTurn } from "./turn-resume.ts";
 import {
-  appendCoverageImport,
   recordedMessageTimestamps,
   renderOverheard,
   selectOverheardToImport,
   type OverheardEntryPayload,
 } from "../harness/replay.ts";
-import { errMessage, reportFailure, swallow, swallowAs } from "../util/errors.ts";
+import { errMessage, reportFailure, reportFailureAs, swallow, swallowAs } from "../util/errors.ts";
 import { isObj } from "../util/objects.ts";
 import { absoluteAppLinks, jsonbSafeStringify } from "../util/text.ts";
 import {
@@ -180,21 +172,18 @@ import { randomUUID } from "node:crypto";
 import { LRUCache } from "lru-cache";
 import type { SkillResolution } from "../skills/skill-store.ts";
 import type { Orchestrator, OrchestratorDeps, OrchestratorInput } from "./orchestrator/types.ts";
-import { isHarnessId, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
+import { codexSubscriptionModelId, isHarnessId, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
 import type { ProviderKeys } from "../harness/pi-harness.ts";
-import type { CodexTurnAuth } from "../harness/harness.ts";
 import { resolveIndividualAuthRouting } from "./individual-auth-routing.ts";
 import { createSessionTitles } from "./session-title.ts";
 import {
   MAX_AUTO_ATTACHMENT_SCREEN_BYTES,
   approvalGrantId,
   completedSurfaceEnqueues,
-  conversationLabelFor,
   deliveryCandidatesFor,
   egressClaimAllowingControlPlane,
   filterConnectorSkills,
   isScreenableTextAttachment,
-  loadTapeImage,
   loadActiveBundles,
   recentPrincipalDeliveryNote,
   renderTitleTranscript,
@@ -220,15 +209,11 @@ import { createTurnSandboxes } from "./orchestrator/sandboxes.ts";
 import type { EgressPolicy } from "../types.ts";
 import { isOpenScopeMember } from "../resolution/sharing-access.ts";
 import { createSurfaceToolDeps, type SpineState } from "./orchestrator/surface-tools.ts";
+import { GATED_TOOL_APPROVALS } from "../harness/agent-tools.ts";
 import { createAttachStaging } from "./orchestrator/attach-tool.ts";
 import { reconcileMessageRevisions, revisionAnchorAt } from "./message-revisions.ts";
 
-export {
-  egressClaimAllowingControlPlane,
-  conversationLabelFor,
-  filterConnectorSkills,
-  loadTapeImage,
-} from "./orchestrator/turn-helpers.ts";
+export { egressClaimAllowingControlPlane, filterConnectorSkills } from "./orchestrator/turn-helpers.ts";
 export type { Orchestrator, OrchestratorDeps, OrchestratorInput, SurfaceContextPuller } from "./orchestrator/types.ts";
 
 class ProjectRosterChanged extends Error {}
@@ -568,8 +553,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       )
         throw new NonRetryableTurnError("swarm service unavailable");
       const swarmBinding = await deps.swarms?.binding(input);
-      if (input.swarm && swarmBinding?.member.parentId && (await deps.config?.getPurposeRuntimeDurable("subagent")))
-        input = { ...input, model: undefined, harness: undefined, thinkingLevel: undefined, fastMode: undefined };
       const swarmEntryProvenance = input.swarm ? { origin: "automation", swarm: input.swarm } : {};
       await deps.refreshModels?.();
       input = await scopeTeamsToTurn(input, deps, external);
@@ -577,6 +560,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const automatedTurn = input.origin.kind === "automation";
       const ambientTurn = input.origin.kind === "ambient";
       const humanTurn = input.origin.kind === "human";
+      const sessionTurn = isSessionTurn(input);
+      const humanInput = humanTurn && !sessionTurn;
       const allInternal =
         deps.identity.audienceIsAllInternal(conversation.audience) &&
         (conversation.kind === "dm" ||
@@ -589,12 +574,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         !external && deps.runs
           ? await delegatedAuthorizationOrigin(input, { runs: deps.runs, sessions: deps.sessions })
           : undefined;
-      const liveTurn = (humanTurn || delegatedOrigin?.kind === "human") && allInternal && !external;
+      const authorizationOrigin = sessionTurn ? (delegatedOrigin ?? { kind: "automation" as const }) : input.origin;
+      const liveTurn = authorizationOrigin.kind === "human" && allInternal && !external;
       const liveAuthorTurn =
-        !external && (humanTurn || authoredDetection || delegatedOrigin !== undefined) && allInternal;
-      const messageTs = input.origin.kind === "human" ? input.origin.messageTs : undefined;
+        !external &&
+        ((!sessionTurn && (humanTurn || authoredDetection)) || delegatedOrigin !== undefined) &&
+        allInternal;
+      const messageTs = humanInput && input.origin.kind === "human" ? input.origin.messageTs : undefined;
       const entryTs =
-        input.origin.kind === "human" || input.origin.kind === "ambient" ? input.origin.entryTs : undefined;
+        !sessionTurn && (input.origin.kind === "human" || input.origin.kind === "ambient")
+          ? input.origin.entryTs
+          : undefined;
       const coreReceivedAt = Date.now();
       let detectMs: number | undefined;
       let compactMs: number | undefined;
@@ -642,7 +632,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         return (
           !!current &&
           version === input.scopeVersion &&
-          current.includes(actor.id) &&
+          rosterAdmits(current, actor.id, toScopeId("group", managedGroupRef)) &&
           current.length === expected.size &&
           current.every((id) => expected.has(id))
         );
@@ -800,22 +790,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (screenInbound) {
           const existingSession = await deps.sessions.getByThread(conversation.threadRef);
           const existingEntries = existingSession ? await deps.sessions.getEntries(existingSession.id) : [];
-          const quarantinedAttachmentSourceIds = new Set(
-            existingEntries.flatMap((entry) => {
-              const payload = entry.payload as {
-                securityTainted?: unknown;
-                quarantinedAttachmentSourceIds?: unknown;
-              } | null;
-              return payload?.securityTainted === true && Array.isArray(payload.quarantinedAttachmentSourceIds)
-                ? payload.quarantinedAttachmentSourceIds.filter((id): id is string => typeof id === "string")
-                : [];
-            }),
-          );
-          if (enforceScreen && quarantinedAttachmentSourceIds.size && input.attachments?.length) {
-            input.attachments = input.attachments.filter(
-              (attachment) => !attachment.sourceId || !quarantinedAttachmentSourceIds.has(attachment.sourceId),
-            );
-          }
           const recorded = recordedMessageTimestamps(existingEntries);
           overheard = conversation.kind === "dm" ? [] : selectOverheardToImport(input.overheard ?? [], recorded);
         }
@@ -871,7 +845,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const sessionSender = input.sessionSenderId ? await deps.sessions.get(input.sessionSenderId) : null;
         const verifiedSessionMessage = Boolean(
           sessionSender &&
-          automatedTurn &&
           sessionSender.scopeId === scopeId &&
           (await deps.sessions.getForParticipant(sessionSender.id, actor.id)),
         );
@@ -879,15 +852,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ? securityScreenPayload({
               ...input,
               ...turnOriginRequestFields(input.origin),
+              ...(sessionTurn ? { triggered: true, securityScreenData: input.text } : {}),
               overheard: [],
               externalPromptData,
               verifiedSwarm: Boolean(input.swarm && swarmBinding),
               verifiedSessionMessage,
             })
           : null;
-        return { overheard, hasUnscreenableAttachment, externalPromptData, screenPayload };
+        return { hasUnscreenableAttachment, externalPromptData, screenPayload };
       };
-      let screenedOverheard: OverheardEntryPayload[] = [];
       let flaggedScreenedInput: { reason: string; sources: string[] } | undefined;
       let inputUnscreened = false;
       if (screenInbound && !enforceScreen) {
@@ -904,9 +877,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           )
           .catch(swallowAs("orchestrator: observed inbound screen", undefined));
       } else if (screenInbound) {
-        const inbound = await buildInboundScreen();
-        screenedOverheard = inbound.overheard;
-        const { hasUnscreenableAttachment, externalPromptData, screenPayload } = inbound;
+        const { hasUnscreenableAttachment, externalPromptData, screenPayload } = await buildInboundScreen();
         if (screenPayload || hasUnscreenableAttachment) {
           const canScreenText =
             !!screenPayload &&
@@ -984,6 +955,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           scopeId,
           conversation.channelName,
           input.surface,
+          desktopClientForTurn(input) ? [desktopComputerTool] : undefined,
         );
         screenSession.id = session.id;
         if (!input.sessionParticipantIds?.length && !automatedTurn)
@@ -1002,63 +974,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           await withManagedRosterVersion(async () => {
             await reconcileSessionParticipants(session.id);
             await Promise.all(pendingScreenRequests.splice(0).map((rec) => recordScreenRequest(rec)));
-            const importedEntries = await deps.sessions.appendMany(
-              lease,
-              screenedOverheard.map((overheard) => ({
-                type: "user",
-                payload: { ...overheard, securityTainted: true },
-                scopeLabel: scopeId,
-              })),
-            );
-            await deps.sessions.appendTapeMany(
-              lease,
-              screenedOverheard.map((overheard, index) => {
-                const imported = importedEntries[index]!;
-                return {
-                  kind: "message",
-                  payload: {
-                    role: "user",
-                    content: [{ type: "text", text: renderOverheard(overheard) }],
-                    timestamp: imported.createdAt,
-                  },
-                  scopeLabel: scopeId,
-                  entrySeq: imported.seq,
-                  meta: {
-                    overheard: true,
-                    ...(overheard.sourceRole ? { sourceRole: overheard.sourceRole } : {}),
-                    bareText: overheard.text,
-                    ts: overheard.ts,
-                    ...(overheard.name ? { author: overheard.name } : {}),
-                    ...(overheard.files?.length ? { attachments: overheard.files } : {}),
-                    securityTainted: true,
-                    entryCreatedAt: imported.createdAt,
-                  },
-                };
-              }),
-            );
-            const taintedPayload: Record<string, unknown> = {
-              ...swarmEntryProvenance,
-              text: input.text,
-              securityTainted: true,
-              hidden: true,
-              ...((input.attachments ?? []).some((attachment) => attachment.sourceId)
-                ? {
-                    quarantinedAttachmentSourceIds: input.attachments!.flatMap((attachment) =>
-                      attachment.sourceId ? [attachment.sourceId] : [],
-                    ),
-                  }
-                : {}),
-              ...((messageTs ?? entryTs) ? { ts: messageTs ?? entryTs } : {}),
-              ...(actor.displayName?.trim() ? { name: actor.displayName.trim() } : {}),
-            };
-            const taintedEntry = await deps.sessions.append(lease, {
-              type: "user",
-              payload: taintedPayload,
-              scopeLabel: scopeId,
-            });
-            await deps.sessions
-              .appendTape(lease, tapeEntryMirrorRecord(taintedEntry))
-              .catch(swallowAs("orchestrator: tainted input mirror", undefined));
             const command = "security-screen";
             const requestId = inputApprovalId(session.id, replayableRequest(input));
             const grantModesField =
@@ -1122,7 +1037,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         actor,
         audience: conversation.audience,
         acl: deps.acl,
-        origin: delegatedOrigin ?? input.origin,
+        origin: authorizationOrigin,
         trustedLiveHuman: liveAuthorTurn,
         targetScope: scopeId,
         config: deps.config,
@@ -1136,13 +1051,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         files: deps.files,
         skills: deps.skills,
         auditLog: deps.auditLog,
+        directory: deps.directory,
+        projects: deps.projects,
       });
       const { sharingSources, memoryScopeId, baseRecallScopes, memoryAccess } = context;
       resolution.grantedHandles = context.listFiles();
-      const recallStart = Date.now();
       let memoryView = await context.memorySnapshot(false);
-      let recalled = memoryView.recalled;
-      const recallMs = Date.now() - recallStart;
       const isWeb = input.surface === "web";
       const isSlack = input.surface === "slack";
       const surfaceTool = input.surface ?? "slack";
@@ -1159,7 +1073,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const botHandle = rawHandle && rawHandle.toLowerCase() !== botName.toLowerCase() ? rawHandle : undefined;
       let modeName = "mode-fallback";
       if (input.surfaceTools) modeName = "mode-autonomous";
-      else if (!automatedTurn && (conversation.kind === "dm" || isWeb)) modeName = "mode-conversation";
+      else if (!automatedTurn && !(sessionTurn && input.envelopeWrapped) && (conversation.kind === "dm" || isWeb))
+        modeName = "mode-conversation";
       let frameMd = MODE_FALLBACK_MD;
       if (modeName === "mode-autonomous") frameMd = MODE_AUTONOMOUS_MD;
       else if (modeName === "mode-conversation") frameMd = MODE_CONVERSATION_MD;
@@ -1190,7 +1105,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       let modeFrame = applyPromptVars(frameMd, frameVars);
       if (delegateWork)
         modeFrame +=
-          "\n\nKeep this conversation responsive. You cannot execute commands yourself. Delegate all substantial work (research, coding, computation, or multi-step investigations) with subagents open, providing a complete task, relevant context, and authorization. Handle quick answers, status requests, and coordination yourself. Do not substitute other tools for command execution or do substantial work inline. After dispatching, end this turn promptly; subagent completion durably wakes you to collect and report the result. Do not wait or poll for subagents. Relay new user instructions to the appropriate subagent with subagents followup_task. Describe progress and results naturally without explaining the delegation machinery.";
+          "\n\nKeep this conversation responsive. You cannot execute commands yourself. Delegate all substantial work (research, coding, computation, or multi-step investigations) with subagents open and a short colleague-to-colleague brief. Handle quick answers, status requests, and coordination yourself. Do not substitute other tools for command execution or do substantial work inline. After dispatching, end this turn promptly; subagent completion durably wakes you to collect and report the result. Do not wait or poll for subagents. Relay new user instructions to the appropriate subagent with subagents followup_task. Describe progress and results naturally without explaining the delegation machinery.";
       if (modeName === "mode-conversation" && input.proactiveOpener) {
         modeFrame += "\nNo one has written yet; open the conversation yourself per the onboarding note below.";
       }
@@ -1376,15 +1291,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         scopeId,
         conversation.channelName,
         input.surface,
+        desktopClientForTurn(input) ? [desktopComputerTool] : undefined,
       );
       screenSession.id = session.id;
       leaseMs += Date.now() - sessionStart;
       if (!input.sessionParticipantIds?.length && !automatedTurn)
         await deps.sessions.addParticipant(session.id, actor.id);
 
-      const delegatedTask =
-        automatedTurn && !!input.sessionSenderId && session.parentSessionId === input.sessionSenderId;
-      const syntheticInput = (input.proactiveOpener && !input.text.trim()) || (automatedTurn && !delegatedTask);
+      const delegatedTask = !!input.sessionSenderId && session.parentSessionId === input.sessionSenderId;
+      const syntheticInput =
+        (input.proactiveOpener && !input.text.trim()) ||
+        ((automatedTurn || (sessionTurn && input.envelopeWrapped)) && !delegatedTask);
       const titleText = input.displayText?.trim() || input.text;
       let fallbackTitleWrite: Promise<void> | undefined;
       const assignSessionTitle = () => {
@@ -1505,18 +1422,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           config: deps.config,
           isCurrentSharedScopeMember: deps.isCurrentSharedScopeMember,
         }));
-      if (
-        input.origin.kind === "automation" &&
-        input.origin.useOwnerKeychain === true &&
-        (input.origin.ownerResourcesRequireOpen === true ||
-          (conversation.kind === "channel" && conversation.isPrivate !== true)) &&
-        !openAutomationKeychain
-      )
-        return { status: "refused", reason: "owner-authorized automation requires current Open membership" };
-      const isolateOwnerKeychain =
-        !external &&
-        (openSpeakerKeychain ||
-          (conversation.kind !== "dm" && input.origin.kind === "automation" && input.origin.useOwnerKeychain === true));
+      const isolateOwnerKeychain = !external && (openSpeakerKeychain || openAutomationKeychain);
       const ownerAuthAvailable = isolateOwnerKeychain;
       const connectorEnv: Record<string, string> = {};
       const credsStart = Date.now();
@@ -1595,10 +1501,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             credential.id,
           );
         }
-        const ownAllowed =
-          scopeId === personalScope(actor.id) ||
-          isolateOwnerKeychain ||
-          (input.origin.kind === "automation" && input.origin.useOwnerKeychain === true);
+        const ownAllowed = scopeId === personalScope(actor.id) || isolateOwnerKeychain;
         if (ownAllowed) {
           for (const credential of await keychain.listByOwner(actor.id)) {
             if (credential.kind === "broker" || isBackendCredential(credential)) continue;
@@ -1672,36 +1575,45 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       perf.credsMs += Date.now() - credsStart;
       // Service credentials: one read of the org's credential list and one grant scan feed both
       // the env-delivery gate (below) and the broker token mint (further down). Same grants gate both.
+      const aclGrantedServiceCredSlugs = async (): Promise<Set<string>> =>
+        new Set(
+          (
+            await deps.acl.grantsOfKind(
+              "service-cred",
+              conversation.audience,
+              scopeId,
+              resolution.orgScopeId,
+              principalEntitledToScope,
+            )
+          ).map((g) => parseRef(g.ref).id),
+        );
+      const orgWideAudience =
+        conversation.audience.length > 0 &&
+        conversation.audience.every((p) =>
+          principalEntitledToScope(p, resolution.orgScopeId, scopeId, resolution.orgScopeId),
+        );
+      const grantedServiceCredSlugs = async (records: readonly PublicServiceCredential[]): Promise<Set<string>> => {
+        const granted = await aclGrantedServiceCredSlugs();
+        if (orgWideAudience) for (const record of records) if (record.source === "deployment") granted.add(record.slug);
+        return granted;
+      };
       let serviceCredRecords: PublicServiceCredential[] = [];
       let grantedCredSlugs = new Set<string>();
       if (!strictReadOnly && deps.serviceCreds) {
         serviceCredRecords = (await deps.serviceCreds.listServiceCredentials(resolution.orgScopeId)).filter((record) =>
           serviceAllowed(record.slug),
         );
-        if (serviceCredRecords.length > 0) {
-          grantedCredSlugs = new Set(
-            (
-              await deps.acl.grantsOfKind(
-                "service-cred",
-                conversation.audience,
-                scopeId,
-                resolution.orgScopeId,
-                principalEntitledToScope,
-              )
-            ).map((g) => parseRef(g.ref).id),
-          );
-        }
+        if (serviceCredRecords.length > 0) grantedCredSlugs = await grantedServiceCredSlugs(serviceCredRecords);
       }
       const authorizeServiceCredential = async (slug: string): Promise<void> => {
         if (!serviceAllowed(slug)) throw new Error("Service is not approved for external Slack.");
-        const grants = await deps.acl.grantsOfKind(
-          "service-cred",
-          conversation.audience,
-          scopeId,
-          resolution.orgScopeId,
-          principalEntitledToScope,
-        );
-        if (!grants.some((grant) => parseRef(grant.ref).id === slug)) {
+        if ((await aclGrantedServiceCredSlugs()).has(slug)) return;
+        const supplied =
+          orgWideAudience &&
+          ((await deps.serviceCreds?.listServiceCredentials(resolution.orgScopeId)) ?? []).some(
+            (record) => record.slug === slug && record.source === "deployment",
+          );
+        if (!supplied) {
           throw new Error(`Service credential is no longer authorized: ${slug}`);
         }
       };
@@ -1768,9 +1680,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           aud: CONTROL_PLANE_AUD,
           ...(!external &&
           allInternal &&
-          (scopeId === personalScope(actor.id) ||
-            openSpeakerKeychain ||
-            (input.origin.kind === "automation" && input.origin.useOwnerKeychain === true))
+          (scopeId === personalScope(actor.id) || openSpeakerKeychain || openAutomationKeychain)
             ? { ownerConnections: true }
             : {}),
           exp: sandboxTokenExpiry,
@@ -1849,14 +1759,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const records = (await deps.serviceCreds.listServiceCredentials(resolution.orgScopeId)).filter((record) =>
           serviceAllowed(record.slug),
         );
-        const grants = await deps.acl.grantsOfKind(
-          "service-cred",
-          conversation.audience,
-          scopeId,
-          resolution.orgScopeId,
-          principalEntitledToScope,
-        );
-        const granted = new Set(grants.map((grant) => parseRef(grant.ref).id));
+        const granted = await grantedServiceCredSlugs(records);
         const available = records.filter(
           (record) => !isBackendCredential(record) && record.enabled && record.hasSecret && granted.has(record.slug),
         );
@@ -2055,9 +1958,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         egressTokenForTurn,
         egressTokenForPolicy,
         openSpeakerKeychain: openSpeakerKeychain || openAutomationKeychain,
-        openResourceAccess:
-          !external &&
-          (liveAuthorTurn || (input.origin.kind === "automation" && input.origin.useOwnerKeychain === true)),
+        openResourceAccess: !external && (liveAuthorTurn || openAutomationKeychain),
         ownerAuthAvailable,
         visibleSkillsForTurn,
         emitGapWork,
@@ -2111,7 +2012,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const memoryWindow = await deps.sessions.getContextWindow(session.id);
 
         memoryView = await context.memorySnapshot();
-        recalled = memoryView.recalled;
         const latestMemoryContext = memoryWindow.entries.findLast((entry) => memoryContextPayload(entry));
         const nextContext = nextMemoryContext(
           memoryWindow.entries,
@@ -2122,7 +2022,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           nextContext.throughSeq > (latestMemoryContext ? memoryContextPayload(latestMemoryContext)!.throughSeq : -1);
         const memoryHistoryReset = nextContext.throughSeq >= 0;
         const captureDependencies = () => [
-          ...memoryView.records,
+          ...memoryView.facts,
           ...(!memoryView.complete ||
           memoryBoundedEntries(memoryWindow.entries).length > 0 ||
           toolCalls > 0 ||
@@ -2130,15 +2030,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           input.overheard?.length ||
           input.attachments?.length ||
           input.inboundNotes
-            ? [
-                {
-                  id: "untracked-turn-context",
-                  text: "",
-                  sensitivity: "unknown" as const,
-                  sources: [],
-                  sourceUnknown: true,
-                },
-              ]
+            ? [UNTRACKED_PROVENANCE]
             : []),
         ];
         if (memoryContextChanged) {
@@ -2247,11 +2139,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           const refusal = attachmentsRefusal(saved, requested);
           if (refusal) return { status: "refused", sessionId: session.id, reason: refusal };
           return await withManagedRosterVersion(async () => {
-            const appended = await deps.sessions.append(lease, {
+            await deps.sessions.append(lease, {
               type: "user",
               payload: {
                 text: input.displayText ?? input.text,
                 ...(input.runId ? { runId: input.runId } : {}),
+                ...(humanInput ? { speakerId: actor.id } : {}),
                 ...(actor.displayName?.trim() ? { name: actor.displayName.trim() } : {}),
                 ...(saved.metas.length ? { attachments: saved.metas } : {}),
                 ...(input.quoteSeq !== undefined ? { quoteSeq: input.quoteSeq } : {}),
@@ -2260,7 +2153,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               },
               scopeLabel: scopeId,
             });
-            await deps.sessions.appendTape(lease, tapeEntryMirrorRecord(appended));
             return { status: "silent" as const, sessionId: session.id };
           });
         }
@@ -2403,9 +2295,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   (entry.payload as { securityReleaseRequestId?: string })?.securityReleaseRequestId ===
                     input.approval!.requestId,
               );
-              const released =
-                existing ??
-                (await withManagedRosterVersion(() =>
+              if (!existing)
+                await withManagedRosterVersion(() =>
                   deps.sessions.append(lease, {
                     type: "user",
                     payload: {
@@ -2415,9 +2306,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     },
                     scopeLabel: label,
                   }),
-                ));
-              if (!existing)
-                await withManagedRosterVersion(() => deps.sessions.appendTape(lease, tapeEntryMirrorRecord(released)));
+                );
               await deps.harness.turns.resetSession?.(session.id);
             }
             const decisionEntry = await withManagedRosterVersion(() =>
@@ -2429,11 +2318,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             );
             await mirrorRunActivity(decisionEntry);
             await pending.delete(input.approval.requestId);
-            if (p.kind === "input") {
-              await deps.sessions
-                .clearSecurityTaint(session.id)
-                .catch(swallowAs("clearSecurityTaint on input approval", false));
-            }
             const useKey = p.approvalKey ?? p.command;
             if (p.screenedOutput && quarantineRelease) {
               releasedToolOutput = p.screenedOutput;
@@ -2496,7 +2380,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             (orgMemoryWrite
               ? ', and for plain "remember this org-wide" requests the lighter path is `"scope":"org"` on the memory self-API (memory skill)'
               : "") +
-            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads require a DM or an Open conversation on a live admin turn (organization, personal, and conversation sharing restrictions all apply); admin grant changes and impersonation are portal-only. Open admin reads can expose private data to everyone in the conversation: retrieve and report only what the request needs." +
+            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads require a DM or an Open conversation on a live admin turn (organization, personal, and conversation sharing restrictions all apply); admin grant changes and impersonation are portal-only. Open admin reads can expose private data to everyone in the conversation: retrieve and report only what the request needs. Admin access to other people's private sessions, memory and files is for running and repairing the system, not a shortcut to answer questions about them: when a request needs something only another person's private context holds, use the hand-off skill even if admin access could reach it." +
             " System administration is not limited to the admin dashboard. Use the admin's independently authorized infrastructure or provider access to diagnose, repair, and manage this instance, including resources owned by other users. Ordinary resource-owner restrictions do not by themselves prohibit that administrative work or require the resource owner to do it. An owner-only API denial is not a denial of separately authorized system administration; verify that authority before taking another route. Using that independently authorized access as the admin is not impersonation or circumvention. Credential grants, provider permissions, explicit restrictions (including the portal-only actions above), mutation approvals, and audience privacy still apply. Keep actions attributed to the admin; never borrow another user's identity or credentials without authorization. Follow the admin and cloud-cli skills.";
         }
         if (deps.signingSecret && deps.apiBaseUrl && (deps.crons || deps.webhooks || deps.monitors)) {
@@ -2615,6 +2499,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
         if (
           ambientTurn &&
+          !sessionTurn &&
           deps.harness.models.shouldRespond &&
           !(
             isRetry &&
@@ -2761,13 +2646,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           });
         const earlyTaskAck =
           input.surface === "slack" &&
-          input.origin.kind === "human" &&
+          humanInput &&
           conversation.kind === "dm" &&
           !input.approval &&
           !input.botActor &&
           !input.swarm;
         const publishFirstAck = (deliberatePost: boolean) => {
-          if (!input.runId || !input.addressed || isPollFire || !spineFirstBlockOpen || resume || approvalReplay)
+          if (
+            !input.runId ||
+            !input.addressed ||
+            sessionTurn ||
+            isPollFire ||
+            !spineFirstBlockOpen ||
+            resume ||
+            approvalReplay
+          )
             return;
           spineFirstBlockOpen = false;
           const ack = spineFirstBlock.trim();
@@ -2842,7 +2735,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             `[orchestrator] trigger delivery has no surface tools (missing deliveries store?) — reply would be lost session=${session.id}`,
           );
 
+        const canInstallCanvas =
+          deps.installSharedCanvas &&
+          liveTurn &&
+          (await deps.featureFlags?.enabled("ui_canvas", personalScope(actor.id))) === true;
         const baseTools = createToolContext({
+          desktopClientId: desktopClientForTurn(input),
+          ...(canInstallCanvas
+            ? {
+                installSharedCanvas: (fileId: string) =>
+                  deps.installSharedCanvas!(actor.id, fileId, {
+                    threadRef: conversation.threadRef,
+                    sessionId: session.id,
+                  }),
+              }
+            : {}),
           sandbox: deps.sandbox,
           sandboxResources: turnSandboxResources,
           invalidateProvision,
@@ -2915,7 +2822,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               }
             : {}),
           ...(deps.webhookPublicUrl ? { webhookPublicUrl: deps.webhookPublicUrl } : {}),
-          ...(humanTurn && !external ? { humanTurn: true } : {}),
+          ...(humanInput && !external ? { humanTurn: true } : {}),
           ...(surfaceToolDeps ? { surface: surfaceToolDeps } : {}),
           ...(sessionSyscalls
             ? {
@@ -2931,7 +2838,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             : {}),
           ...(strictReadOnly ? {} : { attach: attachStaging.attach }),
           memory: context.memory,
-          memoryCaptureMetadata: () => ({ sessionId: session.id, inheritedRecords: captureDependencies() }),
+          memoryCaptureMetadata: () => ({ sessionId: session.id, inheritedFacts: captureDependencies() }),
           memoryScopeId,
           ...(memoryAccess ? { memoryAccess } : {}),
           ...(!external && deps.mcp ? { mcp: deps.mcp } : {}),
@@ -3003,7 +2910,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ...(actor.displayName?.trim() ? { name: actor.displayName.trim() } : {}),
           ...(input.displayText?.trim() ? { display: input.displayText } : {}),
         };
-        if (inbound.metas.length && !input.approval && !automatedTurn && !isRetry) failureUserPayload = userPayload;
+        if (inbound.metas.length && !input.approval && !automatedTurn && !isRetry)
+          failureUserPayload = { ...userPayload, ...(humanInput ? { speakerId: actor.id } : {}) };
         const manifest = inboundManifest(inbound.metas, turnInboxDir, inbound.unstaged);
         const inboundIssues = inboundIssueList({
           tooMany: inbound.tooMany,
@@ -3018,23 +2926,18 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               : []),
           ],
         });
-        const preAppendedSeqs: number[] = [];
         if (inboundIssues.length) {
-          const appended = await withManagedRosterVersion(() =>
+          await withManagedRosterVersion(() =>
             deps.sessions.append(lease, {
               type: "system",
               payload: fileEventPayload("in", inboundIssues),
               scopeLabel: scopeId,
             }),
           ).catch(swallowAs("orchestrator: inbound file-event log", undefined));
-          if (appended) {
-            preAppendedSeqs.push(appended.seq);
-            await withManagedRosterVersion(() => deps.sessions.appendTape(lease, tapeEntryMirrorRecord(appended)));
-          }
         }
 
         const importedOverheard: OverheardEntryPayload[] = [];
-        if (!memoryHistoryReset && (!input.envelopeWrapped || humanTurn) && input.overheard?.length) {
+        if (!memoryHistoryReset && (!input.envelopeWrapped || humanInput) && input.overheard?.length) {
           const toImport = await transcripts
             .forRender(session.id)
             .then((read) => selectOverheardToImport(input.overheard!, recordedMessageTimestamps(read.entries)))
@@ -3051,140 +2954,26 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             if (e instanceof ProjectRosterChanged) throw e;
             swallow("orchestrator: overheard catch-up import", e);
           }
-          if (importedEntries.length) {
-            importedOverheard.push(...toImport);
-            preAppendedSeqs.push(...importedEntries.map((entry) => entry.seq));
-            await withManagedRosterVersion(() =>
-              deps.sessions.appendTapeMany(
-                lease,
-                toImport.map((p, index) => {
-                  const imported = importedEntries[index]!;
-                  return {
-                    kind: "message",
-                    payload: {
-                      role: "user",
-                      content: [{ type: "text", text: renderOverheard(p) }],
-                      timestamp: imported.createdAt,
-                    },
-                    scopeLabel: scopeId,
-                    entrySeq: imported.seq,
-                    meta: {
-                      overheard: true,
-                      ...(p.sourceRole ? { sourceRole: p.sourceRole } : {}),
-                      bareText: p.text,
-                      ts: p.ts,
-                      ...(p.changeTime ? { changeTime: p.changeTime } : {}),
-                      ...(p.name ? { author: p.name } : {}),
-                      ...(p.files?.length ? { attachments: p.files } : {}),
-                      entryCreatedAt: imported.createdAt,
-                    },
-                  };
-                }),
-              ),
-            );
-          }
+          if (importedEntries.length) importedOverheard.push(...toImport);
         }
 
-        const contextWindow = await deps.sessions.getContextWindow(session.id);
-        const rawEntries = contextWindow.entries;
-        const historyHasSecurityTaint = contextWindow.hasSecurityTaint;
-        const priorTurns = historyHasSecurityTaint || memoryHistoryReset ? undefined : input.priorTurns;
-        if (historyHasSecurityTaint) {
-          await deps.harness.turns.resetSession?.(session.id);
-        }
-        const visibleHistory = filterHistory(forModelContext(rawEntries, { includeSecurityTainted: false }));
-        const rehydrateTape = (messages: readonly unknown[]) => {
-          return rehydrateFoldImages(
-            messages,
-            async (artifactRef, remainingBytes) => {
-              try {
-                return await loadTapeImage(deps.files, artifactRef, remainingBytes, mayReadArtifact);
-              } catch (e) {
-                swallow("tape: image rehydrate", e);
-                return null;
-              }
-            },
-            MAX_HISTORY_IMAGE_BYTES,
-          );
-        };
+        const rawEntries = (await deps.sessions.getContextWindow(session.id)).entries;
+        const priorTurns = memoryHistoryReset ? undefined : input.priorTurns;
+        let visibleHistory = filterHistory(forModelContext(rawEntries));
+        const recallStart = Date.now();
+        const recalled = await context.recallMemory(memoryRecallQuery(input.text, visibleHistory));
+        const recallMs = Date.now() - recallStart;
         const partial = isRetry ? (recordedTurn ?? findTrailingPartialTurn(visibleHistory, input.text)) : null;
         let resumePlan = partial ? resumeStrategy(visibleHistory, partial) : null;
-        if (resumePlan?.kind === "retry") {
-          const retryCallId = resumePlan.call.callId;
-          const tapeAgrees = await deps.sessions
-            .getTape(session.id)
-            .then((rows) => {
-              if (rows.some((row) => row.kind === "message" && row.harness !== undefined && row.harness !== "pi"))
-                return true;
-              const tapeCalls = openTapeToolCalls(rows);
-              return tapeCalls.messages === 0 || (tapeCalls.open.length === 1 && tapeCalls.open[0] === retryCallId);
-            })
-            .catch(swallowAs("orchestrator: resume tape agreement", false));
-          if (!tapeAgrees) resumePlan = { kind: "note" };
+        if (partial && resumePlan?.kind === "settle") {
+          const settle = resumePlan;
+          const settled = await withManagedRosterVersion(() =>
+            deps.sessions.appendMany(lease, unrecordedResultEntries(settle, input.resumeCause, scopeId)),
+          );
+          visibleHistory = filterHistory(forModelContext([...rawEntries, ...settled]));
+          resumePlan = resumeStrategy(visibleHistory, partial);
         }
         const resume = resumePlan && resumePlan.kind !== "restart" ? partial : null;
-        const tapeRows = await (async () => {
-          if (memoryHistoryReset || historyHasSecurityTaint || contextWindow.totalEntries > TAPE_IMPORT_MAX_ENTRIES)
-            return undefined;
-          try {
-            const preAppended = new Set(preAppendedSeqs);
-            const priorMaxSeq = rawEntries.reduce((m, e) => (preAppended.has(e.seq) ? m : Math.max(m, e.seq)), -1);
-            let covered = priorMaxSeq < 0 || (await deps.sessions.tapeCoverage(session.id)) >= priorMaxSeq;
-            let rows = filterTapeForAudience(
-              await deps.sessions.getTape(session.id),
-              conversation.audience,
-              scopeId,
-              resolution.orgScopeId,
-            );
-            const sameHarness = rows.every(
-              (row) => row.kind !== "message" || row.harness === undefined || row.harness === "pi",
-            );
-            const retrying = resumePlan?.kind === "retry";
-            if (
-              (!covered || lastImportLacksScopes(rows)) &&
-              !retrying &&
-              deps.sessionTapeMode === "serve" &&
-              sameHarness &&
-              participantHistorySeqs === undefined
-            ) {
-              const imported = await appendCoverageImport(deps.sessions, lease, rawEntries, scopeId);
-              if (imported) {
-                console.log(
-                  `[tape-heal] session=${session.id} covers=${imported.coversEntrySeq} messages=${
-                    (imported.payload as { messages: unknown[] }).messages.length
-                  }`,
-                );
-                rows = [...rows, imported];
-                covered = true;
-              }
-            }
-            const eventsEntitled = tapeEventsEntitled(rows, conversation.audience, scopeId, resolution.orgScopeId);
-            const eligible =
-              deps.sessionTapeMode === "serve" &&
-              covered &&
-              sameHarness &&
-              eventsEntitled &&
-              !rows.some(
-                (row) => row.kind === "context_event" && isObj(row.payload) && row.payload.mode === "recent",
-              ) &&
-              participantHistorySeqs === undefined;
-            let fold = eligible ? await rehydrateTape(foldTape(rows)) : undefined;
-            if (eligible && rows.length && fold && !retrying && tapeNeedsInterruptHeal(rows, fold)) {
-              const interrupt = await deps.sessions.appendTape(lease, {
-                kind: "context_event",
-                payload: { event: "interrupt" },
-                scopeLabel: scopeId,
-              });
-              rows = [...rows, interrupt];
-              fold = healFoldInterrupt(fold, interrupt.createdAt);
-            }
-            const serve = eligible && !!fold?.length && lintFold(fold).ok;
-            return { rows, serve, covered, fold };
-          } catch (e) {
-            swallow("tape: read/heal", e);
-            return undefined;
-          }
-        })();
         const compactStart = Date.now();
         const history = await withManagedRosterVersion(() =>
           compactContextIfNeeded({
@@ -3277,7 +3066,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           session.threadRef,
           visibleHistory.findLast((e) => e.type === "user" && !isOverheardEntry(e))?.createdAt,
         );
-        const sender = !automatedTurn && input.text.trim() ? senderNote(actor.displayName) : "";
+        const sender = !automatedTurn && !sessionTurn && input.text.trim() ? senderNote(actor.displayName) : "";
         const unscreenedNote =
           inputUnscreened || (enforceScreen && inbound.unscreened.length) || documentsUnscreened
             ? unscreenedNotice("inbound content")
@@ -3292,11 +3081,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ? [p.name]
             : [];
         });
+        const pinnedSkills = deps.config
+          ? await deps.config.getPinnedSkillsDurable(scopeId).catch(reportFailureAs("orchestrator: pinned skills", []))
+          : [];
         turnContextBlocks["Skills"] = skillsIndex(
           nativeSkills,
           [scopeId, resolution.orgScopeId],
           input.text,
           usedSkills,
+          pinnedSkills,
         );
         const turnEnvironmentContents = [
           manifest,
@@ -3309,9 +3102,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           .filter((s) => s && s.trim())
           .join("\n\n");
         const baseText = input.proactiveOpener && !input.text.trim() ? PROACTIVE_OPENER_PROMPT : input.text;
-        const pausedTurnUserEntry = input.approval
-          ? [...visibleHistory].reverse().find((e) => e.type === "user" && !isOverheardEntry(e))
-          : undefined;
+        const pausedTurnUserEntry =
+          input.approval && approvalRecord?.kind !== "input"
+            ? [...visibleHistory].reverse().find((e) => e.type === "user" && !isOverheardEntry(e))
+            : undefined;
         const resumedFromSeq = pausedTurnUserEntry?.seq;
         const approvalReplay =
           !!pausedTurnUserEntry &&
@@ -3319,11 +3113,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (partial)
           postKeys.seed(
             completedSurfaceEnqueues(
-              filterHistory(
-                (await deps.sessions.getEntries(session.id, { sinceSeq: partial.userSeq })).filter(
-                  (entry) => !entrySecurityTainted(entry),
-                ),
-              ),
+              filterHistory(await deps.sessions.getEntries(session.id, { sinceSeq: partial.userSeq })),
               partial.userSeq,
               surfaceName,
             ),
@@ -3343,14 +3133,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             `[orchestrator] turn.resume attempt=${input.attempt} thread=${conversation.threadRef} userSeq=${partial.userSeq} workEntries=${partial.workEntries} strategy=${resumePlan!.kind}`,
           );
         }
-        let turnInput = resumePlan
-          ? resumeNote({ strategy: resumePlan, backgroundJobs: !!backgroundBroker })
-          : baseText;
-        const requestInHistory = !!partial && history.some((entry) => entry.seq === partial.userSeq);
-        const continueTurn =
-          (resumePlan?.kind === "continue" || resumePlan?.kind === "retry") && requestInHistory && !releasedToolOutput;
-        if (partial && !requestInHistory)
-          turnInput += `\nCurrent request (continue from recorded work; do not restart):\n${baseText}`;
+        let turnInput = baseText;
+        const continueTurn = !!partial && history.some((entry) => entry.seq === partial.userSeq) && !releasedToolOutput;
         if (partial) spine.turnUserEntrySeq = partial.userSeq;
         if (releasedToolOutput) {
           turnInput = `The human released quarantined tool output recorded in the conversation. Continue the original task using that output. The tool action already ran; do not repeat it. Original task: ${baseText}`;
@@ -3387,23 +3171,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(sourceAssistantEntrySeq !== undefined ? { sourceAssistantEntrySeq } : {}),
           };
         };
+        let turnRuntime: TurnRuntime | undefined;
         const syntheticPrompt = syntheticInput || partial || approvalReplay || !!releasedToolOutput;
-        failureUserPayload = !syntheticPrompt && (input.text.trim() || inbound.metas.length) ? userPayload : undefined;
-        const requestedTurnWallClockMs =
-          typeof input.turnWallClockMs === "number" && input.turnWallClockMs > 0 ? input.turnWallClockMs : undefined;
-        const configuredTurnWallClockSec = await deps.config?.getTurnWallClockSecDurable(resolution.orgScopeId);
-        const configuredTurnWallClockMs =
-          configuredTurnWallClockSec === null || configuredTurnWallClockSec === undefined
-            ? undefined
-            : configuredTurnWallClockSec * 1000;
-        let effectiveTurnWallClockMs =
-          configuredTurnWallClockMs ?? deps.defaultTurnWallClockMs ?? CONFIG_DEFAULTS.turnWallClockSec * 1000;
-        if (requestedTurnWallClockMs !== undefined) {
-          effectiveTurnWallClockMs =
-            configuredTurnWallClockMs !== undefined && configuredTurnWallClockMs > 0
-              ? Math.min(requestedTurnWallClockMs, configuredTurnWallClockMs)
-              : requestedTurnWallClockMs;
-        }
+        failureUserPayload =
+          !syntheticPrompt && (input.text.trim() || inbound.metas.length)
+            ? { ...userPayload, ...(humanInput ? { speakerId: actor.id } : {}) }
+            : undefined;
+        const effectiveTurnWallClockMs =
+          typeof input.turnWallClockMs === "number" && input.turnWallClockMs > 0
+            ? input.turnWallClockMs
+            : (deps.defaultTurnWallClockMs ?? CONFIG_DEFAULTS.turnWallClockSec * 1000);
         const runtimePurpose = turnRuntimePurpose(
           { surface: input.surface, triggered: automatedTurn },
           !!session.parentSessionId || !!swarmBinding?.member.parentId,
@@ -3412,40 +3189,29 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const wantsOrgFastMode =
           typeof input.fastMode !== "boolean" &&
           !purposeDefault &&
-          humanTurn &&
+          humanInput &&
           (await deps.config?.getInteractiveFastModeDurable());
-        const effectiveFastMode = resolveTurnFastMode(input.fastMode, humanTurn, wantsOrgFastMode === true);
+        const effectiveFastMode = resolveTurnFastMode(input.fastMode, humanInput, wantsOrgFastMode === true);
         const loadRuntimeAuth = async (runtime: Partial<RuntimeChoice>) => {
           let userProviderKeys: ProviderKeys | undefined;
           let userModelOverride: string | undefined;
           let userHarnessOverride: string | undefined;
           let claudeOauthToken: string | undefined;
-          let codexTurnAuth: CodexTurnAuth | undefined;
           const userCredStore = external ? undefined : deps.userModelCredentials;
           const account = external
             ? "company"
             : (input.modelAccount ?? (await deps.config?.getModelAccountDurable(actor.id)) ?? "company");
-          if (userCredStore && humanTurn && account !== "company") {
+          if (userCredStore && humanInput && account !== "company") {
             const [anthCred, oaiCred] = await Promise.all([
               account === "openai" ? null : userCredStore.get(actor.id, "anthropic"),
               account === "anthropic" ? null : userCredStore.get(actor.id, "openai"),
             ]);
-            const orgRuntime = await deps.config?.getRuntimeSelectionDurable(resolution.orgScopeId);
-            const preferredHarness =
-              runtime.harnessId ??
-              input.harness ??
-              purposeDefault?.harnessId ??
-              orgRuntime?.harnessId ??
-              deps.defaultHarness;
             const routing = resolveIndividualAuthRouting(
               anthCred ?? null,
               oaiCred ?? null,
               account === "personal" || input.surface === "web"
                 ? (runtime.modelId ?? input.model ?? purposeDefault?.modelId)
                 : (runtime.modelId ?? purposeDefault?.modelId),
-              account === "personal" || input.surface === "web"
-                ? preferredHarness
-                : (runtime.harnessId ?? purposeDefault?.harnessId),
             );
             if (routing?.kind === "apikey") {
               userHarnessOverride = "pi";
@@ -3458,27 +3224,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 userHarnessOverride = routing.harness;
                 userModelOverride = routing.model;
               }
-            } else if (
-              routing?.kind === "oauth" &&
-              routing.provider === "openai" &&
-              routing.harness === "pi" &&
-              oaiCred?.oauth
-            ) {
+            } else if (routing?.kind === "oauth" && routing.provider === "openai" && oaiCred?.oauth) {
               const derived = await userCredStore.derivedOAuth(actor.id, "openai");
               if (derived) {
                 userProviderKeys = { [CODEX_SUBSCRIPTION_PROVIDER]: derived.accessToken };
-                userHarnessOverride = routing.harness;
-                userModelOverride = routing.model;
-              }
-            } else if (routing?.kind === "oauth" && routing.provider === "openai" && oaiCred?.oauth) {
-              const derived = await userCredStore.derivedOAuth(actor.id, "openai");
-              if (derived?.idToken) {
-                codexTurnAuth = {
-                  accessToken: derived.accessToken,
-                  idToken: derived.idToken,
-                  ...(derived.accountId ? { accountId: derived.accountId } : {}),
-                  ...(derived.expiresAt !== undefined ? { expiresAt: derived.expiresAt } : {}),
-                };
                 userHarnessOverride = routing.harness;
                 userModelOverride = routing.model;
               }
@@ -3489,32 +3238,33 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               );
             }
           }
-          return { userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken, codexTurnAuth };
+          return { userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken };
         };
-        let { userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken, codexTurnAuth } =
-          await loadRuntimeAuth({});
+        const servesModel = (requested: string, routed: string | undefined, keys: ProviderKeys | undefined) =>
+          (keys?.[CODEX_SUBSCRIPTION_PROVIDER] ? codexSubscriptionModelId(requested) : requested) === routed;
+        if (input.harness && !isHarnessId(input.harness))
+          throw new NonRetryableTurnError(`runtime ${input.harness} is not approved`);
+        const inputHarness = input.harness && isHarnessId(input.harness) ? input.harness : undefined;
+        const requestedModel = input.model ?? purposeDefault?.modelId;
+        let { userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken } = await loadRuntimeAuth({});
         if (
           (input.surface === "web" || purposeDefault) &&
           userHarnessOverride &&
-          (((input.model ?? purposeDefault?.modelId) &&
-            (input.model ?? purposeDefault?.modelId) !== userModelOverride) ||
-            ((input.harness ?? purposeDefault?.harnessId) &&
-              (input.harness ?? purposeDefault?.harnessId) !== userHarnessOverride))
+          ((requestedModel && !servesModel(requestedModel, userModelOverride, userProviderKeys)) ||
+            ((inputHarness ?? purposeDefault?.harnessId) &&
+              (inputHarness ?? purposeDefault?.harnessId) !== userHarnessOverride))
         )
           throw new NonRetryableTurnError("Your connected AI account cannot serve this model on that harness.");
         const effectiveModel = userModelOverride ?? input.model;
-        const effectiveHarness = userHarnessOverride ?? input.harness;
+        const effectiveHarness = userHarnessOverride ?? inputHarness;
         if (userHarnessOverride) {
           let authLabel = "api-key";
           if (claudeOauthToken) authLabel = "claude-oauth";
-          else if (codexTurnAuth) authLabel = "codex-oauth";
           else if (userProviderKeys?.[CODEX_SUBSCRIPTION_PROVIDER]) authLabel = "codex-oauth-pi";
           console.log(
             `[individual-auth] user=${actor.id} harness=${userHarnessOverride} model=${effectiveModel} auth=${authLabel}`,
           );
         }
-        if (input.harness && !isHarnessId(input.harness))
-          throw new NonRetryableTurnError(`runtime ${input.harness} is not approved`);
         let requestedRuntime: Partial<RuntimeChoice> = {
           ...(effectiveHarness && isHarnessId(effectiveHarness) ? { harnessId: effectiveHarness } : {}),
           ...(effectiveModel ? { modelId: effectiveModel } : {}),
@@ -3537,7 +3287,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             const auth = await loadRuntimeAuth(choice);
             if (
               auth.userHarnessOverride &&
-              (auth.userHarnessOverride !== choice.harnessId || auth.userModelOverride !== choice.modelId)
+              (auth.userHarnessOverride !== choice.harnessId ||
+                !servesModel(choice.modelId, auth.userModelOverride, auth.userProviderKeys))
             )
               return "Your connected AI account cannot serve this model on that harness. Choose a compatible runtime from get.";
             return null;
@@ -3545,19 +3296,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             return errMessage(error);
           }
         };
-        const adoptRuntime = async (choice: RuntimeChoice) => {
+        let agentSwitch: "task" | "scope" | undefined;
+        const adoptRuntime = async (choice: RuntimeChoice, lifetime: "task" | "scope") => {
           const error = await checkRuntimeAuth(choice);
           if (error) throw new NonRetryableTurnError(error);
-          ({ userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken, codexTurnAuth } =
+          agentSwitch = lifetime;
+          ({ userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken } =
             await loadRuntimeAuth(choice));
-          requestedRuntime = choice;
+          requestedRuntime = userModelOverride ? { ...choice, modelId: userModelOverride } : choice;
         };
-        if (restoredRuntime) await adoptRuntime(restoredRuntime);
-        if (automatedTurn && input.model && input.harness && isHarnessId(input.harness)) {
+        if (restoredRuntime) await adoptRuntime(restoredRuntime.choice, restoredRuntime.lifetime);
+        if (automatedTurn && input.model && inputHarness) {
           const error = await deps.validateScheduledRuntime?.(
             scopeId,
             {
-              harnessId: input.harness,
+              harnessId: inputHarness,
               modelId: input.model,
               effortLevel: input.thinkingLevel,
               fastMode: input.fastMode,
@@ -3566,7 +3319,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           );
           if (error) throw new NonRetryableTurnError(error);
         }
-        const runHarnessSegment = (
+        const runHarnessSegment = async (
           harnessInput: string,
           extras: {
             priorTurns?: typeof input.priorTurns;
@@ -3574,12 +3327,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             attachments?: typeof inbound.metas;
             images?: typeof inbound.images;
           },
-          continuation?: {
-            history: SessionEntry[];
-            tape?: { rows: Awaited<ReturnType<SessionStore["getTape"]>>; mode: "shadow" | "serve"; fold?: unknown[] };
-          },
+          continuation?: { history: SessionEntry[] },
         ) => {
-          const recall = memoryRecallDelta(recalled, continuation?.history ?? history);
+          const recall = memoryRecallDelta(
+            recalled,
+            continuation?.history ?? history,
+            memoryView.held,
+            context.memoryLabels,
+          );
           const snapshot = environmentDelta(turnContextBlocks, continuation?.history ?? history, session.id);
           const turnEnvironment = environmentNote(
             [turnEnvironmentContents, snapshot.text, recall.text ? `${memoryHeading}${recall.text}` : ""]
@@ -3587,36 +3342,28 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               .join("\n\n"),
           );
           const environment = [turnEnvironment, ...documentInputs.notices].filter(Boolean).join("\n");
+          const silentResume = continueTurn && !continuation && !snapshot.text && !recall.text;
           let recordedRecall = false;
-          let selectedTape = continuation?.tape;
-          if (!continuation && tapeRows) {
-            selectedTape = {
-              rows: tapeRows.rows,
-              mode: tapeRows.serve && history === visibleHistory ? "serve" : "shadow",
-              ...(tapeRows.fold ? { fold: tapeRows.fold } : {}),
-            };
-          }
           const emit: HarnessTurnInput["emit"] = async (entry) => {
             turnProgress++;
             const persistStart = Date.now();
             try {
               const stored = (() => {
-                const tainted = entry;
                 if (
-                  tainted.type === "assistant" ||
-                  tainted.type === "approval_request" ||
-                  ((tainted.type === "tool_result" || tainted.type === "tool_call") &&
-                    isObj(tainted.payload) &&
-                    tainted.payload.blocked === "needs_approval")
+                  entry.type === "assistant" ||
+                  entry.type === "approval_request" ||
+                  ((entry.type === "tool_result" || entry.type === "tool_call") &&
+                    isObj(entry.payload) &&
+                    entry.payload.blocked === "needs_approval")
                 ) {
-                  const payload = isObj(tainted.payload) ? { ...tainted.payload } : {};
+                  const payload = isObj(entry.payload) ? { ...entry.payload } : {};
                   if (typeof payload.workStartedAt !== "number")
                     payload.workStartedAt = input.runStartedAt ?? coreReceivedAt;
                   if (typeof payload.workFinishedAt !== "number") payload.workFinishedAt = Date.now();
-                  return { ...tainted, payload };
+                  return { ...entry, payload };
                 }
-                if (tainted.type !== "user") return tainted;
-                const payload = isObj(tainted.payload) ? { ...tainted.payload } : {};
+                if (entry.type !== "user") return entry;
+                const payload = isObj(entry.payload) ? { ...entry.payload } : {};
                 if (!recordedRecall && !payload.steered && !payload.overheard) {
                   recordedRecall = true;
                   payload.memoryContext = nextContext;
@@ -3626,6 +3373,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 }
                 Object.assign(payload, swarmEntryProvenance);
                 if (input.runId) payload.runId = input.runId;
+                delete payload.speakerId;
+                if (humanInput && !syntheticPrompt && !continuation && !payload.steered && !payload.overheard)
+                  payload.speakerId = actor.id;
                 if (actor.displayName?.trim() && typeof payload.name !== "string")
                   payload.name = actor.displayName.trim();
                 if (input.displayText?.trim() && payload.text === input.text && typeof payload.display !== "string")
@@ -3637,14 +3387,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 if (input.quoteAuthor?.trim() && typeof payload.quoteAuthor !== "string")
                   payload.quoteAuthor = input.quoteAuthor.trim();
                 if ((syntheticPrompt || continuation) && payload.steered !== true) payload.hidden = true;
-                return { ...tainted, payload };
+                if ((partial || continuation) && !payload.steered && !payload.overheard) payload.resumeNote = true;
+                return { ...entry, payload };
               })();
               const appended = await withManagedRosterVersion(() => deps.sessions.append(lease, stored));
               emittedEntries.push(appended);
-              if (input.runId && deps.turnStream) {
-                const goalView = goalViewFromEntry(appended.type, appended.payload);
-                if (goalView) deps.turnStream.noteGoal(input.runId, goalView);
-              }
               if (appended.type === "user" && spine.turnUserEntrySeq === undefined) {
                 spine.turnUserEntrySeq = appended.seq;
                 if (input.runId && deps.runs)
@@ -3671,8 +3418,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             }
           };
           const initialDocuments = [...documentInputs.documents];
+          const sessionGoal = openGoal((await deps.sessions.goals([session.id])).get(session.id));
           return deps.harness.turns.runTurn({
             session,
+            loadImage: artifactImageLoader(deps.files, mayReadArtifact),
             ...(turnTimezone ? { timezone: turnTimezone } : {}),
             prepareSteer: async (text, request) => {
               const refreshedInbox =
@@ -3781,6 +3530,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               ? { runtimePinned: true }
               : {}),
             runtimeActorId: actor.id,
+            onRuntime: (reported: TurnRuntime) => {
+              const runtime: TurnRuntime = agentSwitch ? { ...reported, change: { agent: agentSwitch } } : reported;
+              turnRuntime = runtime;
+              if (input.runId) deps.turnStream?.noteRuntime(input.runId, runtime);
+            },
             ...(runtimePurpose ? { runtimePurpose } : {}),
             ...(deps.runtime && input.runId
               ? {
@@ -3790,7 +3544,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     signal?: AbortSignal,
                   ) =>
                     deps.runtime!(
-                      runtimeClaims,
+                      sessionTurn && request.lifetime === "scope"
+                        ? { ...runtimeClaims, liveActor: false, liveAuthor: false }
+                        : runtimeClaims,
                       active,
                       request,
                       checkRuntimeAuth,
@@ -3802,12 +3558,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     ),
                 }
               : {}),
-            ...(codexTurnAuth ? { codexAuth: codexTurnAuth } : {}),
             ...(input.runId ? { runId: input.runId } : {}),
             cancel: turnAbort.signal,
-            ...(continueTurn && !continuation && !snapshot.text && !recall.text ? { continueTurn: true } : {}),
+            ...(silentResume ? { continueTurn: true, resumeUserSeq: partial!.userSeq } : {}),
             ...(input.shutdown ? { shutdown: input.shutdown } : {}),
-            input: harnessInput,
+            input: continueTurn && !continuation && !silentResume ? "" : harnessInput,
             ...(!partial && messageTs ? { triggerTs: messageTs } : {}),
             ...(!partial && entryTs ? { entryTs } : {}),
             ...(environment ? { environment } : {}),
@@ -3820,17 +3575,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(strictReadOnly ? { readOnly: true } : {}),
             surfaceName,
             delegateWork,
-            ...(input.clientTools?.length ? { clientTools: input.clientTools } : {}),
+            ...((session.clientTools ?? input.clientTools)?.length
+              ? { clientTools: session.clientTools ?? input.clientTools }
+              : {}),
             ...(input.surfaceTools && surfaceToolDeps ? { surfaceTools: true } : {}),
             ...(isPollFire ? { pollFire: true } : {}),
-            ...(effectiveTurnWallClockMs !== undefined
-              ? {
-                  turnWallClockMs:
-                    effectiveTurnWallClockMs > 0
-                      ? Math.max(1, effectiveTurnWallClockMs - (Date.now() - turnStart))
-                      : effectiveTurnWallClockMs,
-                }
-              : {}),
+            turnWallClockMs:
+              effectiveTurnWallClockMs > 0
+                ? Math.max(1, effectiveTurnWallClockMs - (Date.now() - turnStart))
+                : effectiveTurnWallClockMs,
             ...(securityPolicy.screening !== "off"
               ? {
                   screenToolResult: async ({
@@ -3965,46 +3718,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   },
                 }
               : {}),
-            ...(securityPolicy.toolApprovals === "all" ? { toolApprovalGate: authorizeToolCall } : {}),
+            toolApprovalGate:
+              securityPolicy.toolApprovals === "all"
+                ? authorizeToolCall
+                : (tool: string) => !GATED_TOOL_APPROVALS[tool] || authorizeToolCall(tool),
             systemPrompt,
             history: continuation?.history ?? history,
             tools,
             ...(tools.commandCredentialHandles ? { commandCredentialHandles: tools.commandCredentialHandles } : {}),
-            ...(selectedTape
-              ? {
-                  tapeRows: selectedTape.rows,
-                  tapeMode: selectedTape.mode,
-                  ...(selectedTape.fold ? { tapeFold: selectedTape.fold } : {}),
-                }
-              : {}),
             ...(resumePlan?.kind === "retry" && !continuation ? { resumeToolCall: resumePlan.call } : {}),
-            tape: (rec) => {
-              turnProgress++;
-              if (rec.kind !== "message" || rec.meta?.bareText === undefined) {
-                return withManagedRosterVersion(() => deps.sessions.appendTape(lease, rec));
-              }
-              const recordedSteer = emittedEntries.find(
-                (entry) =>
-                  entry.seq === rec.entrySeq &&
-                  entry.type === "user" &&
-                  isObj(entry.payload) &&
-                  entry.payload.steered === true,
-              )?.payload;
-              const meta = {
-                ...rec.meta,
-                ...swarmEntryProvenance,
-                ...(actor.displayName?.trim() ? { author: actor.displayName.trim() } : {}),
-                ...((isObj(recordedSteer) && recordedSteer.hidden === true) ||
-                ((syntheticPrompt || continuation) && !recordedSteer)
-                  ? { hidden: true }
-                  : {}),
-                ...(input.displayText?.trim() && rec.meta.bareText === input.text
-                  ? { display: input.displayText }
-                  : {}),
-              };
-              return withManagedRosterVersion(() => deps.sessions.appendTape(lease, { ...rec, meta }));
-            },
             emit,
+            goal: sessionGoal,
+            saveGoal: async (goal) => {
+              await deps.sessions.setGoal(lease, goal);
+              if (input.runId) deps.turnStream?.noteGoal(input.runId, goalView(goal));
+            },
             scopeLabel: scopeId,
             orgScopeId: resolution.orgScopeId,
             onDelta: (chunk: string) => {
@@ -4023,14 +3751,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             onTextBlockStart: async (phase) => {
               if (input.runId && deps.turnStream && !input.surfaceTools) deps.turnStream.publishBlockStart(input.runId);
               if (input.surfaceTools && spineFirstBlock) spineFirstBlockOpen = false;
-              if (phase && !input.surfaceTools) {
+              if (!input.surfaceTools) {
                 const streamOffset =
-                  input.runId && deps.turnStream ? (deps.turnStream.snapshot(input.runId) ?? "").length : undefined;
-                await emit({
+                  input.runId && deps.turnStream
+                    ? deps.turnStream.startOffset(input.runId) + (deps.turnStream.snapshot(input.runId) ?? "").length
+                    : undefined;
+                const started = emit({
                   type: "text_start",
-                  payload: { phase, ...(streamOffset !== undefined ? { streamOffset } : {}) },
+                  payload: { ...(phase ? { phase } : {}), ...(streamOffset !== undefined ? { streamOffset } : {}) },
                   scopeLabel: scopeId,
                 });
+                await (phase ? started : started.catch(swallowAs("orchestrator: text-start activity", undefined)));
               }
             },
             onGapWork: (cb) => {
@@ -4066,13 +3797,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               throw new NonRetryableTurnError("The task reached its wall-clock limit during runtime handoff");
             const recovery = "context" in segment.runtimeHandoff;
             if ("choice" in segment.runtimeHandoff) {
-              await adoptRuntime(segment.runtimeHandoff.choice);
+              await adoptRuntime(segment.runtimeHandoff.choice, segment.runtimeHandoff.lifetime);
               await deps.harness.turns.resetSession?.(session.id);
             }
             let resumedHistory = filterHistory(
-              forModelContext((await deps.sessions.getContextWindow(session.id)).entries, {
-                includeSecurityTainted: false,
-              }),
+              forModelContext((await deps.sessions.getContextWindow(session.id)).entries),
             );
             if (recovery)
               resumedHistory = await withManagedRosterVersion(() =>
@@ -4089,21 +3818,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               );
             contextRecovered ||= recovery;
             turnAbort.signal.throwIfAborted();
-            const resumedTape = tapeRows
-              ? {
-                  rows: filterTapeForAudience(
-                    await deps.sessions.getTape(session.id),
-                    conversation.audience,
-                    scopeId,
-                    resolution.orgScopeId,
-                  ),
-                  mode: "shadow" as const,
-                }
-              : undefined;
             segment = await runHarnessSegment(
-              resumeNote({ cause: "runtime-change" }) +
-                (recovery ? "\nContext reduced without a new summary." : "\nRuntime handoff completed.") +
-                " Continue the user's unfinished request using the saved conversation and tool results. Do not repeat completed actions or ask the user to repeat the request." +
+              runtimeSwitchNote("choice" in segment.runtimeHandoff ? segment.runtimeHandoff.choice : undefined) +
                 (recovery &&
                 !resumedHistory.some(
                   (entry) =>
@@ -4112,10 +3828,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     typeof entry.payload.text === "string" &&
                     entry.payload.text.startsWith(baseText),
                 )
-                  ? `\nCurrent request (continue from recorded work; do not restart):\n${baseText}`
+                  ? `\nCurrent request:\n${baseText}`
                   : ""),
               inbound.images.length ? { images: inbound.images } : {},
-              { history: resumedHistory, ...(resumedTape ? { tape: resumedTape } : {}) },
+              { history: resumedHistory },
             );
             modelCalls += segment.modelCalls ?? 0;
             addUsage();
@@ -4127,44 +3843,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             cacheUsage: usage,
           };
         };
-        const primaryServedTape = !!tapeRows?.serve && history === visibleHistory;
         let result = await runHarnessTurn(turnInput, {
           ...(priorTurns?.length ? { priorTurns } : {}),
           ...(importedOverheard.length ? { overheard: importedOverheard } : {}),
           ...(inbound.metas.length ? { attachments: inbound.metas } : {}),
           ...(inbound.images.length ? { images: inbound.images } : {}),
         });
-        const primarySubturnEndSeq = emittedEntries.at(-1)?.seq;
-        const preTurnCovered = tapeRows ? tapeRows.covered : false;
-        let latchedCoverageSeq = -1;
-        const latchCoverage = async (): Promise<void> => {
-          const lastSeq = [...emittedEntries.map((e) => e.seq), ...preAppendedSeqs].reduce(
-            (m, s2) => Math.max(m, s2),
-            -1,
-          );
-          const stoppedUnsafe = !!result.stopped && !result.stoppedTapeComplete;
-          if (lastSeq <= latchedCoverageSeq || !preTurnCovered || stoppedUnsafe) return;
-          const spanStart = [...emittedEntries.map((e) => e.seq), ...preAppendedSeqs].reduce(
-            (m, s2) => Math.min(m, s2),
-            lastSeq,
-          );
-          try {
-            await withManagedRosterVersion(() =>
-              deps.sessions.appendTape(lease, {
-                kind: "annotation",
-                payload: tapeCheckpointPayload("turnEnd", undefined, spanStart),
-                scopeLabel: scopeId,
-                entrySeq: lastSeq,
-              }),
-            );
-          } catch (e) {
-            if (e instanceof ProjectRosterChanged || e instanceof NonRetryableTurnError) throw e;
-            throw new NonRetryableTurnError(
-              `turn-end coverage append failed after the turn's effects landed (coverage withheld, heal covers it): ${errMessage(e)}`,
-            );
-          }
-          latchedCoverageSeq = lastSeq;
-        };
         if (
           input.addressed &&
           !strictReadOnly &&
@@ -4175,7 +3859,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           !result.silent &&
           !result.stopped
         ) {
-          await latchCoverage();
           // The model already wrote a reply as plain assistant text — deliver that text
           // directly instead of nudging it to re-post (a nudge here re-sends near-identical
           // text, which surfaces that render assistant entries show twice).
@@ -4199,55 +3882,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           }
           if (spine.surfaceOutboundCount === 0 && !silentPollNarration) {
             const nudgeHistory = filterHistory(
-              forModelContext((await deps.sessions.getContextWindow(session.id)).entries, {
-                includeSecurityTainted: false,
-              }),
+              forModelContext((await deps.sessions.getContextWindow(session.id)).entries),
             );
-            const nudgeTape = tapeRows
-              ? await deps.sessions
-                  .getTape(session.id)
-                  .then(async (allRows) => {
-                    const rows = filterTapeForAudience(allRows, conversation.audience, scopeId, resolution.orgScopeId);
-                    const sameHarness = rows.every(
-                      (row) => row.kind !== "message" || row.harness === undefined || row.harness === "pi",
-                    );
-                    const eventsEntitled = tapeEventsEntitled(
-                      rows,
-                      conversation.audience,
-                      scopeId,
-                      resolution.orgScopeId,
-                    );
-                    const primarySubturnComplete =
-                      primarySubturnEndSeq !== undefined &&
-                      rows.some(
-                        (row) =>
-                          row.kind === "annotation" &&
-                          row.entrySeq === primarySubturnEndSeq &&
-                          (row.payload as { subturnEnd?: unknown } | null)?.subturnEnd === true,
-                      );
-                    if (
-                      primaryServedTape &&
-                      sameHarness &&
-                      eventsEntitled &&
-                      primarySubturnComplete &&
-                      !rows.some(
-                        (row) => row.kind === "context_event" && isObj(row.payload) && row.payload.mode === "recent",
-                      )
-                    ) {
-                      const fold = await rehydrateTape(foldTape(rows));
-                      if (fold.length && lintFold(fold).ok) return { rows, mode: "serve" as const, fold };
-                    }
-                    return { rows, mode: "shadow" as const };
-                  })
-                  .catch((e) => {
-                    swallow("tape: nudge read", e);
-                    return undefined;
-                  })
-              : undefined;
             result = await runHarnessTurn(
               "[system] You were addressed directly. Reply with the `slack` tool's `post` action, or decline explicitly with finish_silently — ending the turn without either is not allowed here.",
-              nudgeTape?.mode !== "serve" && inbound.images.length ? { images: inbound.images } : {},
-              { history: nudgeHistory, ...(nudgeTape ? { tape: nudgeTape } : {}) },
+              inbound.images.length ? { images: inbound.images } : {},
+              { history: nudgeHistory },
             );
             if (spine.surfaceOutboundCount === 0 && !result.silent && !result.stopped) {
               const fallback = stripAckPrefix(result.reply ?? "", spineAckText).trim();
@@ -4286,8 +3926,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         })();
         const reply = stripAckPrefix(result.reply ?? "", harvestedAck);
         const cancelStopped = input.cancel?.aborted === true && result.stopped === true;
-
-        await latchCoverage();
 
         const outcome = deriveTurnOutcome({
           ...(reply !== undefined ? { reply } : {}),
@@ -4362,16 +4000,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             if (prior) await prior.catch(swallowAs("prior memory capture", undefined));
             const captureStart = Date.now();
             try {
-              const conversationLabel = await conversationLabelFor(deps.directory, scopeId, conversation.channelName);
               await onTurnEnd({
                 scopeId: memoryScopeId,
                 conversationScopeId: scopeId,
-                inheritedRecords: captureDependencies(),
+                inheritedFacts: captureDependencies(),
                 input: turnInput,
                 reply,
                 actorId: actor.id,
                 ...(automatedTurn ? { autonomous: true } : {}),
-                ...(conversationLabel ? { conversationLabel } : {}),
                 sessionId: session.id,
                 idempotencyKey: input.runId ?? `${session.id}:${spine.turnUserEntrySeq ?? "turn"}`,
               });
@@ -4519,6 +4155,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           };
         }
 
+        if (turnRuntime) finalResult = { ...finalResult, runtime: turnRuntime };
         await fallbackTitleWrite;
 
         if (input.background && finalResult.status !== "pending_approval") {
@@ -4612,17 +4249,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           err,
         );
         if ((isNonRetryable(err) || input.finalAttempt) && !input.cancel?.aborted) {
-          const mirrorFailureEntry = async (entry: SessionEntry | undefined): Promise<void> => {
-            if (!entry) return;
-            await deps.sessions
-              .appendTape(lease, tapeEntryMirrorRecord(entry))
-              .catch(swallowAs("orchestrator: turn failure mirror", undefined));
-          };
           if (failureUserPayload) {
             const userEntry = { type: "user" as const, payload: failureUserPayload, scopeLabel: scopeId as ScopeId };
-            await withManagedRosterVersion(() => deps.sessions.append(lease, userEntry))
-              .then(mirrorFailureEntry)
-              .catch(swallowAs("orchestrator: turn failure user back-fill", undefined));
+            await withManagedRosterVersion(() => deps.sessions.append(lease, userEntry)).catch(
+              swallowAs("orchestrator: turn failure user back-fill", undefined),
+            );
           }
           const payload: TurnFailurePayload = {
             kind: "turn_failure",
@@ -4631,9 +4262,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           };
           await withManagedRosterVersion(() =>
             deps.sessions.append(lease, { type: "system", payload, scopeLabel: scopeId as ScopeId }),
-          )
-            .then(mirrorFailureEntry)
-            .catch(swallowAs("orchestrator: terminal turn failure record", undefined));
+          ).catch(swallowAs("orchestrator: terminal turn failure record", undefined));
         }
         if (budget)
           return {

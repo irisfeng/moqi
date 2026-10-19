@@ -160,7 +160,7 @@ test("a verified send forwards blobId attachments to core as references (no inli
   const r = await verifiedSend({
     text: "here is a file",
     threadRef: "web:alice:t1",
-    harness: "codex",
+    harness: "pi",
     model: "gpt-5.6-sol",
     attachments: [
       { name: "big.bin", mimetype: "application/octet-stream", sizeBytes: 5242880, blobId: "a".repeat(32) },
@@ -174,7 +174,7 @@ test("a verified send forwards blobId attachments to core as references (no inli
   assert.equal(atts[0]!.name, "big.bin");
   assert.equal(atts[0]!.sizeBytes, 5242880);
   assert.equal((atts[0] as Record<string, unknown>).contentBase64, undefined, "no inline bytes ride the turn body");
-  assert.equal(lastTurnBody!.harness, "codex", "the selected harness reaches core");
+  assert.equal(lastTurnBody!.harness, "pi", "the selected harness reaches core");
   assert.equal(lastTurnBody!.model, "gpt-5.6-sol", "the selected model reaches core");
 });
 
@@ -191,7 +191,7 @@ test("a verified send refuses an attachment with no blobId instead of forwarding
 
 test("a verified send accepts retired model ids from existing conversations", async () => {
   for (const [harness, model] of [
-    ["codex", "gpt-5.5"],
+    ["pi", "gpt-5.5"],
     ["claude", "claude-sonnet-4-6"],
   ]) {
     const r = await verifiedSend({ text: "continue", threadRef: `web:alice:${model}`, harness, model });

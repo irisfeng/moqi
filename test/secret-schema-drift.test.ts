@@ -87,11 +87,15 @@ test("a declared base model provider is enforced at boot, not just at deploy tim
   assert.deepEqual(validateCoreSecretEnv({} as NodeJS.ProcessEnv), [], "no provider declared, nothing required");
 });
 
-test("an OpenAI base model on the Codex harness reports its one missing key once", () => {
+test("an OpenAI base model needs an API key unless a company ChatGPT login serves it", () => {
+  assert.deepEqual(validateCoreSecretEnv({ MODEL_PROVIDER: "openai" } as NodeJS.ProcessEnv), ["OPENAI_API_KEY"]);
   assert.deepEqual(
-    validateCoreSecretEnv({ MODEL_PROVIDER: "openai", HARNESS: "codex" } as NodeJS.ProcessEnv),
-    ["OPENAI_API_KEY"],
-    "two rules wanting the same key must not name it twice",
+    validateCoreSecretEnv({ MODEL_PROVIDER: "openai", CODEX_AUTH_CREDENTIAL: "cred-1" } as NodeJS.ProcessEnv),
+    [],
+  );
+  assert.deepEqual(
+    validateCoreSecretEnv({ MODEL_PROVIDER: "openai", CODEX_AUTH_FILE: "/tmp/auth.json" } as NodeJS.ProcessEnv),
+    [],
   );
 });
 
@@ -143,6 +147,12 @@ test("both porter roles share PORTER_DEPLOY_API_TOKEN", () => {
     } as NodeJS.ProcessEnv),
     [],
   );
+});
+
+test("E2B sandboxes and E2B publishing share E2B_API_KEY", () => {
+  assert.deepEqual(validateCoreSecretEnv({ DEPLOY_PROVIDER: "e2b" } as NodeJS.ProcessEnv), ["E2B_API_KEY"]);
+  assert.deepEqual(validateCoreSecretEnv({ SANDBOX_BACKEND: "e2b" } as NodeJS.ProcessEnv), ["E2B_API_KEY"]);
+  assert.deepEqual(validateCoreSecretEnv({ DEPLOY_PROVIDER: "e2b", E2B_API_KEY: "k" } as NodeJS.ProcessEnv), []);
 });
 
 test("shared Fly publishing validates its private peer secret", () => {

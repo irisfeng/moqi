@@ -1,7 +1,7 @@
 import { html, render } from "lit";
 import { ExternalLink } from "lucide";
 import { appState } from "./shell-state";
-import { icon } from "./ui";
+import { icon } from "./icons";
 
 type EmbeddedView = "docs" | "pm";
 

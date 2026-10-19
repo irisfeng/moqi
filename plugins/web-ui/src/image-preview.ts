@@ -1,6 +1,6 @@
 import { html, nothing, render } from "lit";
 import { ChevronLeft, ChevronRight } from "lucide";
-import { icon } from "./ui.ts";
+import { icon } from "./icons.ts";
 
 export interface PreviewImage {
   src: string;

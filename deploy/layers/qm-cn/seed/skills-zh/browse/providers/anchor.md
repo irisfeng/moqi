@@ -30,7 +30,7 @@ API 密钥嵌入了 `cdp_url`,所以 CDP URL 本身就是机密 — 它只作为
 
 ## 创建浏览器
 
-在私信中,带上此人的配置文件:
+带上此人的配置文件:
 
 ```bash
 CREATE=$(curl -fsS -X POST https://api.anchorbrowser.io/v1/sessions \
@@ -40,16 +40,6 @@ CDP_URL=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sy
 ANCHOR_SID=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'].get('id',''))")
 LIVE_VIEW=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'].get('live_view_url',''))")
 ```
-
-在频道或群组中,完全省略配置文件(遵循仅限私信的规则):
-
-```bash
-CREATE=$(curl -fsS -X POST https://api.anchorbrowser.io/v1/sessions \
-  -H "anchor-api-key: $ANCHOR_API_KEY" -H 'content-type: application/json' \
-  -d '{"session":{"timeout":{"max_duration":30,"idle_timeout":10}}}')
-```
-
-然后按与上面完全相同的方式,从 `$CREATE` 中提取 `CDP_URL` / `ANCHOR_SID` / `LIVE_VIEW`。
 
 超时的单位是分钟(`max_duration` 限制会话总时长,`idle_timeout` 回收未使用的会话)。
 对于有严格机器人防护的站点,添加代理和 Anchor 的加固版本 — 两者
@@ -114,7 +104,7 @@ curl -fsS -X POST "$AGENT_API_URL/v1/keychain/drops" -H "x-agent-capability: $AG
 Anchor(我们的托管浏览器提供方),以便它能替你登录和重新登录_ — 这种
 保存正是目的所在,并且需要他们明确同意。兑换完成时会向
 本会话发出唤醒;在 `credentials` 中写入新凭据的句柄,即可为该命令获得
-`EMAIL`/`PASSWORD`(登录仅限私信,所以无需走授权流程)。然后用 Python 根据环境变量构造请求体来创建身份
+`EMAIL`/`PASSWORD`。然后用 Python 根据环境变量构造请求体来创建身份
 (`POST /v1/identities`,带上 `{"source":"https://<domain>","name":...,"credentials":
 [{"type":"username_password","username":...,"password":...}]}`),并把返回的
 身份 id 注册到他们的密钥链中(服务 `anchor-identity`,envKey

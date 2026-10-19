@@ -167,7 +167,7 @@ test("sharing e2e: a delegated turn shares its live parent's access under curren
       request: {
         ...parent.request,
         conversation: { ...parent.request.conversation, threadRef: child.threadRef },
-        origin: { kind: "automation", screenData: text },
+        origin: parent.request.origin,
         delegatingRunId: parent.id,
         sessionSenderId: parentSession.id,
         text,
@@ -192,7 +192,24 @@ test("sharing e2e: a delegated turn shares its live parent's access under curren
   const delegatedClaims = await verifyCapabilityToken(token, TEST_CAPABILITY_SECRET);
   assert.equal(delegatedClaims?.liveAuthor, true);
   assert.equal(delegatedClaims?.liveActor, true);
-  assert.equal(delegatedClaims?.triggered, true);
+  assert.equal(delegatedClaims?.triggered, undefined);
+  const credential = await b.keychain!.save({
+    ownerId: "U1",
+    service: "delegated-test",
+    secret: "fixture-secret",
+    envKey: "DELEGATED_TEST_TOKEN",
+  });
+  assert.equal(
+    await childTurn(
+      `!execute ${JSON.stringify({
+        command: 'test -n "$DELEGATED_TEST_TOKEN" && printf available',
+        ownerAuth: true,
+        credentials: [credentialHandle(credential)],
+      })}`,
+    ),
+    "available",
+  );
+  assert.deepEqual(await b.keychain!.grantsForScope("channel:C1"), []);
   await b.config.setSharingPosture("personal:U1", "isolated");
   assert.match(await childTurn(read), /no file/);
   await b.config.clearSharingPosture("personal:U1");
@@ -441,7 +458,7 @@ test("sharing e2e: local notebooks retain late facts while unclassified carried 
   await b.memory.capture("channel:C1", ["ROOM_FACT_END"], Date.now(), "U1");
   const p = await b.turn("!sysprompt", true);
   assert.doesNotMatch(p, /PERSONAL_FACT_119/);
-  assert.match(p, /### channel:C1[\s\S]*ROOM_FACT_END/);
+  assert.match(p, /### #engineering[\s\S]*ROOM_FACT_END/);
   assert.match(await b.turn("!sysprompt"), /PERSONAL_FACT_119/);
   assert.doesNotMatch(await b.turn("!memorysearch PERSONAL_FACT_119", true), /PERSONAL_FACT_119/);
 });
@@ -479,8 +496,8 @@ test("Open speaker keychain uses a disposable computer, follows the speaker, and
   }
   const prompt = await b.turn("!sysprompt", true);
   assert.match(prompt, /execute scope `owner`/);
-  assert.match(prompt, /### U1\n(?:(?!###)[\s\S])*npm[^\n]*own; Open live turn only/);
-  assert.match(prompt, /### U2\n(?:(?!###)[\s\S])*npm[^\n]*no grant for this conversation/);
+  assert.match(prompt, /### U1 — own; Open live turn only[^\n]*\n(?:(?!###)[\s\S])*npm/);
+  assert.match(prompt, /### U2 — no grant for this conversation\n(?:(?!###)[\s\S])*npm/);
   assert.ok(!prompt.includes("npm_U1"));
   await b.workspace.write("channel:C1", "room-only.txt", "room_data");
   const probe = `python3 -c 'import os,pathlib; p=pathlib.Path.home()/".custom-cli/auth"; print("|".join([os.getenv("NPM_TOKEN","unset"),os.getenv("VAULT_TOKEN_GMAIL_GOOGLEAPIS_COM","unset"),p.read_text() if p.exists() else "absent",os.getenv("AGENT_API_TOKEN","unset"),"room" if pathlib.Path("room-only.txt").exists() else "isolated"]))'`;
@@ -495,8 +512,8 @@ test("Open speaker keychain uses a disposable computer, follows the speaker, and
     );
   }
   const ambientPrompt = await b.turn("!sysprompt", true, "U2", { origin: { kind: "ambient", live: true } });
-  assert.match(ambientPrompt, /### U2\n(?:(?!###)[\s\S])*npm[^\n]*own; Open live turn only/);
-  assert.match(ambientPrompt, /### U1\n(?:(?!###)[\s\S])*npm[^\n]*no grant for this conversation/);
+  assert.match(ambientPrompt, /### U2 — own; Open live turn only[^\n]*\n(?:(?!###)[\s\S])*npm/);
+  assert.match(ambientPrompt, /### U1 — no grant for this conversation\n(?:(?!###)[\s\S])*npm/);
   assert.match(await b.turn(`!run ${probe}`, true, "U2"), /^unset\|unset\|absent\|/);
   await b.directory.replaceGroups([
     { groupId: "G1", principalId: "U1" },

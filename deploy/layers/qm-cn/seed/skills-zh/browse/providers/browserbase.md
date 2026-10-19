@@ -44,7 +44,7 @@ context 保存已登录状态(cookies、localStorage 等)。三条规则
 
 `keepAlive` 在这里处处重要:没有它,会话会在 CDP 客户端
 断开连接时立即终止,因此运行器重试或下文的登录交接会发现浏览器已经失效。
-(它需要 Hobby 套餐或更高。)在私信中,带上此人的 context:
+(它需要 Hobby 套餐或更高。)带上此人的 context:
 
 ```bash
 CREATE=$(curl -fsS -X POST https://api.browserbase.com/v1/sessions \
@@ -61,16 +61,6 @@ LIVE_VIEW=$(curl -fsS "https://api.browserbase.com/v1/sessions/$BB_SID/debug" \
 一旦任务打开更多标签页,它就会过期。之后每当你交出实时查看链接时,
 都要在交接时重新获取 `/v1/sessions/$BB_SID/debug`,并从
 `pages[]` 中选出正确的条目(每个条目都有自己的 `debuggerFullscreenUrl`、`url` 和 `title`)。
-
-在频道或群组中,完全省略 `browserSettings.context`(遵循仅限私信的规则):
-
-```bash
-CREATE=$(curl -fsS -X POST https://api.browserbase.com/v1/sessions \
-  -H "X-BB-API-Key: $BROWSERBASE_API_KEY" -H 'content-type: application/json' \
-  -d '{"keepAlive":true,"timeout":1800}')
-```
-
-然后按与上面完全相同的方式提取 `CDP_URL` / `BB_SID` / `LIVE_VIEW`。
 
 超时的单位是秒(60–21600);验证码求解默认开启。对于有
 严格机器人防护的站点,添加顶层的 `"proxies":true` 和
@@ -113,25 +103,13 @@ SIGNIN_SID=$(printf '%s' "$SIGNIN" | python3 -c "import sys,json;print(json.load
 SIGNIN_CDP=$(printf '%s' "$SIGNIN" | python3 -c "import sys,json;print(json.load(sys.stdin).get('connectUrl',''))")
 ```
 
-它打开时是空白页,所以要把它引导到屏障页面,然后获取实时查看链接
+它打开时是空白页,所以用 SKILL.md 中共享的
+`browse-nav.py` 把它引导到屏障页面,然后获取实时查看链接
 (`keepAlive` 使会话在导航脚本断开连接后仍能存活 — 没有它,
 此人打开的将是一个已失效的实时查看):
 
 ```bash
-cat > /tmp/bb-nav.py <<'PY'
-import os
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    b = p.chromium.connect_over_cdp(os.environ["SIGNIN_CDP"])
-
-
-
-    ctx = b.contexts[0]
-    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    page.goto(open("/tmp/wall-url.txt").read().strip(), timeout=60000)
-    b.close()
-PY
-SIGNIN_CDP="$SIGNIN_CDP" /opt/browser-engine/venv/bin/python /tmp/bb-nav.py
+CDP_URL="$SIGNIN_CDP" /opt/browser-engine/venv/bin/python /tmp/browse-nav.py
 curl -fsS "https://api.browserbase.com/v1/sessions/$SIGNIN_SID/debug" \
   -H "X-BB-API-Key: $BROWSERBASE_API_KEY" \
   | python3 -c "import sys,json;print(json.load(sys.stdin).get('debuggerFullscreenUrl',''))"

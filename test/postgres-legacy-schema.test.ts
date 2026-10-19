@@ -52,6 +52,7 @@ test(
     try {
       await legacy.query(readFileSync(legacySchema, "utf8"));
       await legacy.query("SELECT pg_catalog.set_config('search_path', 'public', false)");
+      await legacy.query("ALTER TABLE memory_revisions ADD COLUMN records JSONB");
       const before = await tables(legacy);
       assert.ok(before.includes("public.cron_fire_log"));
       assert.ok(before.includes("public.adoption_scenario_labels"));
@@ -61,8 +62,8 @@ test(
       const after = await tables(legacy);
       assert.deepEqual(
         before.filter((table) => !after.includes(table)),
-        [],
-        "no legacy table is dropped",
+        ["public.session_tape", "public.task_events", "public.tasks", "public.turn_wall_clock_configs"],
+        "only the tables upstream retired are dropped",
       );
       for (const table of ["public.cron_fires", "public.qm_schema_migrations", "public.inbound_artifact_cleanup"])
         assert.ok(after.includes(table), table);

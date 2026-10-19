@@ -34,10 +34,12 @@
       "ORG_BRAND_SELF_LABEL": "默契"
     },
     // 不接 Slack：网页和后台不显示任何 Slack 入口。
+    // 不提供桌面应用：设置页不显示“下载 Mac 版”（下载地址在上游 GitHub，内网无法访问）。
     // 浏览器标签页图标：默契的符契标志，随系统深浅色切换；三个入口各设一次，不设置时默认显示一个 emoji。
     "web-ui": {
       "WEB_UI_FAVICON_SVG": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><style>.l{fill:#1f2328}.r{fill:#1c6a8a}@media (prefers-color-scheme:dark){.l{fill:#ecebe6}.r{fill:#6bb6d3}}</style><path class=\"l\" d=\"M23 0H39V49H55V100H23A23 23 0 0 1 0 77V23A23 23 0 0 1 23 0Z\"/><path class=\"r\" d=\"M45 0H77A23 23 0 0 1 100 23V77A23 23 0 0 1 77 100H61V43H45Z\"/></svg>",
-      "QM_SLACK": "off"
+      "QM_SLACK": "off",
+      "QM_DESKTOP": "off"
     },
     "admin": {
       "QM_SLACK": "off"

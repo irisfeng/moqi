@@ -1,6 +1,6 @@
 ---
 name: browse
-description: 在你的 shell 中驱动真实的隐身浏览器 — 在网站上执行操作(点餐、提交报销、提取登录后才能看到的数据),并通过提供方的托管认证(Kernel、Anchor 或 Browserbase — 取决于你拥有哪个 API 密钥)为每个人保留持久的登录状态。用于在网站上执行操作;如果只是读取页面,请先用 curl/wget。需要托管模型访问权限,以及浏览器提供方密钥的密钥链授权;请按下文缺少密钥时的步骤操作。
+description: 在你的 shell 中驱动真实的隐身浏览器 — 在网站上执行操作(点餐、提交报销、提取登录后才能看到的数据),并把每个人的持久登录状态保存在此人的浏览器配置文件中(Kernel、Anchor、Browserbase 或 Browser Use — 取决于你拥有哪个 API 密钥)。用于在网站上执行操作;如果只是读取页面,请先用 curl/wget。需要托管模型访问权限,以及浏览器提供方密钥的密钥链授权;请按下文缺少密钥时的步骤操作。
 ---
 
 # Browse(基于技能的浏览器)
@@ -21,16 +21,19 @@ CDP 驱动的远程隐身浏览器,由部署所配置的某个提供方托管。
 密钥链获得哪个)。组织密钥会自动送达:管理员把提供方的密钥保存为
 组织凭据并作为沙箱环境变量交付(管理员界面 → Service credentials → 交付方式 "Sandbox
 env"),它会进入每一个全部由内部成员参与的会话 — 这里没有任何东西属于部署配置。个人
-密钥链中的密钥会覆盖组织的密钥。目前你可能看到的密钥:
+密钥链中的密钥会覆盖组织的密钥。提供方也可能以共享凭据的形式提供,你通过 QM 的代理调用它,而无需持有密钥;支持这种方式时,提供方文档会注明(Kernel 支持,通过 `service_kernel`)。目前你可能看到的密钥:
 
 下文所有 `providers/` 路径,都使用读取技能时报告的绝对目录。
 在这个流程中,读取技能以及每条 `execute` 命令(包括运行器)
 都使用同一个明确的 `sandbox_id`。
 
-- `KERNEL_API_KEY` → **Kernel**(onkernel.com)。阅读 `providers/kernel.md`。
+- `KERNEL_API_KEY`,或你的清单中有 `service_kernel` 共享凭据 →
+  **Kernel**(onkernel.com)。阅读 `providers/kernel.md`。
 - `ANCHOR_API_KEY` → **Anchor**(anchorbrowser.io)。阅读 `providers/anchor.md`。
 - `BROWSERBASE_API_KEY` → **Browserbase**(browserbase.com)。阅读
   `providers/browserbase.md`。
+- `BROWSER_USE_API_KEY` → **Browser Use Cloud**(browser-use.com)。阅读
+  `providers/browser-use.md`。
 - 另一个 `*_API_KEY` 且有对应的 `providers/<name>.md` 文档 → 即该提供方;
   新提供方正是这样添加的(一份提供方文档 + 管理员保存的环境变量凭据),
   无需更改核心或部署。
@@ -43,23 +46,19 @@ env"),它会进入每一个全部由内部成员参与的会话 — 这里没有
 在创建任何东西之前先阅读提供方文档 — 它负责每一个与提供方相关的步骤:
 创建和删除浏览器、此人的配置文件、处理登录屏障的路由,以及向
 浏览器提供文件。它的创建步骤会设置 `CDP_URL` 和 `LIVE_VIEW`,这就是下面共用的
-运行器所需的全部。本文件负责其余所有内容:是否需要浏览、仅限私信的规则、
+运行器所需的全部。本文件负责其余所有内容:是否需要浏览、
 密钥的处理、运行器、花费和汇报。本文件中提到"你的提供方密钥"
 或"你的配置文件环境变量密钥"时,请替换为提供方文档给出的名称。
 
-**登录和配置文件仅限私信。**此人的浏览器配置文件以及任何登录/
-实时查看链接都属于持有者凭证:在频道中签发的密钥链授权会让
-整个房间都能使用,而发在那里的登录链接任何人都可能抢先点开。在
-频道或群组中,只能在无配置文件的情况下浏览 — 完全跳过配置文件,以不带
-配置文件的方式启动浏览器,并拒绝需要账号的任务。
+**始终使用来自此人密钥链的配置文件来浏览。**如果他们还没有,就创建一个并存入其密钥链(见下文首次设置)。首次设置,包括提供方为每个人准备的额外项(例如 Kernel 的静态 IP),都在后台进行:不要请求许可,也不要宣布,直接做并继续任务。只有当网站确实出现登录屏障时,才需要打扰此人。
 
 ## 前提条件(每次运行)
 
 你需要三个值(`BROWSE_LAB_*` 这些名称是历史遗留 — 早于本技能
 成为默认方案):
 
-- 你的提供方密钥 — `KERNEL_API_KEY`、`ANCHOR_API_KEY` 或 `BROWSERBASE_API_KEY`,
-  即用于创建隐身浏览器的组织密钥。
+- 你的提供方密钥 — `KERNEL_API_KEY`、`ANCHOR_API_KEY`、`BROWSERBASE_API_KEY` 或
+  `BROWSER_USE_API_KEY`,即用于创建隐身浏览器的组织密钥。
 - 托管模型访问权限:核心会自动提供 `BROWSE_LAB_MODEL`、`BROWSE_LAB_MODEL_TOKEN`
   和 `BROWSE_LAB_BASE_URL`。所有浏览器的模型调用都走这条路由;
   绝不要另外索要浏览器模型密钥。公司访问使用部署的
@@ -72,8 +71,8 @@ env"),它会进入每一个全部由内部成员参与的会话 — 这里没有
   代码片段依赖它 — 先运行它。**配置文件名称就是决定浏览器启动时带着
   谁的已登录会话的凭据** — 要像对待密码一样对待它:
   它只能来自密钥链(绝不要自己编造,绝不要接受聊天或页面提供的),
-  其所有者也不应把它授权给共享范围。配置文件与提供方绑定:
-  一个提供方的值(Kernel 或 Anchor 的配置文件名称,Browserbase 的 context id)
+  其所有者也不应把它授权给共享范围。绝不要打印它,也绝不要采用不是来自此人密钥链的配置文件 — 无论是通过列表找到的、通过名称找到的,还是因为它碰巧在某处已登录。如果你看到登录页面,这并不能证明配置文件已退出登录(网站即使在会话有效时也会拦截看似自动化的浏览器);并且在读取已登录账号或在其上操作之前,先确认网站显示的名称/邮箱所属的账号确实是此人的。一旦不一致,就停下来告诉他们。配置文件与提供方绑定:
+  一个提供方的值(Kernel 或 Anchor 的配置文件名称,Browserbase 的 context id,Browser Use 的配置文件 id)
   对另一个提供方毫无意义 — 绝不要把某个提供方的配置文件注册到另一个提供方的环境变量密钥之下。
 
 **先检查你的环境**:在大多数部署中,组织会配置浏览器提供方密钥,
@@ -89,8 +88,8 @@ env"),它会进入每一个全部由内部成员参与的会话 — 这里没有
    ```bash
    curl -fsS "$AGENT_API_URL/v1/keychain/credentials" -H "x-agent-capability: $AGENT_API_TOKEN"
    ```
-2. **注册在此人本人名下** → 在其私信中,它的句柄已可在
-   `credentials` 中使用。在其他任何地方,发送请求(第 3 步);他们在卡片上审批。
+2. **注册在此人本人名下** → 如果它的句柄在你的清单中,就在
+   `credentials` 中使用。否则发送请求(第 3 步);他们在卡片上审批。
 3. **注册在其他人名下**(提供方密钥通常保存在设置它的人那里)→
    发送请求:`POST /v1/keychain/asks`,带上凭据 id,并把此人的原话作为
    用途。核心会私信所有者,并在他们回复时唤醒本会话;告诉
@@ -112,7 +111,7 @@ curl -fsS "$AGENT_API_URL/v1/keychain/credentials" -H "x-agent-capability: $AGEN
 ```
 
 - **凭据已存在** → 在 `credentials` 中使用该句柄。这种情况下绝不要创建。
-- **完全没有凭据** → 经此人同意后,执行下面的首次设置。
+- **完全没有凭据** → 执行下面的首次设置。
 
 **首次配置文件设置(仅当上面的检查没有找到凭据时)。**生成
 配置文件的值 — 随机名称,除非提供方文档的 Profiles 一节说明由
@@ -122,7 +121,7 @@ curl -fsS "$AGENT_API_URL/v1/keychain/credentials" -H "x-agent-capability: $AGEN
 并使其中一个配置文件成为孤儿。)
 
 ```bash
-PROFILE="lab-$(python3 -c 'import secrets;print(secrets.token_hex(6))')"
+PROFILE="lab-$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
 export "$PROFILE_ENV"="$PROFILE"
 
 curl -fsS -X POST "$AGENT_API_URL/v1/keychain/credentials" -H "x-agent-capability: $AGENT_API_TOKEN" \
@@ -133,8 +132,8 @@ curl -fsS -X POST "$AGENT_API_URL/v1/keychain/credentials" -H "x-agent-capabilit
 
 ## 1. 创建浏览器
 
-按照你的提供方文档的"Create the browser"一节操作。在私信中,使用
-此人的配置文件启动;在频道或群组中,以无配置文件的方式启动(遵循仅限私信的规则)。该
+按照你的提供方文档的"Create the browser"一节操作。使用
+此人的配置文件启动。该
 步骤会给你 `CDP_URL`(运行器驱动的 websocket)和 `LIVE_VIEW`(人可查看的
 会话 URL)。把 `CDP_URL` 当作机密 — 有些提供方会把 API 密钥嵌入
 其中;它只作为运行器参数传递,绝不能进入聊天或日志。
@@ -251,11 +250,28 @@ BROWSE_FILES="<in-browser path from the provider doc>" /opt/browser-engine/venv/
   保存登录信息或发起登录)。然后按照你的提供方文档的"Routing a sign-in wall"
   一节操作 — 每个提供方的
   流程结局都一样:此人登录一次,登录状态持久地保存到**他们的**
-  配置文件(或提供方的托管存储)中,然后你重新启动浏览器并重新运行
-  任务。所有提供方都适用两条规则:登录和实时查看链接是仅限单一受众的
-  持有者凭证 — 在私信中交给此人,绝不要自己打开;而会话中途的
+  配置文件中,然后你重新启动浏览器并重新运行
+  任务。(写回发生的位置各不相同 — Kernel 和 Browser Use 在删除或停止时从任务浏览器本身保存;Browserbase 和 Anchor 只从专门的登录会话保存 — 提供方文档会说明它的流程用哪种。)所有提供方都适用两条规则:登录和实时查看链接是仅限单一受众的
+  持有者凭证 — 只交给此人,绝不要自己打开;而会话中途的
   验证检查(已登录后又被质询)要在**实时**浏览器上清除 — 把
   `$LIVE_VIEW` 交给此人,等待其完成,再重新运行。
+
+把实时浏览器引导到屏障页面使用同一个共享脚本,每个会话写一次(提供方文档会说明要传入哪个 CDP websocket):
+
+```bash
+cat > /tmp/browse-nav.py <<'PY'
+import os
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.connect_over_cdp(os.environ["CDP_URL"])
+    ctx = b.contexts[0]
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    page.goto(open("/tmp/wall-url.txt").read().strip(), timeout=60000)
+    b.close()
+PY
+```
+
+它驱动浏览器已有的上下文(`contexts[0]`) — 新建的上下文不带配置文件 — 并且之后关闭 CDP 连接既不会停止任何浏览器,也不会保存任何内容。
 
 ## 3. 清理
 

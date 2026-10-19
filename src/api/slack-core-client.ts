@@ -1,3 +1,4 @@
+import { isSessionTurn } from "../core/turn-origin.ts";
 import { replayableRequest } from "../core/orchestrator/turn-helpers.ts";
 import {
   createSlackSessionStatus,
@@ -41,7 +42,6 @@ import type { MetricsSink } from "../admin/metrics-sink.ts";
 import type { RunStore } from "../runs/run-store.ts";
 import { isTerminal } from "../runs/run-store.ts";
 import type { GoalView, TurnStream } from "../runs/turn-stream.ts";
-import type { TaskStore, TaskStatus } from "../tasks/task-store.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import { swallowAs } from "../util/errors.ts";
 import { resolveRuntimeChoiceDurable } from "../harness/harness-router.ts";
@@ -54,7 +54,6 @@ interface SlackRunHooks {
   onReplying?(): void;
   onFirstBlock?(text: string): void;
   onSurfacePosted?(): void;
-  onTasks?(tasks: Array<{ id: string; title: string; status: TaskStatus }>): void | Promise<void>;
   onGoal?(goal: GoalView): void | Promise<void>;
 }
 
@@ -65,7 +64,7 @@ interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
 }
 
 interface DirectoryPush {
-  members?: Array<{ principalId: string; displayName: string; type: "internal"; slackId?: string }>;
+  members?: Array<{ principalId: string; displayName: string; type: "internal"; slackId?: string; avatarUrl?: string }>;
   channels?: Array<{ channelId: string; name: string; isPrivate?: boolean; isExternal?: boolean }>;
   channelMembers?: Array<{ channelId: string; principalId: string }>;
   channelRosterIds?: string[];
@@ -165,7 +164,6 @@ export interface SlackCoreClientDeps {
   metrics: MetricsSink;
   runs: RunStore;
   turnStream: TurnStream;
-  tasks: TaskStore;
   pickAckEmoji?(text: string, candidates: readonly string[]): Promise<string | undefined>;
   ackPicks?: AckEmojiPickStore;
   ackModelId?: () => string | undefined;
@@ -288,7 +286,12 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
 
     async privateContinuationSource(runId) {
       const run = await deps.runs.get(runId);
-      if (!run?.request.externalSlack || run.request.origin.kind !== "human" || run.request.actor.type !== "internal")
+      if (
+        !run?.request.externalSlack ||
+        run.request.origin.kind !== "human" ||
+        isSessionTurn(run.request) ||
+        run.request.actor.type !== "internal"
+      )
         return null;
       return replayableRequest(run.request);
     },
@@ -324,7 +327,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       });
       let lastProgressAt = Date.now();
       let lastMark = "";
-      let taskSnapshot = "";
       let goalSnapshot = "";
       const emitGoal = async (): Promise<void> => {
         if (!hooks.onGoal) return;
@@ -334,19 +336,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
         if (next === goalSnapshot) return;
         goalSnapshot = next;
         await hooks.onGoal(goal);
-      };
-      const emitTasks = async (): Promise<void> => {
-        if (!hooks.onTasks) return;
-        const tasks = (await deps.tasks.list({ originRunId: runId })).map(({ id, title, status }) => ({
-          id,
-          title,
-          status,
-        }));
-        if (!tasks.length) return;
-        const next = JSON.stringify(tasks);
-        if (next === taskSnapshot) return;
-        taskSnapshot = next;
-        await hooks.onTasks(tasks);
       };
       try {
         for (;;) {
@@ -362,13 +351,11 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
             if (deps.turnStream.surfacePosted(runId)) signalSurface();
             if (isTerminal(run.status)) {
               const view = await deps.app.getRun(runId);
-              await emitTasks().catch(swallowAs("slack-core-client: terminal task refresh", undefined));
               await emitGoal().catch(swallowAs("slack-core-client: terminal goal refresh", undefined));
               if (view?.surfacePosted) signalSurface();
               return (view?.result as TurnResult | null | undefined) ?? null;
             }
             signalReplying(run.deliveryState?.replying === true);
-            await emitTasks();
             await emitGoal().catch(swallowAs("slack-core-client: goal refresh", undefined));
             const fb = deps.turnStream.firstBlock(runId);
             if (fb?.closed) signalFirstBlock(fb.text);

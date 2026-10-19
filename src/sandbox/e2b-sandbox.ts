@@ -34,6 +34,7 @@ import {
   type E2bClient,
   type E2bSandboxInfo,
   type E2bSession,
+  runE2bScript,
 } from "./e2b-client.ts";
 import {
   createHomeSnapshotOps,
@@ -74,6 +75,8 @@ export interface StoredE2bSandbox {
   lastSnapshotMs?: number;
   homeDirty?: boolean;
 }
+
+export const E2B_TEMPLATE_TOOLS = ["wget", "unzip", "gh", "aws", "x-api"];
 
 export interface E2bSandboxOptions extends BlobStagingOptions {
   advisoryLock?: AdvisoryLock;
@@ -294,12 +297,7 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
   }
 
   async function execRaw(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
-    return withSession(name, async (session) => {
-      const r = await session.runCommand(`timeout ${timeoutSec} sh -c ${shq(script)}`, {
-        timeoutMs: timeoutSec * 1000 + 30_000,
-      });
-      return { stdout: r.stdout, stderr: r.stderr, code: r.exitCode, timedOut: r.exitCode === 124 };
-    });
+    return withSession(name, (session) => runE2bScript(session, script, timeoutSec));
   }
 
   const profile: AgentComputerProfile = {

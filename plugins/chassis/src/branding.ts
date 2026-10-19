@@ -130,3 +130,8 @@ export function markSlackOff(html: string, off: boolean): string {
   if (!off) return html;
   return html.replace(/<html(?=[\s>])/, '<html data-slack="off"');
 }
+
+export function markDesktopOff(html: string, off: boolean): string {
+  if (!off) return html;
+  return html.replace(/<html(?=[\s>])/, '<html data-desktop="off"');
+}

@@ -1,5 +1,6 @@
 import { externalSlackCapabilityAllowed } from "./external-slack-capability.ts";
 import { MemoryDisclosureDenied } from "../memory/disclosure.ts";
+import { MemoryFactsMissing } from "../memory/facts.ts";
 import { reportBackendError, startTiming } from "../../plugins/chassis/src/error-reporting.ts";
 import { traceStatus } from "../../plugins/chassis/src/timing.ts";
 import {
@@ -136,7 +137,6 @@ function strictPostAllowed(pathname: string, body: unknown): boolean {
     pathname === "/v1/projects" ||
     pathname === "/v1/memory/search" ||
     pathname === "/v1/search" ||
-    pathname === "/v1/memory/restore" ||
     pathname.startsWith("/v1/run-signals/")
   )
     return true;
@@ -239,7 +239,10 @@ async function verifyCapability(
           ...(capability.members ? { members: capability.members } : {}),
         }))
   ) {
-    sendJson(res, 403, { error: "forbidden", message: "capability scope membership has been revoked" });
+    sendJson(res, 403, {
+      error: "forbidden",
+      message: "the acting user is not currently authorized for this conversation",
+    });
     return null;
   }
   if (requiredAud && capability.aud !== requiredAud) {
@@ -380,8 +383,10 @@ function baseCtx(req: IncomingMessage, res: ServerResponse, wiring: Wiring): Bas
 }
 
 function respondError(req: IncomingMessage, res: ServerResponse, err: unknown): void {
-  if (err instanceof MemoryDisclosureDenied) {
-    if (!res.headersSent) sendJson(res, 403, { error: "forbidden", message: err.message });
+  if (err instanceof MemoryDisclosureDenied || err instanceof MemoryFactsMissing) {
+    const status = err instanceof MemoryFactsMissing ? 404 : 403;
+    if (!res.headersSent)
+      sendJson(res, status, { error: status === 404 ? "not_found" : "forbidden", message: err.message });
     else res.destroy();
     return;
   }

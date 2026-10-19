@@ -3,8 +3,18 @@ import { LRUCache } from "lru-cache";
 import { NotFoundError } from "porter-sandbox";
 import type { Deployment, DeploymentVersion } from "./deploy-store.ts";
 import type { DeployEndpoint, DeployProvider } from "./deploy-provider.ts";
-import { appGone, appReporter, supervised, waitAppReady, type AppErrorSink } from "./shared-deploy-provider.ts";
-import { normalizeRelPath, posixJoin, readTree } from "./deploy-fs.ts";
+import {
+  appEnv as declaredAppEnv,
+  appGone,
+  appLaunch,
+  appLogs,
+  appReporter,
+  bundleEntries,
+  extractBundle,
+  waitAppReady,
+  type AppErrorSink,
+} from "./shared-deploy-provider.ts";
+import { posixJoin } from "./deploy-fs.ts";
 import { makeTar } from "../sandbox/tar.ts";
 import {
   createPorterClient,
@@ -22,13 +32,11 @@ import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts"
 import { createNoopAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createKeyedQueue } from "../util/async.ts";
 import { shq } from "../util/shell.ts";
-import { errMessage, swallow, swallowAs } from "../util/errors.ts";
+import { errMessage, execFailure, swallow, swallowAs } from "../util/errors.ts";
 
 const APP_DIR = "/app";
 const HOME_DIR = "/root";
 const DATA_DIR = "/data";
-const PID_PATH = "/tmp/qm-app.pid";
-const LOG_PATH = "/tmp/qm-app.log";
 const APP_PORT_DEFAULT = 8080;
 const ENDPOINT_PORT = 443;
 const APP_READY_WINDOW_SEC_DEFAULT = 60;
@@ -41,7 +49,6 @@ const RESOLVE_CACHE_MAX = 500;
 const KIND_TAG = "qm-kind";
 const DEPLOY_TAG = "qm-deploy";
 const DEFAULT_RUNNER_IMAGE = "ghcr.io/porter-dev/qm-app-runner:latest";
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface StoredPorterDeployBody {
   deploymentId: string;
@@ -114,14 +121,12 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
   }
 
   function appEnv(version: DeploymentVersion): Record<string, string> {
-    const declared = Object.fromEntries(Object.entries(version.env ?? {}).filter(([k]) => ENV_NAME.test(k)));
-    return { ...declared, HOME: HOME_DIR, PORT: String(appPort), DATA_DIR };
+    return declaredAppEnv(version.env, { HOME: HOME_DIR, PORT: String(appPort), DATA_DIR });
   }
 
   async function unpackTree(sandboxId: string, volumeId: string, guestDir: string, dir: string): Promise<void> {
-    const files = await readTree(dir, { tolerateMissing: true });
-    if (!files.length) return;
-    const entries = files.map((f) => ({ path: normalizeRelPath(f.path), data: f.data }));
+    const entries = await bundleEntries(dir);
+    if (!entries.length) return;
     const bundle = `${BUNDLE_DIR}/${randomUUID()}.tar`;
     const uploaded = await client.volumes.raw
       .writeFile(volumeId, await makeTar(entries), { path: `/${bundle}` }, { timeoutMs: BUNDLE_UPLOAD_TIMEOUT_MS })
@@ -133,12 +138,10 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
     const guestBundle = posixJoin(DATA_DIR, bundle);
     const r = await execRaw(
       sandboxId,
-      `mkdir -p ${shq(guestDir)} && tar -xmf ${shq(guestBundle)} -C ${shq(guestDir)}; rc=$?; ` +
-        `rm -f ${shq(guestBundle)}; rmdir ${shq(posixJoin(DATA_DIR, BUNDLE_DIR))} 2>/dev/null; exit $rc`,
+      extractBundle(guestBundle, guestDir, `rmdir ${shq(posixJoin(DATA_DIR, BUNDLE_DIR))} 2>/dev/null`),
       BUNDLE_EXTRACT_TIMEOUT_SEC,
     );
-    if (r.code !== 0)
-      throw new Error(`porter deploy: unpacking into ${guestDir} failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+    if (r.code !== 0) throw execFailure(`porter deploy: unpacking into ${guestDir}`, r);
   }
 
   async function materialize(sandboxId: string, volumeId: string, version: DeploymentVersion): Promise<void> {
@@ -148,19 +151,16 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
 
   async function startApp(d: Deployment, sandboxId: string, version: DeploymentVersion): Promise<void> {
     const inner = `cd ${shq(APP_DIR)}; ${version.entrypoint}`;
-    const launch = `sh -c ${shq(supervised(inner, appPort, PID_PATH))} < /dev/null > ${shq(LOG_PATH)} 2>&1 & echo $! > ${shq(PID_PATH)}`;
     const script = [
       `mkdir -p ${shq(APP_DIR)} ${shq(DATA_DIR)}`,
       `export HOME=${shq(HOME_DIR)} PORT=${appPort} DATA_DIR=${shq(DATA_DIR)}`,
-      `if command -v setsid >/dev/null 2>&1; then setsid ${launch}; else ${launch}; fi`,
+      appLaunch(inner, appPort),
     ].join("; ");
     const r = await execRaw(sandboxId, script, APP_START_EXEC_TIMEOUT_SEC);
-    if (r.code !== 0) throw new Error(`porter deploy app start failed: ${r.stderr.slice(0, 300)}`);
+    if (r.code !== 0) throw execFailure("porter deploy app start", r);
     await waitAppReady((script, timeoutSec) => execRaw(sandboxId, script, timeoutSec), {
       appPort,
       windowSec: readyWindowSec,
-      pidPath: PID_PATH,
-      logPath: LOG_PATH,
       report: appReporter(opts.onError, d, version.env),
     });
   }
@@ -255,7 +255,7 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
       }
       const exec = (script: string, timeoutSec: number) => execRaw(stored.sandboxId, script, timeoutSec);
       const report = appReporter(opts.onError, d, version.env);
-      if (await appGone(exec, { appPort, pidPath: PID_PATH, logPath: LOG_PATH, report })) return null;
+      if (await appGone(exec, { appPort, report })) return null;
       const endpoint = endpointOf(stored);
       if (resolveCacheMs > 0) resolveCache.set(d.id, endpoint);
       return endpoint;
@@ -264,9 +264,7 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
     async logs(d, logOpts): Promise<string | null> {
       const stored = await liveStored(d);
       if (!stored) return null;
-      const lines = Math.max(1, Math.min(2000, Math.floor(logOpts.tailLines)));
-      const r = await execRaw(stored.sandboxId, `tail -n ${lines} ${shq(LOG_PATH)} 2>/dev/null || true`, 30);
-      return r.stdout;
+      return appLogs((script, timeoutSec) => execRaw(stored.sandboxId, script, timeoutSec), logOpts.tailLines);
     },
 
     destroy: (d) =>

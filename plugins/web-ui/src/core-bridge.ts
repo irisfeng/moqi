@@ -1,11 +1,11 @@
+import { desktopTurnId, serveDesktopRun } from "./desktop-computer.ts";
 import { reportHandledError, reportRequestTiming, stopBrowserErrors } from "./browser-errors.ts";
 import { captureMessage, stopAnalytics } from "./product-analytics.ts";
 import { streamedAnswer } from "./timeline.ts";
-import { EventType } from "@tanstack/ai/client";
-import { fetchServerSentEvents, StreamProcessor } from "@tanstack/ai-client";
+import { fetchServerSentEvents } from "@tanstack/ai-client";
 import { postCallText, postResultOk } from "./surface-post.ts";
-import type { ModelMetadata } from "./pi-models.ts";
 import { readMessageLocation, type MessageLocation } from "./message-location.ts";
+import type { RuntimeChange, RuntimeConfig } from "./runtime-config-cache.ts";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { Attachment } from "@earendil-works/pi-web-ui";
 import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, Usage } from "@earendil-works/pi-ai";
@@ -17,6 +17,7 @@ import { base64ToBytes } from "./paste-text.ts";
 import { defaultEffortForModel, harnessSupportsEffort } from "./runtime-capabilities.ts";
 import { SIGNIN_REQUIRED_EVENT, signinRedirect } from "./signin-return.ts";
 import { messageEntrySeqs } from "./message-link.ts";
+import type { GoalStripState } from "./goal-strip.ts";
 
 const BASE_URL = ((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/").replace(/\/$/, "");
 
@@ -65,7 +66,7 @@ export function oversizeAttachmentNote(name: string): string {
   return `"${name}" is too large — files up to ~1 GB can be sent. It was left out.`;
 }
 
-export function emptyAttachmentNote(name: string): string {
+function emptyAttachmentNote(name: string): string {
   return `"${name}" is empty. It was left out.`;
 }
 
@@ -74,7 +75,7 @@ export function tooManyFilesNote(names: string[]): string {
   return `Skipped ${skipped} — too many files in one message (max ${MAX_FILES_PER_MESSAGE}).`;
 }
 
-export interface SkippedAttachment {
+interface SkippedAttachment {
   id?: string;
   name: string;
   note: string;
@@ -127,7 +128,6 @@ export interface DeliveredFile {
 }
 
 export interface CoreSession {
-  status?: { emoji: string; text: string } | null;
   id: string;
   type: "dm" | "channel" | "group";
   scopeId: string;
@@ -138,11 +138,13 @@ export interface CoreSession {
   archived?: boolean;
   pinned?: boolean;
   color?: string | null;
+  unread?: boolean;
   lastActivityAt?: number;
   working?: boolean;
   awaitingInput?: boolean;
   lastTurnFailed?: boolean;
   lastTurnAt?: number;
+  canContinue?: boolean;
   backgroundJobs?: number;
   watches?: number;
   crons?: number;
@@ -257,7 +259,7 @@ export interface CoreProject {
   memberIds: string[];
   channelMemberIds?: string[];
   scopeId: string;
-  members: Array<{ principalId: string; displayName: string; viaChannel?: boolean }>;
+  members: Array<{ principalId: string; displayName: string; avatarUrl?: string; viaChannel?: boolean }>;
   slackChannel?: { channelId: string; channelName: string; linkedBy?: string; linkedAt?: number };
   createdAt?: number;
   updatedAt?: number;
@@ -265,7 +267,7 @@ export interface CoreProject {
 
 export function slackThreadUrl(workspaceUrl: string | null, threadRef: string): string | null {
   if (!workspaceUrl) return null;
-  const m = threadRef.match(/^(?:dm|ch):([A-Z0-9]+)(?::(\d+)\.(\d+))?$/i);
+  const m = threadRef.match(/^(?:dm|ch|grp):([A-Z0-9]+)(?::(\d+)\.(\d+))?$/i);
   if (!m) return null;
   return `${workspaceUrl}/archives/${m[1]}${m[2] ? `/p${m[2]}${m[3]}` : ""}`;
 }
@@ -287,7 +289,7 @@ function browserTimezone(): string {
 
 export async function updateSession(
   id: string,
-  patch: { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null },
+  patch: { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null; unread?: boolean },
 ): Promise<{ session: CoreSession }> {
   return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}`, {
     method: "POST",
@@ -354,6 +356,8 @@ export interface TranscriptPage {
   entries: SessionEntry[];
   earlierEntries?: number;
   pins?: SessionPin[];
+  goal?: GoalStripState;
+  runtime?: TurnRuntime;
 }
 
 export async function fetchTranscript(
@@ -395,15 +399,12 @@ export async function regenerateTitle(id: string): Promise<{ title: string | nul
   return api<{ title: string | null }>(`/api/sessions/${encodeURIComponent(id)}/title`, { method: "POST" });
 }
 
-export async function adoptSession(id: string, parentSessionId: string): Promise<{ adopted: true }> {
-  return api<{ adopted: true }>(`/api/sessions/${encodeURIComponent(id)}/adopt`, {
-    method: "POST",
-    body: JSON.stringify({ parentSessionId }),
-  });
-}
-
 export async function detachSession(id: string): Promise<{ detached: true }> {
   return api<{ detached: true }>(`/api/sessions/${encodeURIComponent(id)}/detach`, { method: "POST" });
+}
+
+export async function cancelSessionGoal(id: string): Promise<{ cancelled: true }> {
+  return api<{ cancelled: true }>(`/api/sessions/${encodeURIComponent(id)}/goal/cancel`, { method: "POST" });
 }
 export interface SessionEntry {
   type:
@@ -444,12 +445,26 @@ export interface ToolActivity {
 }
 type WorkStatus = "thinking" | "working" | "complete" | "failed";
 export interface WorkBlock {
+  streamStartOffset?: number;
   status: WorkStatus;
   startedAt?: number;
   finishedAt?: number;
   stale?: boolean;
   activity: ToolActivity[];
   pendingApprovals?: PendingApproval[];
+  goal?: GoalStripState;
+  runtime?: TurnRuntime;
+}
+
+export interface TurnRuntime {
+  harnessId: string;
+  modelId: string;
+  label?: string;
+  change?: { rule: string } | { agent: "task" | "scope" };
+}
+
+export function switchedDefault(runtime: TurnRuntime | null | undefined): boolean {
+  return !!runtime?.change && "agent" in runtime.change && runtime.change.agent === "scope";
 }
 
 export function workPausedForApproval(work: WorkBlock): boolean {
@@ -497,6 +512,8 @@ export type AssistantWork = AssistantMessage & {
 
 export interface RunPoll {
   status: "pending" | "running" | "done" | "failed";
+  goal?: GoalStripState;
+  runtime?: TurnRuntime;
   input?: {
     runId: string;
     seq: number | null;
@@ -513,6 +530,7 @@ export interface RunPoll {
     attachments?: Array<{ name: string; mimetype?: string; sizeBytes?: number; artifactId?: string }>;
   } | null;
   partial?: string;
+  partialStartOffset?: number;
   alive?: boolean;
   stale?: boolean;
   replyComplete?: boolean;
@@ -612,15 +630,6 @@ export function continuableMessages(
     popped.unshift(kept.pop()!);
   }
   return { messages: kept.length ? kept : [resumeAnchor()], popped };
-}
-
-export const SUBAGENT_THREAD_PREFIX = "agent:main:subagent:";
-
-export function isContinuable(s: Pick<CoreSession, "threadRef" | "scopeId">, user: string): boolean {
-  if (s.threadRef.startsWith(SUBAGENT_THREAD_PREFIX))
-    return s.scopeId === `personal:${user}` || s.scopeId.startsWith("channel:") || s.scopeId.startsWith("group:");
-  if (!s.threadRef.startsWith("web:")) return false;
-  return s.threadRef.startsWith(`web:${user}:`) || s.scopeId.startsWith("channel:") || s.scopeId.startsWith("group:");
 }
 
 function zeroUsage(): Usage {
@@ -737,7 +746,7 @@ export function setSigninRequiredHandler(fn: (detail: SigninRequired) => void): 
   onSigninRequired = fn;
 }
 
-export function reportSigninRequired(detail: SigninRequired): void {
+function reportSigninRequired(detail: SigninRequired): void {
   onSigninRequired?.(detail);
 }
 
@@ -790,6 +799,95 @@ export function putUiState(
   return api("/api/ui-state", { method: "PUT", body: JSON.stringify({ key, value, updatedAt }), ...init });
 }
 
+const PIN_LATEST_PROMPT_KEY = "pin-latest-prompt";
+const ALWAYS_STEER_KEY = "always-steer";
+
+type ChatPrefKey = typeof PIN_LATEST_PROMPT_KEY | typeof ALWAYS_STEER_KEY;
+
+const CHAT_PREF_DEFAULTS: Record<ChatPrefKey, boolean> = {
+  [PIN_LATEST_PROMPT_KEY]: true,
+  [ALWAYS_STEER_KEY]: false,
+};
+
+const CHAT_PREF_CACHE_PREFIX = "chat-pref:";
+
+const chatPrefValues = new Map<ChatPrefKey, boolean>();
+const chatPrefTouched = new Set<ChatPrefKey>();
+const chatPrefListeners = new Set<() => void>();
+
+function cachedChatPref(key: ChatPrefKey): boolean {
+  try {
+    const raw = localStorage.getItem(CHAT_PREF_CACHE_PREFIX + key);
+    if (raw === "1") return true;
+    if (raw === "0") return false;
+  } catch {
+    void 0;
+  }
+  return CHAT_PREF_DEFAULTS[key];
+}
+
+function readChatPref(key: ChatPrefKey): boolean {
+  let value = chatPrefValues.get(key);
+  if (value === undefined) {
+    value = cachedChatPref(key);
+    chatPrefValues.set(key, value);
+  }
+  return value;
+}
+
+function applyChatPref(key: ChatPrefKey, value: boolean): void {
+  const changed = readChatPref(key) !== value;
+  chatPrefValues.set(key, value);
+  try {
+    if (value === CHAT_PREF_DEFAULTS[key]) localStorage.removeItem(CHAT_PREF_CACHE_PREFIX + key);
+    else localStorage.setItem(CHAT_PREF_CACHE_PREFIX + key, value ? "1" : "0");
+  } catch {
+    void 0;
+  }
+  if (changed) for (const listener of chatPrefListeners) listener();
+}
+
+function writeChatPref(key: ChatPrefKey, value: boolean): void {
+  chatPrefTouched.add(key);
+  applyChatPref(key, value);
+  void putUiState(key, value, Date.now()).catch((error: unknown) => reportHandledError("web:save_chat_pref", error));
+}
+
+export function pinLatestPrompt(): boolean {
+  return readChatPref(PIN_LATEST_PROMPT_KEY);
+}
+
+export function alwaysSteer(): boolean {
+  return readChatPref(ALWAYS_STEER_KEY);
+}
+
+export function setPinLatestPrompt(value: boolean): void {
+  writeChatPref(PIN_LATEST_PROMPT_KEY, value);
+}
+
+export function setAlwaysSteer(value: boolean): void {
+  writeChatPref(ALWAYS_STEER_KEY, value);
+}
+
+export function onChatPrefsChange(listener: () => void): () => void {
+  chatPrefListeners.add(listener);
+  return () => chatPrefListeners.delete(listener);
+}
+
+export async function loadChatPrefs(): Promise<void> {
+  await Promise.all(
+    (Object.keys(CHAT_PREF_DEFAULTS) as ChatPrefKey[]).map(async (key) => {
+      try {
+        const rec = await fetchUiState(key);
+        if (chatPrefTouched.has(key)) return;
+        applyChatPref(key, typeof rec.value === "boolean" ? rec.value : CHAT_PREF_DEFAULTS[key]);
+      } catch (error) {
+        reportHandledError("web:load_chat_pref", error);
+      }
+    }),
+  );
+}
+
 export async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const r = await webFetch(withBase(path), { headers: { "content-type": "application/json" }, ...init });
   const text = await r.text();
@@ -804,27 +902,15 @@ export async function api<T = unknown>(path: string, init?: RequestInit): Promis
     const msg = details?.message ?? details?.reason ?? details?.error ?? `HTTP ${r.status}`;
     throw new ApiError(msg, r.status, body);
   }
+  if (path === "/api/turn" && typeof init?.body === "string") {
+    const request = JSON.parse(init.body) as { desktopClientId?: string };
+    const response = body as { runId?: string } | null;
+    if (request.desktopClientId && response?.runId)
+      void serveDesktopRun(response.runId, request.desktopClientId, withBase, api).catch((error) =>
+        reportHandledError("desktop-computer", error),
+      );
+  }
   return body as T;
-}
-
-export interface RuntimeConfig {
-  interactiveFastMode?: boolean;
-  unavailableReason?: string;
-  scopeId: string;
-  approvedHarnesses: string[];
-  modelsByHarness: Record<string, string[]>;
-  modelCatalog: Record<string, ModelMetadata>;
-  orgDefault: { harnessId: string; modelId: string; effortLevel?: string; fastMode?: boolean; revision: number };
-  scopeOverride: {
-    harnessId: string;
-    modelId: string;
-    effortLevel?: string;
-    fastMode?: boolean;
-    orgRevision: number;
-  } | null;
-  effective: { harnessId: string; modelId: string; effortLevel?: string; fastMode?: boolean };
-  upgradeAvailable: boolean;
-  fastModeModelIds?: string[];
 }
 
 export async function fetchRuntimeConfig(scopeId?: string | null, account?: "company"): Promise<RuntimeConfig | null> {
@@ -840,17 +926,7 @@ export async function fetchRuntimeConfig(scopeId?: string | null, account?: "com
   }
 }
 
-export async function updateRuntimeConfig(
-  scopeId: string | null,
-  change: {
-    harnessId?: string;
-    modelId?: string;
-    effortLevel?: string;
-    fastMode?: boolean;
-    inherit?: boolean;
-    keep?: boolean;
-  },
-): Promise<RuntimeConfig> {
+export async function updateRuntimeConfig(scopeId: string | null, change: RuntimeChange): Promise<RuntimeConfig> {
   return api<RuntimeConfig>("/api/runtime-config", {
     method: "PUT",
     body: JSON.stringify({ ...change, ...(scopeId ? { scopeId } : {}) }),
@@ -1102,7 +1178,7 @@ async function driveApproval(
     work.status = "complete";
     work.finishedAt = Date.now();
     notify();
-    finish(stream, partial, { acc: "", lastProgressAt: now() }, submit.reply ?? "");
+    finish(stream, partial, { acc: "", startOffset: 0, lastProgressAt: now() }, submit.reply ?? "");
   } catch (e) {
     work.status = "failed";
     work.finishedAt = Date.now();
@@ -1216,18 +1292,18 @@ function turnRequestBody(
   const { idempotencyKey, attachments = [], quote } = send;
   const turnOptions = getTurnOptions?.() ?? {};
   const thinkingLevel =
-    !turnOptions.harness || harnessSupportsEffort(turnOptions.harness)
+    turnOptions.harness && harnessSupportsEffort(turnOptions.harness)
       ? (turnOptions.effortLevel ?? agent.state.thinkingLevel ?? defaultEffortForModel(model))
       : undefined;
   const timezone = browserTimezone();
   return {
+    desktopClientId: desktopTurnId(),
     text,
     threadRef,
     ...(quote?.seq !== undefined ? { quoteSeq: quote.seq } : {}),
     ...(quote?.text ? { quoteText: quote.text } : {}),
     ...(quote?.author ? { quoteAuthor: quote.author } : {}),
-    ...(turnOptions.harness ? { harness: turnOptions.harness } : {}),
-    model: model.id,
+    ...(turnOptions.harness ? { harness: turnOptions.harness, model: model.id } : {}),
     ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(typeof turnOptions.fastMode === "boolean" ? { fastMode: turnOptions.fastMode } : {}),
     ...(timezone ? { timezone } : {}),
@@ -1246,7 +1322,7 @@ export function mintSendKey(): string {
   return crypto.randomUUID();
 }
 
-export function sendKeyOf(message: unknown): string | undefined {
+function sendKeyOf(message: unknown): string | undefined {
   const key = (message as SendKeyed | null)?.idempotencyKey;
   return typeof key === "string" && key ? key : undefined;
 }
@@ -1329,7 +1405,10 @@ async function drive(
               ...(request.timezone ? { timezone: request.timezone } : {}),
             }),
           })
-        : await submitTurn({ ...request, ...(opener ? { proactiveOpener: true } : {}) }, expectedUser);
+        : await submitTurn(
+            { ...request, ...(opener ? { proactiveOpener: true, desktopClientId: undefined } : {}) },
+            expectedUser,
+          );
 
     if (submit.runId) {
       if (!opener) {
@@ -1358,7 +1437,7 @@ async function drive(
     work.status = "complete";
     work.finishedAt = Date.now();
     notify();
-    finish(stream, partial, { acc: "", lastProgressAt: now() }, submit.reply ?? "");
+    finish(stream, partial, { acc: "", startOffset: 0, lastProgressAt: now() }, submit.reply ?? "");
   } catch (e) {
     work.status = "failed";
     work.finishedAt = Date.now();
@@ -1398,7 +1477,7 @@ async function resumeDrive(
     notify();
     stream.push({ type: "start", partial });
     stream.push({ type: "text_start", contentIndex: 0, partial });
-    const st: Acc = { acc: "", lastProgressAt: now() };
+    const st: Acc = { acc: "", startOffset: 0, lastProgressAt: now() };
     // Keep any assistant text the transcript already showed for this in-flight
     // run visible: seed the accumulator with it so attaching the live stream
     // never blanks text the person has already read. The server's own partial
@@ -1422,7 +1501,7 @@ async function followRun(
   runId: string,
   signal?: AbortSignal,
   notify?: () => void,
-  st: Acc = { acc: "", lastProgressAt: now() },
+  st: Acc = { acc: "", startOffset: 0, lastProgressAt: now() },
   slot?: RunSlot,
   gen = 0,
 ): Promise<void> {
@@ -1452,6 +1531,7 @@ function runPath(runId: string, suffix: string): string {
 }
 
 export interface Acc {
+  startOffset: number;
   acc: string;
   lastProgressAt: number;
   staleSince?: number;
@@ -1521,9 +1601,21 @@ function applyRun(
     notify?.();
   }
   setWorkStale(work, run.stale === true, notify);
+  if (work && run.goal && JSON.stringify(run.goal) !== JSON.stringify(work.goal)) {
+    work.goal = run.goal;
+    notify?.();
+  }
+  if (work && run.runtime && JSON.stringify(run.runtime) !== JSON.stringify(work.runtime)) {
+    work.runtime = run.runtime;
+    notify?.();
+  }
   const p = typeof run.partial === "string" ? run.partial : "";
-  if (p.length > st.acc.length) {
-    st.lastProgressAt = now();
+  const startOffset = run.partialStartOffset ?? 0;
+  if (p && startOffset + p.length >= st.startOffset + st.acc.length) {
+    if (startOffset + p.length > st.startOffset + st.acc.length) st.lastProgressAt = now();
+    if (startOffset !== st.startOffset) (partial as AssistantWork).streamingBaseline = "";
+    st.startOffset = startOffset;
+    if (work) work.streamStartOffset = startOffset;
     pushDelta(stream, partial, st, p);
   }
   if (!runIsTerminal(run)) return "open";
@@ -1610,8 +1702,9 @@ export async function pollRun(
 export interface SessionStateEvent {
   threadRef: string;
   sessionId?: string;
-  state: "working" | "awaiting_approval" | "idle" | "metadata";
+  state: "working" | "awaiting_approval" | "idle" | "metadata" | "ui";
   at: number;
+  ui?: unknown;
 }
 
 export interface InboxItemEvent {
@@ -1684,16 +1777,6 @@ async function streamRunViaSse(
     clearTimeout(timer);
     timer = setTimeout(abort, SSE_SILENCE_MS);
   };
-  const processor = new StreamProcessor({
-    initialMessages: [{ id: runId, role: "assistant", parts: [{ type: "text", content: st.acc }] }],
-    events: { onTextUpdate: (_id, text) => pushDelta(stream, partial, st, text) },
-  });
-  processor.processChunk({ type: EventType.TEXT_MESSAGE_START, messageId: runId, role: "assistant" });
-  const append = (delta: string): void => {
-    if (!delta) return;
-    st.lastProgressAt = now();
-    processor.processChunk({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: runId, delta });
-  };
   const transport = fetchServerSentEvents(withBase(runPath(runId, "/events")), {
     credentials: "same-origin",
   });
@@ -1702,7 +1785,7 @@ async function streamRunViaSse(
       received();
       if (event.type !== "CUSTOM") continue;
       if (event.name === "delta") {
-        const value = event.value as { offset?: unknown; delta?: unknown };
+        const value = event.value as { offset?: unknown; delta?: unknown; startOffset?: number };
         if (
           typeof value.offset !== "number" ||
           !Number.isSafeInteger(value.offset) ||
@@ -1710,13 +1793,10 @@ async function streamRunViaSse(
           typeof value.delta !== "string"
         )
           return "fallback";
-        if (value.offset > st.acc.length) return "fallback";
-        const delta = value.delta.slice(st.acc.length - value.offset);
-        append(delta);
+        if (value.offset > Math.max(st.startOffset + st.acc.length, value.startOffset ?? 0)) return "fallback";
+        applyStreamText(stream, partial, st, value.delta, value.offset, value.startOffset ?? 0);
       } else if (event.name === "run") {
         const run = event.value as RunPoll;
-        if (typeof run.partial === "string" && run.partial.length > st.acc.length)
-          append(run.partial.slice(st.acc.length));
         // Completion must carry the final result, including files and approvals.
         const terminal = run.status === "done" || run.status === "failed" || run.result != null;
         if (applyRun(stream, partial, st, { ...run, replyComplete: terminal }, notify) === "terminal") return "done";
@@ -1770,6 +1850,28 @@ function abortStream(stream: AssistantMessageEventStream, partial: AssistantMess
   };
   stream.push({ type: "error", reason: "aborted", error });
   stream.end(error);
+}
+
+function applyStreamText(
+  stream: AssistantMessageEventStream,
+  partial: AssistantMessage,
+  st: Acc,
+  text: string,
+  offset: number,
+  startOffset: number,
+): void {
+  const end = st.startOffset + st.acc.length;
+  if (offset + text.length < end || (offset + text.length === end && startOffset <= st.startOffset)) return;
+  const start = Math.max(st.startOffset ?? 0, startOffset);
+  const next = offset > end ? text : st.acc + text.slice(Math.max(0, end - offset));
+  const nextStart = offset > end ? offset : st.startOffset;
+  const work = (partial as AssistantWork).work;
+  if (work) work.streamStartOffset = start;
+  if (start !== st.startOffset) (partial as AssistantWork).streamingBaseline = "";
+  st.acc = offset > end ? "" : st.acc.slice(start - st.startOffset);
+  st.lastProgressAt = now();
+  pushDelta(stream, partial, st, next.slice(start - nextStart));
+  st.startOffset = start;
 }
 
 function pushDelta(stream: AssistantMessageEventStream, partial: AssistantMessage, st: Acc, next: string): void {
@@ -1848,6 +1950,7 @@ interface HistoryUserMessage {
   attachments?: HistoryAttachment[];
   steered?: boolean;
   speaker?: string;
+  speakerId?: string;
   ts?: string;
   edited?: boolean;
   deleted?: boolean;
@@ -1870,7 +1973,7 @@ function xmlAttrUnescape(s: string): string {
     .replace(/&amp;/g, "&");
 }
 
-export function subagentMailOf(payload: unknown): SubagentMailRef | undefined {
+function subagentMailOf(payload: unknown): SubagentMailRef | undefined {
   const text = (payload as { text?: unknown } | null)?.text;
   if (typeof text !== "string") return undefined;
   const m = SUBAGENT_MAIL_RE.exec(text);
@@ -1878,7 +1981,7 @@ export function subagentMailOf(payload: unknown): SubagentMailRef | undefined {
   return { title: xmlAttrUnescape(m[1]!), sessionId: m[2]!, kind: m[3]! };
 }
 
-export interface HistorySystemNote {
+interface MessageRevisionNote {
   role: "system-note";
   note: "message_revision";
   action: "edited" | "deleted";
@@ -1887,6 +1990,15 @@ export interface HistorySystemNote {
   speaker?: string;
   timestamp?: number;
 }
+
+interface GoalCancelledNote {
+  role: "system-note";
+  note: "goal_cancelled";
+  content: string;
+  timestamp?: number;
+}
+
+export type HistorySystemNote = MessageRevisionNote | GoalCancelledNote;
 
 export interface HistoryApprovalDecision {
   role: "approval-decision";
@@ -1959,7 +2071,13 @@ export function messagesWithStreaming(messages: AgentMessage[], streaming?: Agen
   });
 }
 
-function messageRevisionPayload(payload: unknown): HistorySystemNote | null {
+function goalCancelledPayload(payload: unknown): GoalCancelledNote | null {
+  const p = payload as { kind?: unknown; objective?: unknown } | null;
+  if (p?.kind !== "goal_cancelled" || typeof p.objective !== "string") return null;
+  return { role: "system-note", note: "goal_cancelled", content: p.objective };
+}
+
+function messageRevisionPayload(payload: unknown): MessageRevisionNote | null {
   const p = payload as { kind?: unknown; action?: unknown; ts?: unknown; text?: unknown; name?: unknown } | null;
   if (p?.kind !== "message_revision") return null;
   if (p.action !== "edited" && p.action !== "deleted") return null;
@@ -1992,6 +2110,7 @@ export function userEntryMessage(
     runId?: string;
     steered?: boolean;
     name?: string;
+    speakerId?: string;
     ts?: string;
     quoteSeq?: unknown;
     quoteText?: unknown;
@@ -2014,6 +2133,7 @@ export function userEntryMessage(
     ...(typeof payload?.quoteAuthor === "string" ? { quoteAuthor: payload.quoteAuthor } : {}),
     ...(mail ? { subagentMail: mail } : {}),
     ...(payload?.steered ? { steered: true } : {}),
+    ...(typeof payload?.speakerId === "string" && payload.speakerId ? { speakerId: payload.speakerId } : {}),
     ...(typeof payload?.name === "string" && payload.name.trim() ? { speaker: payload.name.trim() } : {}),
     ...(typeof payload?.ts === "string" && payload.ts ? { ts: payload.ts } : {}),
     ...(attachments.length
@@ -2042,12 +2162,29 @@ export function appendConsumedSteers(messages: AgentMessage[], work: WorkBlock):
   }
 }
 
+const SILENCE_TOOLS = new Set(["finish_silently", "stay_silent"]);
+
+function deliveredSilence(a: ToolActivity): boolean {
+  if (a.type !== "tool_result") return false;
+  const p = a.payload as { tool?: string; silent?: boolean; ok?: boolean } | null;
+  return (p?.tool === "finish_silently" && p?.silent === true) || (p?.tool === "stay_silent" && p?.ok === true);
+}
+
+function isFinishedReplyEntry(entry: SessionEntry): boolean {
+  if (entry.type !== "text") return false;
+  const step = (entry.payload as { step?: { stopReason?: unknown } } | null)?.step;
+  if (step?.stopReason !== "stop") return false;
+  return Boolean((entry.payload as { text?: string } | null)?.text?.trim());
+}
+
 export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): AgentMessage[] {
   const out: AgentMessage[] = [];
   const userByTs = new Map<string, HistoryUserMessage>();
   let pending: ToolActivity[] = [];
   let deliveryFiles: DeliveredFile[] = [];
   let posted = false;
+  let stoppedShown = false;
+  let hiddenPrompt = false;
   const heldPosts = new Map<string, { text: string; activity: ToolActivity }>();
   const spillHeldPosts = (): void => {
     for (const held of heldPosts.values()) pending.push(held.activity);
@@ -2091,6 +2228,14 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
     location: MessageLocation = {},
   ): void => {
     if (!text && !pending.length && !deliveryFiles.length && !stopped) return;
+    if (stopped) stoppedShown = true;
+    if (hiddenPrompt && !text && !stopped && pending.some(deliveredSilence)) {
+      pending = pending.filter((a) => !SILENCE_TOOLS.has((a.payload as { tool?: string } | null)?.tool ?? ""));
+      if (!pending.some((a) => a.type === "tool_call") && !deliveryFiles.length) {
+        pending = [];
+        return;
+      }
+    }
     const seq = location.seq ?? pending[pending.length - 1]?.seq;
     const delivered = pending.findLast((activity) => {
       const posted = activity.payload as { tool?: string; action?: string; deliveryId?: string } | null;
@@ -2103,11 +2248,6 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
     });
     const deliveryId = location.deliveryId ?? (delivered?.payload as { deliveryId?: string } | undefined)?.deliveryId;
     entrySeqs = [...entrySeqs, ...pending.map((entry) => entry.seq)];
-    const deliveredSilence = (a: ToolActivity): boolean => {
-      if (a.type !== "tool_result") return false;
-      const p = a.payload as { tool?: string; silent?: boolean; ok?: boolean } | null;
-      return (p?.tool === "finish_silently" && p?.silent === true) || (p?.tool === "stay_silent" && p?.ok === true);
-    };
     const lastText = pending.findLastIndex((a) => a.type === "text");
     if (lastText >= 0) {
       const segment = ((pending[lastText]!.payload as { text?: string } | null)?.text ?? "").trim();
@@ -2179,6 +2319,12 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
       }
       continue;
     }
+    if (isFinishedReplyEntry(e)) {
+      spillHeldPosts();
+      flushWork(text, e.createdAt, true, undefined, false, e.seq === undefined ? [] : [e.seq]);
+      posted = false;
+      continue;
+    }
     if (e.type !== "user" && ACTIVITY_TYPES.has(e.type)) {
       const activity: ToolActivity = {
         seq: e.seq ?? out.length,
@@ -2231,6 +2377,10 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
       continue;
     }
     if (e.type === "user") {
+      if (!payload?.steered) {
+        stoppedShown = false;
+        hiddenPrompt = payload?.hidden === true;
+      }
       if (payload?.hidden) continue;
       if (!payload?.steered) {
         posted = false;
@@ -2284,6 +2434,20 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
     } else if (e.type === "delivery") {
       appendDeliveryFiles(deliveredFilesFromAttachments(payload?.files));
     } else if (e.type === "system") {
+      if ((e.payload as { kind?: unknown } | null)?.kind === "turn_stopped") {
+        spillHeldPosts();
+        if (pending.length || !stoppedShown)
+          flushWork("", e.createdAt, !posted, undefined, true, e.seq === undefined ? [] : [e.seq]);
+        posted = false;
+        continue;
+      }
+      const goalNote = goalCancelledPayload(e.payload);
+      if (goalNote) {
+        spillHeldPosts();
+        flushWork("", e.createdAt);
+        out.push({ ...goalNote, timestamp: e.createdAt } as unknown as AgentMessage);
+        continue;
+      }
       const revision = messageRevisionPayload(e.payload);
       if (revision) {
         spillHeldPosts();

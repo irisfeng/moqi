@@ -1,0 +1,18 @@
+html:lang(zh) {
+  --app-font:
+    -apple-system, "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Source Han Sans SC", "Noto Sans CJK SC",
+    "Microsoft YaHei", sans-serif;
+  --app-serif: var(--app-font);
+  --brand-font: var(--app-font);
+  --font-heading: var(--app-font);
+}
+html:lang(zh) body {
+  line-height: 1.65;
+  font-synthesis: style;
+}
+html:lang(zh) :is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 600;
+}
+html:lang(zh) :is(button, label, th, [role="tab"], [role="menuitem"], [role="option"], .menu-option-label) {
+  letter-spacing: 0.02em;
+}

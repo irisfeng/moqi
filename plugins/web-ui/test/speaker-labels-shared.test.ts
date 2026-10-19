@@ -8,6 +8,6 @@ test("in a shared conversation every named message is labeled, even when one per
   const rule = chat.match(/function updateSpeakerLabels[\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.match(
     rule,
-    /if \(names\.size > 0 && chatState\.scopeId !== null && chatState\.scopeId !== `personal:\$\{appState\.me\?\.user\}`\)\n\s+chatState\.labelSpeakers = true;\n {2}\}$/,
+    /if \(names\.size > 0 && chatState\.scopeId !== null && chatState\.scopeId !== `personal:\$\{appState\.me\?\.user\}`\)\n\s+chatState\.labelSpeakers = true;\n\s+chatState\.assistantSpeakerLabel = chatState\.labelSpeakers \? brandName\(\) : "";\n {2}\}$/,
   );
 });

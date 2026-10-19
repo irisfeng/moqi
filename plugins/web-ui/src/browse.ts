@@ -21,7 +21,7 @@ import { nextGridIndex } from "./grid-nav";
 import { setScopedSession } from "./session-scope";
 import { ADMIN_HOME_URL, appState, can, switchView } from "./shell";
 import { canView } from "./shell-state";
-import { icon } from "./ui";
+import { icon } from "./icons";
 import type { View } from "./shell-state";
 
 interface Destination {

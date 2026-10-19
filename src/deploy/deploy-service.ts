@@ -86,7 +86,7 @@ export interface DeployService {
   setDeploymentEmbedAncestors(id: string, embedAncestors: string[]): Promise<Deployment>;
   setDeploymentPublic(idOrName: string, isPublic: boolean, actor: { createdBy: string }): Promise<Deployment>;
 
-  keepAlwaysOnWarm(): Promise<number>;
+  maintainDeployments(): Promise<number>;
   reachDeployment(idOrName: string, principalId: string, opts?: ReachOptions): Promise<Reach>;
   /** Recent app output (entrypoint stdout+stderr) for a deployment, newest last; null when the provider keeps none. */
   deploymentLogs(idOrName: string, opts: { tailLines: number }): Promise<string | null>;
@@ -115,9 +115,20 @@ export interface DeploymentGrantee {
   permission: Permission;
 }
 
+const PUBLIC_LINKS_UNAVAILABLE =
+  "This instance serves apps at /d/<app>/ on its own domain, which always requires sign-in, so a public link would still ask visitors to sign in. Public links need an apps domain: set DEPLOY_APPS_DOMAIN to a domain with a wildcard DNS record routed to the portal, and AWS_DEPLOY_GATE_SECRET.";
+
+export class PublicLinksUnavailableError extends Error {
+  constructor() {
+    super(PUBLIC_LINKS_UNAVAILABLE);
+    this.name = "PublicLinksUnavailableError";
+  }
+}
+
 export interface DeployServiceDeps {
   deliveries?: DeliveryStore;
   deployAppsDomain?: string;
+  publicLinksAvailable?: boolean;
   publicWebUrl?: string;
   deployStore: DeployStore;
   provider: DeployProvider;
@@ -245,6 +256,17 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
       return fresh;
     });
   };
+
+  const rotateDeployment = (id: string): Promise<void> =>
+    withDeployLock(id, async () => {
+      const cur = await deps.deployStore.get(id);
+      if (!cur || cur.status !== "running" || !(await deps.provider.rotationDue?.(cur))) return;
+      const v = currentVersionOf(cur);
+      if (!v) return;
+      const endpoint = await applyVersion(cur.id, v, cur.appliedVersion ?? cur.currentVersion);
+      await markVersionRunning(cur.id, v.version, endpoint);
+      await deps.provider.park?.(cur).catch((e) => swallow("deploy: park rotated app", e));
+    });
 
   const deploymentRef = (id: string): string => encodeRef(deployRef(id));
   const grantsOn = (d: Deployment): Promise<Grant[]> => deps.acl.grantsFor(d.ownerScopeId, deploymentRef(d.id));
@@ -522,6 +544,7 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
         throw new Error(`only the owner can change who can reach "${d.name ?? d.id}"`);
       }
       if (isPublic && !(await externalSharingAllowed(d.ownerScopeId))) throw new Error(EXTERNAL_APP_SHARING_OFF);
+      if (isPublic && deps.publicLinksAvailable === false) throw new PublicLinksUnavailableError();
       await deps.deployStore.setPublic(d.id, isPublic);
       deps.auditLog.record({
         at: Date.now(),
@@ -533,21 +556,26 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
       return (await deps.deployStore.get(d.id))!;
     },
 
-    async keepAlwaysOnWarm() {
+    async maintainDeployments() {
       const result = await leaderLease.hold("deployments:keep-warm", async () => {
-        let warmed = 0;
+        let maintained = 0;
         for (const d of await deps.deployStore.list()) {
-          if (!d.alwaysOn || d.status !== "running") continue;
+          if (d.status !== "running") continue;
           try {
             const cur = await deps.deployStore.get(d.id);
-            if (!cur?.alwaysOn || cur.status !== "running") continue;
-            await liveEndpoint(cur);
-            warmed++;
+            if (!cur || cur.status !== "running") continue;
+            if (await deps.provider.rotationDue?.(cur)) {
+              await rotateDeployment(cur.id);
+              maintained++;
+            } else if (cur.alwaysOn) {
+              await liveEndpoint(cur);
+              maintained++;
+            }
           } catch (e) {
-            console.error("%s", `[deploy] keep-warm failed for ${d.name ?? d.id}:`, errMessage(e));
+            console.error("%s", `[deploy] maintenance failed for ${d.name ?? d.id}:`, errMessage(e));
           }
         }
-        return warmed;
+        return maintained;
       });
       return result ?? 0;
     },

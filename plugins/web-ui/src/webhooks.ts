@@ -3,16 +3,8 @@ import { html, nothing, render, type TemplateResult } from "lit";
 import { Check, ChevronDown, Plus } from "lucide";
 import { api } from "./core-bridge";
 import { userErrorMessage as errMessage } from "./user-error.ts";
-import {
-  actionSnippet,
-  closeFormMenus,
-  copyText,
-  icon,
-  relTime,
-  setFormMenuValue,
-  slackOff,
-  toggleFormMenu,
-} from "./ui";
+import { actionSnippet, closeFormMenus, copyText, relTime, setFormMenuValue, slackOff, toggleFormMenu } from "./ui";
+import { icon } from "./icons";
 import { listBackLink, listPageTpl } from "./list-page";
 import { ensureContexts, scopeChip } from "./contexts";
 import { appState } from "./shell";

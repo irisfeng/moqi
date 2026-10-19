@@ -16,13 +16,22 @@ import {
 } from "../../src/sandbox/managed-agents-client.ts";
 import { mkdtempSync } from "node:fs";
 
-const GUEST_HOME_DIR = "/workspace/home";
+const GUEST_ROOT = "/workspace";
+const GUEST_ROOT_PREFIX = new RegExp(`(?<![A-Za-z0-9._-])${GUEST_ROOT}(?![A-Za-z0-9._-])`, "g");
+
+export class FakeOutsideWorkspaceError extends Error {
+  constructor(absPath: string) {
+    super(`path outside workspace: ${JSON.stringify(absPath)} (workspace ${JSON.stringify(GUEST_ROOT)})`);
+    this.name = "FakeOutsideWorkspaceError";
+  }
+}
 
 interface FakeRecord {
   sessionId: string;
   sandboxId: string;
   name: string;
   state: ManagedAgentsSessionState;
+  guestRoot: string;
   home: string;
   createdAt: number;
   loseNextCommand: boolean;
@@ -84,15 +93,25 @@ export function installFakeManagedAgents(): FakeManagedAgents {
   };
 
   const remap = (r: FakeRecord, script: string): string => {
-    const homeRe = r.home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const remapPath = new RegExp(`${homeRe}/tmp/|${homeRe}(?![A-Za-z0-9._-])|/tmp/`, "g");
+    const rootRe = r.guestRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const remapPath = new RegExp(`${rootRe}/tmp/|${rootRe}(?![A-Za-z0-9._-])|/tmp/`, "g");
     return (
       `export HOME=${JSON.stringify(r.home)}; ` +
       script
         .replace(/\btimeout \d+ /g, "")
-        .replaceAll(GUEST_HOME_DIR, r.home)
-        .replace(remapPath, (mm) => (mm.startsWith(r.home) ? mm : `${r.home}/tmp/`))
+        .replace(GUEST_ROOT_PREFIX, r.guestRoot)
+        .replace(remapPath, (mm) => (mm.startsWith(r.guestRoot) ? mm : `${r.guestRoot}/tmp/`))
     );
+  };
+
+  const unmap = (r: FakeRecord, out: string): string =>
+    out.replaceAll(`${r.guestRoot}/tmp/`, "/tmp/").replaceAll(r.guestRoot, GUEST_ROOT);
+
+  const hostPathFor = (r: FakeRecord, absPath: string): string => {
+    const clean = absPath.replace(/\/+$/, "");
+    if (clean !== GUEST_ROOT && !clean.startsWith(`${GUEST_ROOT}/`)) throw new FakeOutsideWorkspaceError(absPath);
+    if (clean.split("/").includes("..")) throw new FakeOutsideWorkspaceError(absPath);
+    return r.guestRoot + clean.slice(GUEST_ROOT.length);
   };
 
   const alive = (r: FakeRecord): void => {
@@ -123,27 +142,27 @@ export function installFakeManagedAgents(): FakeManagedAgents {
         throw new ManagedAgentsHitlRejectedError(r.sessionId);
       }
       execScripts.push(command);
-      mkdirSync(join(r.home, "tmp"), { recursive: true });
+      mkdirSync(join(r.guestRoot, "tmp"), { recursive: true });
       const spawned = spawnSync("sh", ["-c", remap(r, command)], {
         encoding: "buffer",
         maxBuffer: 128 * 1024 * 1024,
         env: { ...process.env, COPYFILE_DISABLE: "1" },
       });
       return {
-        stdout: (spawned.stdout ?? Buffer.alloc(0)).toString("utf8"),
-        stderr: (spawned.stderr ?? Buffer.alloc(0)).toString("utf8"),
+        stdout: unmap(r, (spawned.stdout ?? Buffer.alloc(0)).toString("utf8")),
+        stderr: unmap(r, (spawned.stderr ?? Buffer.alloc(0)).toString("utf8")),
         exitCode: spawned.status ?? (spawned.signal ? 137 : -1),
       };
     },
     async readFileBytes(absPath): Promise<Uint8Array | null> {
       alive(r);
-      const hostPath = absPath.startsWith(GUEST_HOME_DIR) ? r.home + absPath.slice(GUEST_HOME_DIR.length) : absPath;
+      const hostPath = hostPathFor(r, absPath);
       if (!existsSync(hostPath)) return null;
       return new Uint8Array(readFileSync(hostPath));
     },
     async writeFileBytes(absPath, data): Promise<void> {
       alive(r);
-      const hostPath = absPath.startsWith(GUEST_HOME_DIR) ? r.home + absPath.slice(GUEST_HOME_DIR.length) : absPath;
+      const hostPath = hostPathFor(r, absPath);
       mkdirSync(dirname(hostPath), { recursive: true });
       writeFileSync(hostPath, Buffer.from(data));
     },
@@ -182,7 +201,7 @@ export function installFakeManagedAgents(): FakeManagedAgents {
     async kill(): Promise<void> {
       guestDisconnects.push(r.sessionId);
       r.state = "destroyed";
-      rmSync(r.home, { recursive: true, force: true });
+      rmSync(r.guestRoot, { recursive: true, force: true });
     },
   });
 
@@ -200,7 +219,8 @@ export function installFakeManagedAgents(): FakeManagedAgents {
         sandboxId: `sbx-${id}`,
         name: opts.name,
         state: "ready",
-        home: join(root, id),
+        guestRoot: join(root, id),
+        home: join(root, id, "home"),
         createdAt: ++clock,
         loseNextCommand: false,
         rejectNextCommand: false,
@@ -242,7 +262,7 @@ export function installFakeManagedAgents(): FakeManagedAgents {
       const r = records.get(sessionId);
       if (!r) return;
       r.state = "destroyed";
-      rmSync(r.home, { recursive: true, force: true });
+      rmSync(r.guestRoot, { recursive: true, force: true });
     },
   };
 
@@ -260,7 +280,7 @@ export function installFakeManagedAgents(): FakeManagedAgents {
     destroy: (name) => {
       const r = need(name);
       r.state = "destroyed";
-      rmSync(r.home, { recursive: true, force: true });
+      rmSync(r.guestRoot, { recursive: true, force: true });
     },
     loseNextCommand: (name) => {
       need(name).loseNextCommand = true;

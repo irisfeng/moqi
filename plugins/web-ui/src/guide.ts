@@ -20,7 +20,8 @@ import { type HomeTip, type WebuiHomeConfig } from "./home-config.ts";
 import { ANNOUNCEMENT_LEVEL_LABEL, currentArchiveList, shortDate } from "./banner.ts";
 import { escapeLoneDollars } from "./markdown-dollars.ts";
 import { installMarkdownSanitizer } from "./markdown-sanitize.ts";
-import { copyText, fieldSelect, icon } from "./ui.ts";
+import { copyText, fieldSelect } from "./ui.ts";
+import { icon } from "./icons.ts";
 import {
   currentGrowthSnapshot,
   growthErrorMessage,

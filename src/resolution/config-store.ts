@@ -71,6 +71,7 @@ export interface PersistedScopedFlag {
 }
 export interface PersistedBaseModel {
   scopeId: ScopeId;
+  embeddingModelId?: string;
   modelId?: string;
   cronRuntime?: RuntimeSelection;
   subagentRuntime?: RuntimeSelection;
@@ -106,6 +107,10 @@ export interface PersistedInternalMemberOverrides {
   members: string[];
 }
 export interface PersistedAckEmoji {
+  scopeId: ScopeId;
+  names: string[];
+}
+export interface PersistedPinnedSkills {
   scopeId: ScopeId;
   names: string[];
 }
@@ -150,10 +155,6 @@ interface AutoFlaggerConfig {
 }
 export interface PersistedAutoFlaggerConfig extends AutoFlaggerConfig {
   scopeId: ScopeId;
-}
-export interface PersistedTurnWallClock {
-  scopeId: ScopeId;
-  sec: number;
 }
 interface ScopeConfigPresence {
   soul: boolean;
@@ -255,6 +256,8 @@ export interface ScopedConfigStore {
   getAckEmoji(id: ScopeId): string[] | null;
   setAckEmoji(id: ScopeId, names: string[] | null): void;
   getAckEmojiDurable(id: ScopeId): Promise<string[] | null>;
+  getPinnedSkillsDurable(id: ScopeId): Promise<string[]>;
+  setPinnedSkills(id: ScopeId, names: string[]): Promise<void>;
   setSlackEmojiCatalog(id: ScopeId, emoji: Record<string, string>): void;
   getSlackEmojiCatalogDurable(id: ScopeId): Promise<PersistedSlackEmojiCatalog | null>;
   getPeopleDirectoryUrl(id: ScopeId): string | null;
@@ -266,10 +269,10 @@ export interface ScopedConfigStore {
   setBrowseMaxSteps(id: ScopeId, steps: number | null): void;
   getBrowseModel(id: ScopeId): string | null;
   setBrowseModel(id: ScopeId, modelId: string | null): void;
+  getEmbeddingModelDurable(): Promise<string | null>;
+  setEmbeddingModel(modelId: string | null): Promise<void>;
   getAutoFlaggerConfig(): AutoFlaggerConfig | null;
   setAutoFlaggerConfig(config: AutoFlaggerConfig | null): void;
-  getTurnWallClockSecDurable(id: ScopeId): Promise<number | null>;
-  setTurnWallClockSec(id: ScopeId, sec: number | null): Promise<void>;
   setConnectorClient(id: ScopeId, provider: string, input: ConnectorClientInput): Promise<void>;
   listConnectorClients(id: ScopeId): Promise<PublicConnectorClient[]>;
   deleteConnectorClient(id: ScopeId, provider: string): Promise<void>;
@@ -304,12 +307,12 @@ export function createMemoryConfigStore(
     webuiModels?: DurableMap<PersistedWebuiModels>;
     peopleDirectoryUrls?: DurableMap<PersistedPeopleDirectoryUrl>;
     ackEmoji?: DurableMap<PersistedAckEmoji>;
+    pinnedSkills?: DurableMap<PersistedPinnedSkills>;
     slackEmojiCatalog?: DurableMap<PersistedSlackEmojiCatalog>;
     branding?: DurableMap<PersistedBranding>;
     browseMaxSteps?: DurableMap<PersistedBrowseMaxSteps>;
     browseModels?: DurableMap<PersistedBrowseModel>;
     autoFlaggerConfigs?: DurableMap<PersistedAutoFlaggerConfig>;
-    turnWallClocks?: DurableMap<PersistedTurnWallClock>;
     deploymentIdentity?: DurableMap<PersistedDeploymentIdentity>;
     connectorSecretKey?: Buffer | string;
     defaultSecurityPosture?: SecurityPosture;
@@ -340,7 +343,6 @@ export function createMemoryConfigStore(
   const browseMaxSteps = new Map<ScopeId, number>();
   const browseModels = new Map<ScopeId, string>();
   let autoFlaggerConfig: AutoFlaggerConfig | null = null;
-  const turnWallClocks = new Map<ScopeId, number>();
   const soulStore = opts.souls ?? createMemoryMap<PersistedSoul>();
   const soulHistoryStore = opts.soulHistory ?? createMemoryMap<PersistedSoulRevision>();
   const commandPolicyStore = opts.commandPolicies ?? createMemoryMap<PersistedCommandPolicy>();
@@ -361,12 +363,12 @@ export function createMemoryConfigStore(
   const webuiModelStore = opts.webuiModels ?? createMemoryMap<PersistedWebuiModels>();
   const peopleDirectoryUrlStore = opts.peopleDirectoryUrls ?? createMemoryMap<PersistedPeopleDirectoryUrl>();
   const ackEmojiStore = opts.ackEmoji ?? createMemoryMap<PersistedAckEmoji>();
+  const pinnedSkillsStore = opts.pinnedSkills ?? createMemoryMap<PersistedPinnedSkills>();
   const slackEmojiCatalogStore = opts.slackEmojiCatalog ?? createMemoryMap<PersistedSlackEmojiCatalog>();
   const brandingStore = opts.branding ?? createMemoryMap<PersistedBranding>();
   const browseMaxStepsStore = opts.browseMaxSteps ?? createMemoryMap<PersistedBrowseMaxSteps>();
   const browseModelStore = opts.browseModels ?? createMemoryMap<PersistedBrowseModel>();
   const autoFlaggerStore = opts.autoFlaggerConfigs ?? createMemoryMap<PersistedAutoFlaggerConfig>();
-  const turnWallClockStore = opts.turnWallClocks ?? createMemoryMap<PersistedTurnWallClock>();
   const deploymentIdentity = opts.deploymentIdentity ?? createMemoryMap<PersistedDeploymentIdentity>();
   const persistWarn = (what: string) => reportFailureAs(`config: persist ${what}`, undefined);
   const writeQueue = createKeyedQueue();
@@ -408,6 +410,7 @@ export function createMemoryConfigStore(
   const purposeFields = (id: ScopeId, row?: PersistedBaseModel | null) =>
     id === org
       ? {
+          ...(row?.embeddingModelId ? { embeddingModelId: row.embeddingModelId } : {}),
           ...(row?.cronRuntime ? { cronRuntime: row.cronRuntime } : {}),
           ...(row?.subagentRuntime ? { subagentRuntime: row.subagentRuntime } : {}),
           ...(row?.fallbackRuntime ? { fallbackRuntime: row.fallbackRuntime } : {}),
@@ -581,7 +584,6 @@ export function createMemoryConfigStore(
                 rubric: storedAutoFlagger.rubric,
               }
             : null;
-          for (const r of await turnWallClockStore.all()) turnWallClocks.set(r.scopeId, r.sec);
         })();
       }
       return hydrated;
@@ -1063,6 +1065,11 @@ export function createMemoryConfigStore(
       if (pending) await pending;
       return (await ackEmojiStore.get(id))?.names ?? null;
     },
+    getPinnedSkillsDurable: async (id) => (await pinnedSkillsStore.get(id))?.names ?? [],
+    setPinnedSkills: (id, names) =>
+      writeQueue(`pinnedSkills:${id}`, () =>
+        names.length ? pinnedSkillsStore.put(id, { scopeId: id, names }) : pinnedSkillsStore.delete(id),
+      ),
     setSlackEmojiCatalog(id, emoji) {
       persist(`slackEmojiCatalog:${id}`, "slack emoji catalog", () =>
         slackEmojiCatalogStore.put(id, { scopeId: id, emoji, updatedAt: Date.now() }),
@@ -1114,6 +1121,18 @@ export function createMemoryConfigStore(
         persist(`browseModel:${id}`, "browse model", () => browseModelStore.put(id, { scopeId: id, modelId }));
       }
     },
+    getEmbeddingModelDurable: async () => (await baseModelStore.get(org))?.embeddingModelId ?? null,
+    setEmbeddingModel: async (modelId) => {
+      await writeQueue(`model:${org}`, async () => {
+        const saved = await updateBaseModelRow(org, (current) => {
+          const row: PersistedBaseModel = { ...current, scopeId: org };
+          if (modelId) row.embeddingModelId = modelId;
+          else delete row.embeddingModelId;
+          return row;
+        });
+        cacheBaseModel(org, saved);
+      });
+    },
     getAutoFlaggerConfig: () => autoFlaggerConfig,
     setAutoFlaggerConfig(config) {
       autoFlaggerConfig = config;
@@ -1124,14 +1143,6 @@ export function createMemoryConfigStore(
           autoFlaggerStore.put(org, { scopeId: org, ...config }),
         );
       }
-    },
-    getTurnWallClockSecDurable: async (id) => (await turnWallClockStore.get(id))?.sec ?? null,
-    async setTurnWallClockSec(id, sec) {
-      await writeQueue(`turnWallClock:${id}`, () =>
-        sec === null ? turnWallClockStore.delete(id) : turnWallClockStore.put(id, { scopeId: id, sec }),
-      );
-      if (sec === null) turnWallClocks.delete(id);
-      else turnWallClocks.set(id, sec);
     },
     async setConnectorClient(id, provider, input) {
       const rec: StoredConnectorClient = {
@@ -1303,7 +1314,6 @@ export function createMemoryConfigStore(
         `egress:${id}`,
         `externalSlack:${id}`,
         `model:${id}`,
-        `turnWallClock:${id}`,
         `branding:${id}`,
         ...(id === org
           ? [

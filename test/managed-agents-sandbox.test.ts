@@ -20,6 +20,7 @@ import type { HomeSnapshotStore } from "../src/sandbox/home-snapshot.ts";
 import { supportsProcessSessions } from "../src/sandbox/sandbox.ts";
 import { createMemoryMap, type DurableMap } from "../src/persistence/durable-map.ts";
 import { scopeId } from "../src/types.ts";
+import { prepareExecutionFiles } from "../src/credentials/execute-files.ts";
 import { installFakeManagedAgents, type FakeManagedAgents } from "./support/fake-managed-agents.ts";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
 
@@ -385,6 +386,51 @@ test("session status wire values map onto backend states", () => {
   assert.equal(managedAgentsSessionState(undefined), "unspecified");
 });
 
+const awsCredential = (value: string) => ({
+  files: [{ path: ".aws/credentials", contentBase64: Buffer.from(value).toString("base64") }],
+  save: async (): Promise<void> => {},
+});
+
+test("the guest refuses a transfer outside the workspace, the way the platform does", async () => {
+  await sandbox.provision(layers);
+  const current = fake.current(scopeName());
+  assert.ok(current);
+  const session = await fake.client.connect(current!.sessionId);
+  await assert.rejects(() => session.writeFileBytes("/tmp/nope.txt", new Uint8Array([1])), /path outside workspace/);
+  await assert.rejects(() => session.readFileBytes("/tmp/nope.txt"), /path outside workspace/);
+});
+
+const relayLeftovers = async (h: Awaited<ReturnType<Sandbox["provision"]>>): Promise<string> =>
+  (await sandbox.run(h, "ls -a /workspace | grep -c '^.qm-transfer' || true")).stdout.trim();
+
+test("per-command credential files outside the workspace stage through the transfer relay", async () => {
+  const h = await sandbox.provision(layers);
+  const prepared = await prepareExecutionFiles(sandbox, h, [awsCredential("key=abc")]);
+  const read = await sandbox.run(h, `cat ${prepared.env.HOME}/.aws/credentials`);
+  assert.equal(read.code, 0);
+  assert.equal(read.stdout.trim(), "key=abc");
+  await prepared.finish();
+  assert.equal(await relayLeftovers(h), "0");
+});
+
+test("an upload through the relay clears relay files a crash left behind", async () => {
+  const h = await sandbox.provision(layers);
+  await sandbox.run(h, "touch -d '3 hours ago' /workspace/.qm-transfer.stale");
+  const prepared = await prepareExecutionFiles(sandbox, h, [awsCredential("key=sweep")]);
+  await prepared.finish();
+  assert.equal(await relayLeftovers(h), "0");
+});
+
+test("exporting the computer reads its archive through the transfer relay", async () => {
+  const h = await sandbox.provision(layers);
+  await sandbox.writeFile(h, "notes/export-me.txt", "exported");
+  const entries = await sandbox.exportFiles!(h, { include: ["workspace"] });
+  const found = entries.find((e) => e.path.endsWith("export-me.txt"));
+  assert.ok(found, "expected the written file to appear in the export");
+  assert.equal(Buffer.from(found!.data).toString("utf8"), "exported");
+  assert.equal(await relayLeftovers(h), "0");
+});
+
 test("process sessions stream output through the data plane exec path", async () => {
   assert.ok(supportsProcessSessions(sandbox));
   if (!supportsProcessSessions(sandbox)) return;
@@ -394,4 +440,15 @@ test("process sessions stream output through the data plane exec path", async ()
   assert.equal(status.state, "exited");
   assert.match(output, /one/);
   assert.match(output, /two/);
+});
+
+test("layer tools install outside /workspace by staging inside it", async () => {
+  const target = join(mkdtempSync(join(tmpdir(), "managed-agents-bin-")), "tool");
+  sandbox = make({
+    layerToolFiles: () => [{ to: target, content: "#!/bin/sh\necho ok\n", mode: "755" }],
+  });
+  const h = await sandbox.provision(layers);
+  const r = await sandbox.run(h, `${target}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "ok");
 });

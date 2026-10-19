@@ -1,3 +1,6 @@
+import { createRuntimeService } from "../src/harness/runtime-control.ts";
+import type { RuntimeChoice } from "../src/harness/harness.ts";
+import type { RuntimeControl } from "../src/harness/runtime-types.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -36,6 +39,8 @@ import type { Run } from "../src/runs/run-store.ts";
 type Call = { tool: string; args: Record<string, unknown> };
 type Turn = {
   ref: Parameters<typeof createAgentTools>[0];
+  runtime?: RuntimeControl;
+  requestedRuntime?: Partial<RuntimeChoice>;
   options: AgentToolsOptions;
   tools: string[];
   results: Array<{ isError?: unknown }>;
@@ -101,7 +106,15 @@ async function world(flags: FeatureName[], next: (turn: Turn, subagent: boolean)
         };
         const options = harnessToolOptions({}, turn);
         const tools = createAgentTools(ref, options);
-        const record: Turn = { ref, options, tools: tools.map((t) => t.name).sort(), results, started: sidebar };
+        const record: Turn = {
+          ref,
+          runtime: turn.runtimeControl,
+          requestedRuntime: turn.runtime,
+          options,
+          tools: tools.map((t) => t.name).sort(),
+          results,
+          started: sidebar,
+        };
         turns.set(turn.session.threadRef, record);
         for (
           let call = next(record, !!turn.session.parentSessionId);
@@ -121,9 +134,18 @@ async function world(flags: FeatureName[], next: (turn: Turn, subagent: boolean)
   const acl = createAclStore();
   const auditLog = createAuditLog();
   const workspace = createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "subagent-parity-")));
+  const config = createMemoryConfigStore("org");
+  config.setApprovedHarnesses(["pi", "claude"]);
+  config.setInteractiveFastMode(true);
+  await config.flushScope("org:org");
   const orchestrator = createOrchestrator({
+    config,
+    runtime: createRuntimeService(
+      { config, harnessId: "pi", baseModelDefault: "claude-opus-5" },
+      { authorizesCapabilityScope: async () => true },
+    ),
     identity: createIdentityService(),
-    resolution: createResolutionService("org", createMemoryConfigStore("org"), acl),
+    resolution: createResolutionService("org", config, acl),
     sessions,
     runs,
     workspace,
@@ -199,6 +221,10 @@ for (const [surface, flags] of [
     const omit = (options: AgentToolsOptions) =>
       Object.fromEntries(Object.entries(options).filter(([key]) => !(key in SUBAGENT_EXCEPTIONS)));
     assert.deepEqual(omit(child.options), omit(parent.options));
+    assert.equal(parent.ref.current?.humanTurn, true);
+    assert.equal(child.ref.current?.humanTurn, undefined);
+    assert.equal(parent.requestedRuntime?.fastMode, true);
+    assert.equal(child.requestedRuntime?.fastMode, undefined);
     const asParent = { ...child.options, ...Object.fromEntries(exceptions.map((key) => [key, parent.options[key]])) };
     assert.deepEqual(
       createAgentTools(child.ref, asParent)
@@ -213,3 +239,27 @@ for (const [surface, flags] of [
     );
   });
 }
+
+test("human-descended tasks cannot finish silently without surface tools", async () => {
+  const w = await world(["persistent_subagents"], (turn, child) => {
+    if (turn.results.length) return;
+    return child
+      ? { tool: "finish_silently", args: {} }
+      : { tool: "subagents", args: { action: "open", task: "report the result" } };
+  });
+  const { child } = await w.parentTurn("web", "web:U1:silence");
+  assert.equal(child.results[0]?.isError, true);
+});
+
+test("human-descended tasks can change their runtime but not scope defaults", async () => {
+  const w = await world(["persistent_subagents"], script);
+  const { parent, child } = await w.parentTurn("web", "web:U1:runtime");
+  const active = { harnessId: "pi" as const, modelId: "claude-opus-5", effortLevel: "high", fastMode: false };
+  assert.ok(child.runtime);
+  assert.equal((await child.runtime(active, { action: "set", model: "Astra", lifetime: "task" })).ok, true);
+  assert.deepEqual(await child.runtime(active, { action: "set", model: "Astra", lifetime: "scope" }), {
+    ok: false,
+    error: "live_actor_required",
+  });
+  assert.equal((await parent.runtime!(active, { action: "set", model: "Astra", lifetime: "scope" })).ok, true);
+});

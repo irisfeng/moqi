@@ -63,6 +63,21 @@ curl -fsS -H "x-agent-capability: $AGENT_API_TOKEN" "$AGENT_API_URL/v1/admin/...
 GET /v1/admin/whoami        → {"isAdmin":true,"role":"org_admin","scopeId":"org:…"} or {"isAdmin":false}
 ```
 
+## 检查连接器来源
+
+在管理员入门引导期间,先静默检查这一项,再提议设置 Slack 机器人或个人连接。来源有两种:Composio,或组织自己的 OAuth 应用。绝不要查看部署密钥。
+
+**Composio。** 当 `GET /v1/composio/toolkits` 成功时,说明 Composio 可用。`composio_unavailable` 错误只表示它对这个人不可用;组织仍可能有一个未授权给他的密钥。要检查组织,读取 `GET /v1/admin/scopes/<org scope>?view=credentials`:若存在 `serviceCredentials` 条目,且 `enabled: true`、`hasSecret: true`、`delivery: "env"`、`envKey: "COMPOSIO_API_KEY"`,则说明 Composio 已配置。
+
+**自有 OAuth 应用。** 实时的"已连接应用"区块反映的是已通过客户端凭据配置的提供方,来源为 Admin → Connectors 或部署密钥。出现"No direct OAuth app connections are configured"这一行,表示一个都没有配置,即使"已连接"下出现了 MCP 应用也一样。没有这一行,则至少配置了一个提供方。`GET /v1/admin/scopes/<org scope>?view=connectors` 只显示在 Admin → Connectors 中添加的应用,不包含由部署密钥设置的应用,因此不能用来证明不存在。
+
+只有在工具包读取失败、且组织检查没有发现这样的凭据时,才算 Composio 不存在。只要任一来源存在,就静默跳过。如果该区块缺失或某次读取失败,按未知处理,而不是不存在,也不要提议设置。只有两者都确认不存在时,才发送一条简短消息:
+
+- Composio(推荐):一个项目密钥即可覆盖大多数应用。在 Admin → Credentials 中把它添加为组织服务凭据,环境变量键为 `COMPOSIO_API_KEY`,并按 QM 的 `docs/composio.md` 所述设置回调验证。如果他们更愿意现在直接粘贴密钥,用 `POST /v1/keychain/drops`(`{"service":"composio","envKey":"COMPOSIO_API_KEY","purpose":"…"}`)生成一次性投递链接,并分享它的 `url`。通过投递提交的密钥只为他们本人启用 Composio;团队成员需要组织凭据。
+- 自有 OAuth 应用:在 Admin → Connectors 中添加每个提供方。每个都需要回调 URL `<web origin>/v1/connectors/oauth/<provider>/callback`,连接器页面也会显示它。
+
+链接:web origin 是"已连接应用"区块中连接页面 URL 的来源(`<web origin>/keychain`)。链接到 `<web origin>/admin/credentials` 和 `<web origin>/admin/connectors`。如果没有这一行,就只写出页面名称而不加链接,并提供投递链接。绝不要编造 URL,也不要在聊天中索要密钥或客户端密钥。绝不要要求普通用户配置来源。
+
 ## 引导安装 Slack
 
 在管理员入门引导期间提议设置 Slack 机器人之前,先静默检查这一项。它与个人账号连接是分开的。先验证管理员状态。在

@@ -2,7 +2,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { ThumbsDown, ThumbsUp } from "lucide";
 import { api } from "./core-bridge.ts";
 import { tip } from "./tooltip.ts";
-import { icon } from "./ui.ts";
+import { icon } from "./icons.ts";
 
 type RatingValue = "up" | "down";
 

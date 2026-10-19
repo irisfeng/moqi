@@ -1,3 +1,4 @@
+import { isSessionTurn } from "../turn-origin.ts";
 import type {
   Conversation,
   DeliveryProvenance,
@@ -100,7 +101,10 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
   const deliveries = deps.deliveries;
   const currentDestination = defaultDestination;
   const rateLimitRecipient =
-    input.origin?.kind === "human" && currentDestination.type === "slack" && currentDestination.target
+    input.origin?.kind === "human" &&
+    !isSessionTurn(input) &&
+    currentDestination.type === "slack" &&
+    currentDestination.target
       ? { rateLimitRecipient: { target: currentDestination.target, user: actor.id } }
       : {};
   let editRefConsumed = false;
@@ -235,14 +239,12 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       if (!f.ok) return { ok: false, message: f.message };
       const footer = buildDebugFooter();
       const run = input.runId ? await deps.runs?.get(input.runId) : null;
-      const taskList = input.runId ? await deps.tasks?.list({ originRunId: input.runId }) : undefined;
       const editRef =
         !editRefConsumed && destination.target === currentDestination.target ? run?.deliveryState?.editRef : undefined;
       if (editRef) editRefConsumed = true;
       const projectedDestination = {
         ...destination,
         ...(editRef ? { editRef } : {}),
-        ...(taskList?.length ? { taskList: taskList.map(({ id, title, status }) => ({ id, title, status })) } : {}),
         ...(footer ? { debugFooter: footer } : {}),
       };
       const sent = await enqueue(projectedDestination, postText, seq, f.attachments);

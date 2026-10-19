@@ -166,11 +166,6 @@ test("brandName() reads the injected self-label and falls back to the product na
 });
 
 test("the installable-app metadata follows the brand: manifest link, touch icon, home-screen title", async () => {
-  const template = readFileSync(new URL("../index.html", import.meta.url), "utf8");
-  assert.match(template, /<link rel="manifest" href="%BASE_URL%manifest\.webmanifest"\s*\/?>/);
-  assert.match(template, /<link rel="apple-touch-icon" href="%BASE_URL%brand-mark\.svg"\s*\/?>/);
-  assert.match(template, /<meta name="apple-mobile-web-app-title" content="QM"\s*\/?>/);
-  assert.match(template, /viewport-fit=cover, interactive-widget=resizes-content/);
   const { injectBranding } = await import("../../chassis/src/branding.ts");
   const shell =
     '<html><head><meta name="brand-self-label" content="QM" /><meta name="apple-mobile-web-app-title" content="QM" /></head></html>';

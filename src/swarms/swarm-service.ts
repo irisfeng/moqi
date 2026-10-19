@@ -13,6 +13,7 @@ import { sleep, withTimeout } from "../util/async.ts";
 import { createSweeper } from "../util/sweeper.ts";
 import { canonicalJson } from "../util/objects.ts";
 import { resolveSwarmSettings, type SwarmSettings } from "./swarm-settings.ts";
+import { inheritRuntime, spawnRuntime, type SpawnRuntimeFields, type SwarmTemplate } from "./swarm-runtime.ts";
 import { errMessage, swallow } from "../util/errors.ts";
 import {
   assertSwarmOpen,
@@ -32,7 +33,7 @@ export interface SwarmTurn {
   recipientId: string;
 }
 
-interface SpawnInput {
+interface SpawnInput extends SpawnRuntimeFields {
   requestId: string;
   count?: number;
   context?: unknown;
@@ -303,7 +304,7 @@ export function createSwarmService(deps: {
     const provider = inventory.providers.find((item) => item.name === requested);
     if (!provider || !provider.actions.includes("create") || !provider.actions.includes("retire"))
       throw new Error("sandbox backend must support creating and retiring workers");
-    const template: OrchestratorInput = {
+    const template: SwarmTemplate = {
       actor: source.actor,
       conversation: {
         ...source.conversation,
@@ -318,10 +319,6 @@ export function createSwarmService(deps: {
       ...(source.unattendedGrants ? { unattendedGrants: source.unattendedGrants } : {}),
       ...(source.readOnly ? { readOnly: true } : {}),
       ...(source.skipMemory ? { skipMemory: true } : {}),
-      ...(source.harness ? { harness: source.harness } : {}),
-      ...(source.model ? { model: source.model } : {}),
-      thinkingLevel: source.thinkingLevel,
-      fastMode: source.fastMode,
       turnWallClockMs: settings.turnMs,
     };
     const createdAt = Date.now();
@@ -358,6 +355,7 @@ export function createSwarmService(deps: {
   function dispatchRequest(swarm: Swarm, message: SwarmMessage, recipient: SwarmMember): OrchestratorInput {
     return {
       ...swarm.template,
+      ...recipient.runtime,
       conversation: { ...swarm.template.conversation, threadRef: recipient.threadRef },
       origin: { kind: "automation", screenData: message.text },
       text: `Swarm ${message.author} message ${message.id} from agent ${message.senderId} (session ${message.senderSessionId})${message.replyTo ? ` (reply to ${message.replyTo})` : ""}. This is not a live human instruction.\n${message.text}`,
@@ -607,6 +605,7 @@ export function createSwarmService(deps: {
         throw new Error("settings are only allowed on initial swarm creation");
       const settings = existing?.settings ?? resolveSwarmSettings(input.settings, defaults);
       boundedText(input.text, settings.textBytes, "text");
+      const requestedRuntime = spawnRuntime(input);
       const count = input.count ?? input.contexts?.length ?? 1;
       if (!Number.isSafeInteger(count) || count < 1 || count >= settings.agents) throw new Error("invalid pool size");
       if (input.contexts && input.contexts.length !== count) throw new Error("contexts must match count");
@@ -642,6 +641,7 @@ export function createSwarmService(deps: {
           swarm.notificationCount + count > swarm.settings.notifications
         )
           throw new Error("swarm work budget exhausted");
+        const runtime = inheritRuntime(parent.runtime, requestedRuntime);
         const members: SwarmMember[] = contexts.map((context) => {
           const id = randomUUID();
           return {
@@ -650,6 +650,7 @@ export function createSwarmService(deps: {
             threadRef: `swarm:${encodeURIComponent(swarm.id)}:${id}`,
             depth: parent.depth + 1,
             context,
+            ...(runtime ? { runtime: { ...runtime } } : {}),
             sandboxId: id,
             ...((input.forumSandboxId ?? swarm.board?.sandboxId)
               ? { forumSandboxId: input.forumSandboxId ?? swarm.board!.sandboxId }
@@ -795,7 +796,8 @@ export function createSwarmService(deps: {
           runIds.map(async (runId) => {
             if (await runs.withdraw(runId, { unstartedOnly: true }).catch(() => false)) return;
             const run = await runs.get(runId);
-            if (run?.status === "running") await deps.signals?.send(runId, { kind: "abort" }).catch(() => false);
+            if (run?.status === "running")
+              await deps.signals?.send(runId, { kind: "abort", reason: "by the swarm" }).catch(() => false);
           }),
         );
       }
