@@ -38,6 +38,8 @@ const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const FINGERPRINT_LABEL = "qm.sandbox-fingerprint";
 const BUILD_HINT = "run `npm run sandbox:local:build`";
 const PREP_TIMEOUT_SEC = 30;
+const DEFAULT_MEMORY_MB = 2048;
+const DEFAULT_PIDS_LIMIT = 512;
 
 export type { DockerExec };
 
@@ -46,6 +48,7 @@ export interface LocalSandboxOptions {
   dockerBin?: string;
   cpus?: number;
   memoryMb?: number;
+  pidsLimit?: number;
   coreContainer?: string;
   defaultTimeoutSec?: number;
   homeDir?: string;
@@ -101,6 +104,12 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
   const dexec = opts.dockerExec ?? spawnDockerExec(opts.dockerBin ?? "docker");
   const fetchImpl = opts.fetchImpl ?? fetch;
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
+  const memoryMb = opts.memoryMb ?? DEFAULT_MEMORY_MB;
+  const pidsLimit = opts.pidsLimit ?? DEFAULT_PIDS_LIMIT;
+  if (!Number.isInteger(memoryMb) || memoryMb < 6)
+    throw new Error(`LOCAL_SANDBOX_MEMORY_MB must be a whole number of megabytes, at least 6 (got ${memoryMb})`);
+  if (!Number.isInteger(pidsLimit) || pidsLimit < 1)
+    throw new Error(`LOCAL_SANDBOX_PIDS_LIMIT must be a positive whole number (got ${pidsLimit})`);
   const homeDir = opts.homeDir ?? HOME_DIR;
   const workspaceDir = `${homeDir}/${WORKSPACE_BASENAME}`;
   const provisionQueue = createKeyedQueue<string>();
@@ -146,11 +155,16 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
     return preflightDone;
   }
 
-  async function containerState(name: string): Promise<{ running: boolean; imageId: string } | null> {
-    const r = await dexec(["inspect", "-f", "{{.State.Running}} {{.Image}}", name]);
+  async function containerState(name: string): Promise<{ running: boolean; imageId: string; capped: boolean } | null> {
+    const r = await dexec([
+      "inspect",
+      "-f",
+      "{{.State.Running}} {{.Image}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}",
+      name,
+    ]);
     if (r.code !== 0) return null;
-    const [running = "", imageId = ""] = r.stdout.trim().split(/\s+/);
-    return { running: running === "true", imageId };
+    const [running = "", imageId = "", memory = "", pids = ""] = r.stdout.trim().split(/\s+/);
+    return { running: running === "true", imageId, capped: Number(memory) > 0 && Number(pids) > 0 };
   }
 
   async function resolvePort(name: string): Promise<number> {
@@ -284,11 +298,22 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
       ...(opts.coreContainer ? [] : ["-p", `${bindHost}:0:${AGENT_PORT}`]),
       "--add-host=host.docker.internal:host-gateway",
       ...(opts.cpus ? ["--cpus", String(opts.cpus)] : []),
-      ...(opts.memoryMb ? ["--memory", `${opts.memoryMb}m`] : []),
+      "--memory",
+      `${memoryMb}m`,
+      "--memory-swap",
+      `${memoryMb}m`,
+      "--pids-limit",
+      String(pidsLimit),
       image,
     ];
     const r = await dexec(args, 120_000);
     if (r.code !== 0) throw new Error(`docker run ${name} failed: ${r.stderr.trim()}`);
+    if (!(await containerState(name))?.capped) {
+      await dexec(["rm", "-f", name]);
+      throw new Error(
+        `docker run ${name}: the Docker daemon dropped the memory or process limit; the local sandbox needs memory and pids cgroup support`,
+      );
+    }
     portByName.delete(name);
     await connectCore(net);
     await waitDaemon(name);
@@ -300,7 +325,7 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
       const name = localContainerName(scope);
       scopeByContainer.set(name, scope);
       const state = await containerState(name);
-      if (state && state.imageId === imageId) {
+      if (state && state.imageId === imageId && state.capped) {
         if (!state.running) await startContainer(name);
         else await connectCore(await ensureNetwork(name));
         activeByContainer.set(name, (activeByContainer.get(name) ?? 0) + 1);
@@ -325,7 +350,8 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
       const name = localScratchName(key);
       scratchByKey.set(key, name);
       const state = await containerState(name);
-      if (state) {
+      if (state && !state.capped) await dexec(["rm", "-f", name]);
+      else if (state) {
         if (!state.running) await startContainer(name);
         else await connectCore(await ensureNetwork(name));
         activeByContainer.set(name, (activeByContainer.get(name) ?? 0) + 1);
@@ -357,7 +383,7 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
       tools: ["git", "curl", "wget", "jq", "unzip", "gnupg", "python3", "gh", "aws (CLI v2)"],
       notInstalled: ["gcloud", "kubectl", "flyctl", "glab"],
       ...(opts.cpus ? { cpus: opts.cpus } : {}),
-      ...(opts.memoryMb ? { memoryMb: opts.memoryMb } : {}),
+      memoryMb,
       homeDir,
       workdir: workspaceDir,
     },

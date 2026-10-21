@@ -136,3 +136,11 @@ test("answerWebContextRequest reads the log as the asking viewer, refuses gracef
   const file = await answerWebContextRequest(sessions, { conversationTarget: TARGET, count: 1, file: { ts: "1" } });
   assert.ok(file.error);
 });
+
+test("message times are marked as UTC, matching the Slack window, so they are not read as local time", () => {
+  const out = webConversationWindow(entries, "carol@acme.com", ROOT, {});
+  assert.deepEqual(
+    out.messages.map((m) => (m as { time: string }).time),
+    ["2023-11-14 22:13Z", "2023-11-14 22:13Z"],
+  );
+});

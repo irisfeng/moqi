@@ -1,3 +1,4 @@
+import { slackOff } from "../../../config.ts";
 import { sendJson } from "../../http.ts";
 import { audit, authorizeAdmin, orgScope } from "../shared.ts";
 import type { ApiCtx } from "../route.ts";
@@ -27,6 +28,7 @@ export async function getSlackInstallation(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(ctx.deps);
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
+  if (slackOff()) return sendJson(ctx.res, 404, { error: "slack_disabled" });
   if (!ctx.deps.slackInstallation) return sendJson(ctx.res, 404, { error: "not_configured" });
   audit(ctx.deps, {
     principalId: actor.id,
@@ -85,6 +87,7 @@ export async function putSlackInstallation(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(ctx.deps);
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
+  if (slackOff()) return sendJson(ctx.res, 404, { error: "slack_disabled" });
   if (!ctx.deps.slackInstallation) return sendJson(ctx.res, 404, { error: "not_configured" });
   const body = ctx.body as { botToken?: unknown; appToken?: unknown };
   const botToken = typeof body.botToken === "string" ? body.botToken.trim() : "";
@@ -159,6 +162,7 @@ export async function getSlackEmojiList(ctx: ApiCtx): Promise<void> {
 export async function startSlackInstallation(ctx: ApiCtx): Promise<void> {
   const actor = await authorizeAdmin(ctx, orgScope(ctx.deps));
   if (!actor) return;
+  if (slackOff()) return sendJson(ctx.res, 404, { error: "slack_disabled" });
   if (!ctx.deps.managedSlack) return sendJson(ctx.res, 404, { error: "not_configured" });
   try {
     const step = (ctx.body as { step?: unknown } | undefined)?.step ?? "install";

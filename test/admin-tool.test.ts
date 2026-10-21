@@ -169,3 +169,23 @@ test("strict approval of an admin read cannot authorize an admin mutation", asyn
   assert.equal(approvals[0]?.approvalKey, "tool:admin:delete_memory");
   assert.match((blocked.content[0] as { text: string }).text, /needs human approval/);
 });
+
+test("with QM_SLACK=off the admin tool offers no Slack actions", () => {
+  const actions = (off: boolean) => {
+    const previous = process.env.QM_SLACK;
+    if (off) process.env.QM_SLACK = "off";
+    else delete process.env.QM_SLACK;
+    try {
+      const tool = createAgentTools(
+        { current: { admin: { call: async () => null, operationsAvailable: true } } as unknown as ToolContext },
+        { controlTools: true },
+      ).find((t) => t.name === "admin")!;
+      return ["slack_installation", "slack_start", "whoami"].filter((action) => Check(tool.parameters, { action }));
+    } finally {
+      if (previous === undefined) delete process.env.QM_SLACK;
+      else process.env.QM_SLACK = previous;
+    }
+  };
+  assert.deepEqual(actions(true), ["whoami"]);
+  assert.deepEqual(actions(false), ["slack_installation", "slack_start", "whoami"]);
+});

@@ -65,7 +65,7 @@ GET /v1/admin/whoami        → {"isAdmin":true,"role":"org_admin","scopeId":"or
 
 ## 检查连接器来源
 
-在管理员入门引导期间,先静默检查这一项,再提议设置 Slack 机器人或个人连接。来源有两种:Composio,或组织自己的 OAuth 应用。绝不要查看部署密钥。
+在管理员入门引导期间,先静默检查这一项,再提议<!--slack-->设置 Slack 机器人或<!--/slack-->个人连接。来源有两种:Composio,或组织自己的 OAuth 应用。绝不要查看部署密钥。
 
 **Composio。** 当 `GET /v1/composio/toolkits` 成功时,说明 Composio 可用。`composio_unavailable` 错误只表示它对这个人不可用;组织仍可能有一个未授权给他的密钥。要检查组织,读取 `GET /v1/admin/scopes/<org scope>?view=credentials`:若存在 `serviceCredentials` 条目,且 `enabled: true`、`hasSecret: true`、`delivery: "env"`、`envKey: "COMPOSIO_API_KEY"`,则说明 Composio 已配置。
 
@@ -78,7 +78,7 @@ GET /v1/admin/whoami        → {"isAdmin":true,"role":"org_admin","scopeId":"or
 
 链接:web origin 是"已连接应用"区块中连接页面 URL 的来源(`<web origin>/keychain`)。链接到 `<web origin>/admin/credentials` 和 `<web origin>/admin/connectors`。如果没有这一行,就只写出页面名称而不加链接,并提供投递链接。绝不要编造 URL,也不要在聊天中索要密钥或客户端密钥。绝不要要求普通用户配置来源。
 
-## 引导安装 Slack
+<!--slack-->## 引导安装 Slack
 
 在管理员入门引导期间提议设置 Slack 机器人之前,先静默检查这一项。它与个人账号连接是分开的。先验证管理员状态。在
 人工发起的管理员轮次中,读取 `GET /v1/admin/slack-installation`;它返回设置
@@ -128,7 +128,7 @@ GET /v1/admin/whoami        → {"isAdmin":true,"role":"org_admin","scopeId":"or
 在没有托管安装的情况下,使用返回的 `createUrl` 和已知仪表盘的
 工作区应用指南。不要索要此流程无法使用的配置令牌。
 让他们只在其安全表单中输入凭据。不要猜测范围、回调
-URL 或凭据要求。设置是可选的;若被推迟,继续入门引导。
+URL 或凭据要求。设置是可选的;若被推迟,继续入门引导。<!--/slack-->
 
 ## 查找范围
 

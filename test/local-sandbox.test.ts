@@ -156,6 +156,60 @@ test("a stale-image container is recreated while its home volume survives", asyn
   assert.equal(h2.coldStart, false, "existing volume means a warm home");
 });
 
+test("every container is created with memory, swap and process caps", async () => {
+  const fake = installFakeDocker(daemonPort);
+  const defaults = await makeSandbox(fake).provision(rw(scopeId("personal", "U50")));
+  const args = fake.containers.get(defaults.id)!.args;
+  const flag = (name: string) => args[args.indexOf(name) + 1];
+  assert.equal(flag("--memory"), "2048m");
+  assert.equal(flag("--memory-swap"), "2048m");
+  assert.equal(flag("--pids-limit"), "512");
+
+  const tuned = makeSandbox(fake, { memoryMb: 4096, pidsLimit: 1024 });
+  assert.equal(tuned.profile.spec?.memoryMb, 4096);
+  const scratch = await tuned.provision(rw(scopeId("personal", "U50")), { scratch: { key: "k50" } });
+  const scratchArgs = fake.containers.get(scratch.id)!.args;
+  assert.equal(scratchArgs[scratchArgs.indexOf("--memory") + 1], "4096m");
+  assert.equal(scratchArgs[scratchArgs.indexOf("--memory-swap") + 1], "4096m");
+  assert.equal(scratchArgs[scratchArgs.indexOf("--pids-limit") + 1], "1024");
+});
+
+test("an uncapped container from an older core is recreated with caps while its home volume survives", async () => {
+  const fake = installFakeDocker(daemonPort);
+  const layers = rw(scopeId("personal", "U51"));
+  const h1 = await makeSandbox(fake).provision(layers);
+  const legacy = fake.containers.get(h1.id)!;
+  legacy.memoryBytes = 0;
+  legacy.pidsLimit = null;
+
+  const h2 = await makeSandbox(fake).provision(layers);
+  assert.equal(h2.id, h1.id);
+  assert.equal(fake.runCount, 2, "uncapped container replaced");
+  assert.equal(fake.containers.get(h2.id)!.memoryBytes, 2048 * 1024 * 1024);
+  assert.equal(fake.containers.get(h2.id)!.pidsLimit, 512);
+  assert.equal(fake.volumes.has(legacy.volume!), true, "volume survived the recreate");
+  assert.equal(h2.coldStart, false);
+
+  const h3 = await makeSandbox(fake).provision(layers);
+  assert.equal(h3.id, h1.id);
+  assert.equal(fake.runCount, 2, "a capped container is reused");
+});
+
+test("caps must be positive whole numbers", () => {
+  const fake = installFakeDocker(daemonPort);
+  assert.throws(() => makeSandbox(fake, { memoryMb: 0 }), /LOCAL_SANDBOX_MEMORY_MB/);
+  assert.throws(() => makeSandbox(fake, { memoryMb: 1.5 }), /LOCAL_SANDBOX_MEMORY_MB/);
+  assert.throws(() => makeSandbox(fake, { pidsLimit: -1 }), /LOCAL_SANDBOX_PIDS_LIMIT/);
+});
+
+test("a daemon that drops the limits fails provision instead of running uncapped", async () => {
+  const fake = installFakeDocker(daemonPort);
+  fake.dropsLimits = true;
+  const sb = makeSandbox(fake);
+  await assert.rejects(sb.provision(rw(scopeId("personal", "U52"))), /dropped the memory or process limit/);
+  assert.equal(fake.containers.size, 0, "the uncapped container is removed");
+});
+
 test("a scratch box has no volume and is removed on teardown", async () => {
   const fake = installFakeDocker(daemonPort);
   const sb = makeSandbox(fake);

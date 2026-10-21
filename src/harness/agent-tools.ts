@@ -9,7 +9,7 @@ import type { HarnessHandoff, RuntimeRequest } from "./runtime-types.ts";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
 import { Check } from "typebox/value";
-import { CONFIG_DEFAULTS, type Config } from "../config.ts";
+import { CONFIG_DEFAULTS, slackOff, type Config } from "../config.ts";
 import type { ClientToolDeclaration, CronFireLogEntry, EntryType, ScopeId } from "../types.ts";
 import type { ToolContext, PublishInput, PublishAudienceDescriptor } from "../tools/primitives.ts";
 import type { GapWork } from "../sessions/session-store.ts";
@@ -3308,12 +3308,15 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     });
   }
 
+  const offeredAdminOperations = slackOff()
+    ? Object.fromEntries(Object.entries(adminOperations).filter(([action]) => !action.startsWith("slack_")))
+    : adminOperations;
   const admin = resourceTool(
     "admin",
     Object.fromEntries(
       Object.entries(
         ref.current === null || ref.current.admin?.operationsAvailable
-          ? adminOperations
+          ? offeredAdminOperations
           : { whoami: adminOperations.whoami },
       ).map(([action, operation]) => [
         action,

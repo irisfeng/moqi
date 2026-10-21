@@ -38,7 +38,7 @@ import type {
 import { scopeId as toScopeId, personalScope } from "../types.ts";
 import { desktopClientForTurn, isSessionTurn, turnOriginRequestFields } from "./turn-origin.ts";
 import { resolveTurnFastMode, turnRuntimePurpose } from "./turn-options.ts";
-import { orgId } from "../config.ts";
+import { orgId, slackOff } from "../config.ts";
 import { renderGatewayContext } from "./gateway-context.ts";
 import { deriveTurnOutcome, approvalBlocksInput } from "./turn-outcome.ts";
 import { applyPromptVars, loadProtocolFile, type PromptVars } from "../resolution/prompt-vars.ts";
@@ -115,7 +115,7 @@ import { DEFAULT_MEMORY_POLICY } from "../memory/policy.ts";
 import { createMemoryMap } from "../persistence/durable-map.ts";
 import { collectBlob, createMemoryBlobTransferStore } from "../persistence/blob-transfer.ts";
 import { skillsIndex } from "../skills/materialize.ts";
-import { isIdeasConversation, PROACTIVE_OPENER_PROMPT } from "../onboarding/onboarding.ts";
+import { isIdeasConversation, proactiveOpenerPrompt } from "../onboarding/onboarding.ts";
 import { createToolContext, NeedsApproval, CommandDenied, type CommandCredential } from "../tools/primitives.ts";
 import type { FileArtifact } from "../files/file-artifact-store.ts";
 import { artifactImageLoader } from "../harness/replay-images.ts";
@@ -1277,6 +1277,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const onboardingBlock = isIdeasConversation(input)
         ? "## Ideas conversation\nThe user chose to explore ideas in this conversation. Skip the onboarding skill and setup flow for this entire conversation, including follow-ups. Do not mark onboarding completed or dismissed in memory. Use available authorized company context and answer their request directly."
         : "";
+
+      if (slackOff())
+        turnContextBlocks["Slack"] =
+          "Slack is not available in this organisation. Never offer, set up, check or mention Slack or a Slack bot, and skip any Slack step a skill describes.";
 
       let type: SessionType = "channel";
       if (conversation.kind === "dm") type = "dm";
@@ -3101,7 +3105,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         ]
           .filter((s) => s && s.trim())
           .join("\n\n");
-        const baseText = input.proactiveOpener && !input.text.trim() ? PROACTIVE_OPENER_PROMPT : input.text;
+        const baseText = input.proactiveOpener && !input.text.trim() ? proactiveOpenerPrompt() : input.text;
         const pausedTurnUserEntry =
           input.approval && approvalRecord?.kind !== "input"
             ? [...visibleHistory].reverse().find((e) => e.type === "user" && !isOverheardEntry(e))

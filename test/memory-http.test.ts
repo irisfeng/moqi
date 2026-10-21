@@ -67,6 +67,27 @@ test("a user edits and forgets facts in their OWN personal notebook only", async
   }
 });
 
+test("the personal memory page counts facts withheld because they came from a shared conversation", async () => {
+  const s = start();
+  try {
+    const mine = scopeId("personal", "U1");
+    await s.built.memory.capture(mine, ["Prefers terse replies"], Date.parse("2026-05-31"));
+    await s.built.memory.capture(mine, ["Launch slips to June"], Date.parse("2026-05-31"), "U1", {
+      mode: "explicit",
+      conversationScopeId: scopeId("channel", "C1"),
+      sensitivity: "ordinary",
+    });
+    const page = await json(await fetch(`${s.base}/v1/memory?principalId=U1`));
+    assert.deepEqual(
+      page.facts.map((f: { text: string }) => f.text),
+      ["Prefers terse replies"],
+    );
+    assert.equal(page.withheld, 1);
+  } finally {
+    await s.close();
+  }
+});
+
 test("an admin edits any scope's facts by id; non-admins are refused without a write", async () => {
   const s = start();
   try {

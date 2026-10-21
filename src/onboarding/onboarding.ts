@@ -1,10 +1,25 @@
 import type { ScopeId, TurnRequest } from "../types.ts";
+import { slackOff } from "../config.ts";
 import type { MemoryService } from "../memory/memory-service.ts";
 
 const ONBOARDING_VERSION = "v2";
 
+const OPENER_INTRO =
+  "The user just opened the app for the first time and has not typed yet. Greet them by their sign-in name as their AI teammate in a sentence or two, say the first step is connecting their tools, and ask whether to start. Do not ask their name, role, preferred voice, or what they are working on, and do not research their work yet. Follow the onboarding skill. ";
+const OPENER_SLACK_DEFER =
+  "Do not mention Slack bot setup in this automatic greeting; wait for their reply before reading admin-only status. ";
+const OPENER_CONNECTIONS = "On that human-started turn, handle connections first as the onboarding skill describes. ";
+const OPENER_SLACK_OFFER =
+  "Offer Slack bot setup only to a verified org admin with a confirmed missing bot; silently skip existing, disabled, deferred, or unknown setup. ";
+const OPENER_PERSONAL =
+  "For personal connections, discover authorized access using its existing skill and reuse connected accounts. An empty direct OAuth list does not rule out Composio. Never ask regular users to create OAuth apps or supply project keys; if no source is available to them or setup is deferred, skip connections and continue onboarding.";
+
 export const PROACTIVE_OPENER_PROMPT =
-  "The user just opened the app for the first time and has not typed yet. Greet them by their sign-in name as their AI teammate in a sentence or two, say the first step is connecting their tools, and ask whether to start. Do not ask their name, role, preferred voice, or what they are working on, and do not research their work yet. Follow the onboarding skill. Do not mention Slack bot setup in this automatic greeting; wait for their reply before reading admin-only status. On that human-started turn, handle connections first as the onboarding skill describes. Offer Slack bot setup only to a verified org admin with a confirmed missing bot; silently skip existing, disabled, deferred, or unknown setup. For personal connections, discover authorized access using its existing skill and reuse connected accounts. An empty direct OAuth list does not rule out Composio. Never ask regular users to create OAuth apps or supply project keys; if no source is available to them or setup is deferred, skip connections and continue onboarding.";
+  OPENER_INTRO + OPENER_SLACK_DEFER + OPENER_CONNECTIONS + OPENER_SLACK_OFFER + OPENER_PERSONAL;
+
+export function proactiveOpenerPrompt(): string {
+  return slackOff() ? OPENER_INTRO + OPENER_CONNECTIONS + OPENER_PERSONAL : PROACTIVE_OPENER_PROMPT;
+}
 
 export type OnboardingStatus = "completed" | "dismissed" | "pending" | "not_started";
 

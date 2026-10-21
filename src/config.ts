@@ -337,6 +337,7 @@ interface LocalSandboxEnv {
   dockerBin?: string;
   cpus?: number;
   memoryMb?: number;
+  pidsLimit?: number;
   coreContainer?: string;
   defaultTimeoutSec?: number;
   apiHost?: string;
@@ -354,6 +355,9 @@ function localSandboxEnv(env: NodeJS.ProcessEnv): LocalSandboxEnv {
       : {}),
     ...(numEnvStrict("LOCAL_SANDBOX_MEMORY_MB", env.LOCAL_SANDBOX_MEMORY_MB) !== undefined
       ? { memoryMb: numEnvStrict("LOCAL_SANDBOX_MEMORY_MB", env.LOCAL_SANDBOX_MEMORY_MB) }
+      : {}),
+    ...(numEnvStrict("LOCAL_SANDBOX_PIDS_LIMIT", env.LOCAL_SANDBOX_PIDS_LIMIT) !== undefined
+      ? { pidsLimit: numEnvStrict("LOCAL_SANDBOX_PIDS_LIMIT", env.LOCAL_SANDBOX_PIDS_LIMIT) }
       : {}),
     ...(numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) !== undefined
       ? { defaultTimeoutSec: numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) }
@@ -988,6 +992,23 @@ export function boolEnv(value: string | undefined): boolean | undefined {
   if (["1", "true", "yes", "on"].includes(v)) return true;
   if (["0", "false", "no", "off", "none"].includes(v)) return false;
   return undefined;
+}
+
+export function slackOff(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.QM_SLACK === "off";
+}
+
+export function defaultTimezone(env: NodeJS.ProcessEnv = process.env): string {
+  const tz = env.QM_DEFAULT_TIMEZONE?.trim();
+  if (!tz) return "America/Los_Angeles";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+  } catch {
+    throw new Error(
+      `QM_DEFAULT_TIMEZONE=${JSON.stringify(env.QM_DEFAULT_TIMEZONE)} is not an IANA timezone, such as Asia/Shanghai`,
+    );
+  }
+  return tz;
 }
 
 export function numEnv(value: string | undefined): number | undefined {

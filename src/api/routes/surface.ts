@@ -642,7 +642,9 @@ async function selfMemory(ctx: ApiCtx): Promise<void> {
   }
   const action = method === "GET" ? "memory.self.read" : "memory.self.update";
   audit(deps, { principalId, action, resource: "memory", scopeLabel: scope });
-  return sendJson(res, 200, { scopeId: scope, facts: await memoryFacts(memory, scope) });
+  const facts = await memoryFacts(memory, scope);
+  const stored = (await deps.memory?.facts?.(scope))?.length ?? facts.length;
+  return sendJson(res, 200, { scopeId: scope, facts, withheld: Math.max(0, stored - facts.length) });
 }
 
 async function sessionCapability(ctx: ApiCtx): Promise<void> {

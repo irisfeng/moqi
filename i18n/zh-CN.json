@@ -4676,7 +4676,8 @@
     "placeholder=\"Search remembered facts\"": "placeholder=\"搜索已记住的事实\"",
     "aria-label=\"Edit this fact\"": "aria-label=\"编辑此事实\"",
     "${tip(\"Edit this fact\")}": "${tip(\"编辑此事实\")}",
-    "@click=${() => void change(\"DELETE\", { ids: [fact.id] }, \"Forgotten ✓\")}": "@click=${() => void change(\"DELETE\", { ids: [fact.id] }, \"已遗忘 ✓\")}"
+    "@click=${() => void change(\"DELETE\", { ids: [fact.id] }, \"Forgotten ✓\")}": "@click=${() => void change(\"DELETE\", { ids: [fact.id] }, \"已遗忘 ✓\")}",
+    "Facts kept with the project or group conversations they came from, not listed here: ${withheld}": "另有 ${withheld} 条记忆留在记下它们的项目或群组对话中，不在这里列出。"
   },
   "plugins/web-ui/src/mention-toast.ts": {
     "action.setAttribute(\"aria-label\", `${item?.title ?? \"New message\"}, ${link.textContent}`);": "action.setAttribute(\"aria-label\", `${item?.title ?? \"新消息\"}，${link.textContent}`);",

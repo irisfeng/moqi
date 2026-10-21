@@ -4,6 +4,7 @@ import type { SkillBundle } from "./skill-bundle-store.ts";
 import { swallow } from "../util/errors.ts";
 import { assertSafeSkillName, isSafeSkillName } from "./skill-name.ts";
 import type { ScopeId } from "../types.ts";
+import { slackOff } from "../config.ts";
 
 export const SKILLS_DIR = "skills";
 export const SKILLS_ROOT = ".agent-skills";
@@ -25,8 +26,12 @@ export function rehomeSkillPaths(resolution: SkillResolution, text: string, root
   return text.split(`${SKILLS_DIR}/${name}/`).join(`${root}/${name}/`);
 }
 
+const SLACK_SPAN = /<!--slack-->[\s\S]*?<!--\/slack-->\n*/g;
+const SLACK_MARK = /<!--\/?slack-->/g;
+
 export function renderSkillBody(resolution: SkillResolution, root = SKILLS_DIR): string {
-  const body = rehomeSkillPaths(resolution, resolution.skill!.manifest.body, root);
+  const rehomed = rehomeSkillPaths(resolution, resolution.skill!.manifest.body, root);
+  const body = rehomed.replace(slackOff() ? SLACK_SPAN : SLACK_MARK, "");
   const pack = packRoot(root, resolution);
   return pack
     ? `${body}\n\n## Pack files\nResolve repository-relative shared-file paths against \`${pack}/\`; pack files never overwrite the workspace root.`

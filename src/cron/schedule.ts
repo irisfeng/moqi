@@ -1,7 +1,8 @@
 import { Cron as Croner } from "croner";
+import { defaultTimezone } from "../config.ts";
 import type { CronSchedule } from "../types.ts";
 
-export const DEFAULT_CRON_TIMEZONE = "America/Los_Angeles";
+export const DEFAULT_CRON_TIMEZONE = defaultTimezone();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_RECURRING_CRON_MS = 60_000;

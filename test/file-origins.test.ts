@@ -2,15 +2,14 @@ import "./support/auto-fake-sprites.ts";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toFileItem } from "../src/api/app-types.ts";
 import { artifactPath, fileArtifactId, type FileArtifact } from "../src/files/file-artifact-store.ts";
 import { createMemoryFileOriginStore } from "../src/files/file-origin-store.ts";
-import { scopeId, type TurnRequest } from "../src/types.ts";
+import { scopeId } from "../src/types.ts";
 import { buildApp } from "../src/wiring.ts";
-import { settle } from "./support/settle.ts";
 import { testConfig } from "./support/test-config.ts";
 
 function artifact(patch: Partial<FileArtifact>): FileArtifact {
@@ -54,17 +53,13 @@ test("the first conversation recorded for a file is kept", async () => {
 
 test("a project file names its conversation only to someone who can see that conversation", async () => {
   const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "file-origins-")) }));
-  const dm = (externalId: string, thread: string): TurnRequest => ({
-    surface: "test",
-    actor: { externalId },
-    conversation: { kind: "dm", threadRef: thread },
-    text: "hello",
-  });
-  const mine = await built.app.turn(dm("U1", "web:U1:mine"));
-  const theirs = await built.app.turn(dm("U2", "web:U2:theirs"));
-  await settle(async () =>
-    (await built.sessions.listByParticipant("U1")).some((session) => session.id === mine.sessionId),
-  );
+  const conversation = async (principal: string, thread: string) => {
+    const session = await built.sessions.getOrCreateByThread(thread, "dm", scopeId("personal", principal));
+    await built.sessions.addParticipant(session.id, principal);
+    return session;
+  };
+  const mine = await conversation("U1", "web:U1:mine");
+  const theirs = await conversation("U2", "web:U2:theirs");
   const scope = scopeId("personal", "U1");
   const put = async (seed: string, name: string) => {
     const id = fileArtifactId(seed, "out", 0);
@@ -84,22 +79,31 @@ test("a project file names its conversation only to someone who can see that con
   const fromMine = await put("one", "mine.txt");
   const fromTheirs = await put("two", "theirs.txt");
   const unlinked = await put("three", "unlinked.txt");
-  await built.fileOrigins.record({ artifactId: fromMine, sessionId: mine.sessionId!, runId: null, recordedAt: 1 });
-  await built.fileOrigins.record({ artifactId: fromTheirs, sessionId: theirs.sessionId!, runId: null, recordedAt: 1 });
+  await built.fileOrigins.record({ artifactId: fromMine, sessionId: mine.id, runId: null, recordedAt: 1 });
+  await built.fileOrigins.record({ artifactId: fromTheirs, sessionId: theirs.id, runId: null, recordedAt: 1 });
 
   const resources = await built.app.listScopeResources("U1", scope);
   assert.ok(resources);
   const byId = new Map(resources.files.map((file) => [file.id, file]));
-  assert.equal(byId.get(fromMine)?.session?.id, mine.sessionId);
+  assert.equal(byId.get(fromMine)?.session?.id, mine.id);
   assert.equal(byId.get(fromMine)?.delivered, true);
   assert.equal(byId.get(fromTheirs)?.session, undefined, "another person's conversation is not named");
   assert.equal(byId.get(unlinked)?.session, undefined);
 });
 
-test("the orchestrator records the conversation for every file it registers during a turn", () => {
-  const source = readFileSync(new URL("../src/core/orchestrator.ts", import.meta.url), "utf8");
-  assert.match(
-    source,
-    /onRegistered: async \(\{ id, ownerScopeId, direction \}\) => \{\s+await deps\.fileOrigins\s+\?\.record\(\{ artifactId: id, sessionId: session\.id, runId: input\.runId \?\? null, recordedAt: Date\.now\(\) \}\)/,
-  );
+test("a file registered during a turn names the conversation it came from", async () => {
+  const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "file-origins-")) }));
+  const blob = await built.blobTransfer.put(Buffer.from("notes"));
+  const result = await built.app.turn({
+    surface: "test",
+    actor: { externalId: "U1" },
+    conversation: { kind: "dm", threadRef: "web:U1:upload" },
+    text: "summarize the attached notes",
+    attachments: [{ name: "notes.txt", mimetype: "text/plain", sizeBytes: 5, blobId: blob.blobId }],
+  });
+  assert.ok(result.sessionId, result.reason);
+  const resources = await built.app.listScopeResources("U1", scopeId("personal", "U1"));
+  const file = resources?.files.find((candidate) => candidate.name === "notes.txt");
+  assert.ok(file);
+  assert.equal(file.session?.id, result.sessionId);
 });

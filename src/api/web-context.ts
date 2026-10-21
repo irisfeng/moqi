@@ -1,6 +1,7 @@
 import type { SessionEntry, SurfaceContextQuery, SurfaceContextResult } from "../types.ts";
 import type { SessionStore } from "../sessions/session-store.ts";
 import { createTranscriptSource } from "../sessions/transcript-source.ts";
+import { utcMinute } from "../util/time.ts";
 
 const WEB_CONTEXT_MESSAGE_CHARS = 600;
 const WEB_CONTEXT_READ_CAP = 500;
@@ -44,7 +45,7 @@ export function webConversationWindow(
       name?: unknown;
     };
     const text = typeof p.text === "string" ? p.text : "";
-    const time = new Date(e.createdAt).toISOString().slice(0, 16).replace("T", " ");
+    const time = utcMinute(e.createdAt);
     if (e.type === "user" && !p.hidden) {
       const display = typeof p.display === "string" && p.display.trim() ? p.display : text;
       if (display.trim()) {

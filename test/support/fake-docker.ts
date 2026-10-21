@@ -6,6 +6,8 @@ export interface FakeContainer {
   running: boolean;
   labels: Record<string, string>;
   volume?: string;
+  memoryBytes: number;
+  pidsLimit: number | null;
   args: string[];
 }
 
@@ -21,6 +23,7 @@ export interface FakeDocker {
   imageId: string;
   imageFingerprint: string;
   labelInspectFails: boolean;
+  dropsLimits: boolean;
 }
 
 export function installFakeDocker(daemonPort: number): FakeDocker {
@@ -39,6 +42,7 @@ export function installFakeDocker(daemonPort: number): FakeDocker {
     imageId: "sha256:image-v1",
     imageFingerprint: "",
     labelInspectFails: false,
+    dropsLimits: false,
     dockerExec: async (args) => exec(args),
   };
 
@@ -46,7 +50,15 @@ export function installFakeDocker(daemonPort: number): FakeDocker {
   const fail = (stderr: string) => ({ code: 1, stdout: "", stderr });
 
   function parseRun(args: string[]): FakeContainer {
-    const c: FakeContainer = { name: "", imageId: self.imageId, running: true, labels: {}, args };
+    const c: FakeContainer = {
+      name: "",
+      imageId: self.imageId,
+      running: true,
+      labels: {},
+      memoryBytes: 0,
+      pidsLimit: null,
+      args,
+    };
     for (let i = 0; i < args.length; i++) {
       const a = args[i]!;
       if (a === "--name") c.name = args[++i]!;
@@ -54,7 +66,11 @@ export function installFakeDocker(daemonPort: number): FakeDocker {
         const [k = "", v = ""] = args[++i]!.split("=");
         c.labels[k] = v;
       } else if (a === "-v") c.volume = args[++i]!.split(":")[0]!;
-      else if (a === "-p" || a === "--cpus" || a === "--memory") i++;
+      else if (a === "--memory" && self.dropsLimits) i++;
+      else if (a === "--pids-limit" && self.dropsLimits) i++;
+      else if (a === "--memory") c.memoryBytes = Number.parseInt(args[++i]!, 10) * 1024 * 1024;
+      else if (a === "--pids-limit") c.pidsLimit = Number(args[++i]!);
+      else if (a === "-p" || a === "--cpus" || a === "--memory-swap") i++;
     }
     return c;
   }
@@ -75,7 +91,7 @@ export function installFakeDocker(daemonPort: number): FakeDocker {
         const name = rest[rest.length - 1]!;
         const c = containers.get(name);
         if (!c) return fail(`Error: No such object: ${name}`);
-        return ok(`${c.running} ${c.imageId}`);
+        return ok(`${c.running} ${c.imageId} ${c.memoryBytes} ${c.pidsLimit ?? "<nil>"}`);
       }
       case "network": {
         const [sub, name] = rest as [string, string];

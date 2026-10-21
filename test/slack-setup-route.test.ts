@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
-import { getSlackInstallation, startSlackInstallation } from "../src/api/routes/admin/slack-installation.ts";
+import {
+  getSlackInstallation,
+  putSlackInstallation,
+  startSlackInstallation,
+} from "../src/api/routes/admin/slack-installation.ts";
 import type { ApiCtx } from "../src/api/routes/route.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { createSlackInstallationStore } from "../src/surfaces/slack-installation.ts";
@@ -54,7 +58,8 @@ async function fixture(t: test.TestContext) {
     let raw = "";
     for await (const chunk of req) raw += String(chunk);
     const ctx = { req, res, deps, body: raw ? JSON.parse(raw) : {} } as unknown as ApiCtx;
-    await (req.method === "GET" ? getSlackInstallation : startSlackInstallation)(ctx);
+    const route = req.method === "PUT" ? putSlackInstallation : startSlackInstallation;
+    await (req.method === "GET" ? getSlackInstallation : route)(ctx);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
@@ -121,4 +126,26 @@ test("explicit browser start selects setup or installation and rejects arbitrary
     assert.equal((await f.request("POST", { step })).status, 200);
     assert.equal(f.calls.at(-1)?.body, JSON.stringify({ step }));
   }
+});
+
+test("with QM_SLACK=off the installation status, token save and setup start answer slack_disabled", async (t) => {
+  const f = await fixture(t);
+  const previous = process.env.QM_SLACK;
+  process.env.QM_SLACK = "off";
+  t.after(() => {
+    if (previous === undefined) delete process.env.QM_SLACK;
+    else process.env.QM_SLACK = previous;
+  });
+  const status = await f.request();
+  assert.equal(status.status, 404);
+  assert.equal(((await status.json()) as { error: string }).error, "slack_disabled");
+  const start = await f.request("POST", { step: "install" });
+  assert.equal(start.status, 404);
+  assert.equal(((await start.json()) as { error: string }).error, "slack_disabled");
+  const save = await f.request("PUT", { botToken: "xoxb-synthetic", appToken: "xapp-synthetic" });
+  assert.equal(save.status, 404);
+  assert.equal(((await save.json()) as { error: string }).error, "slack_disabled");
+  assert.equal((await f.store.status()).managed, false);
+  assert.equal(f.calls.length, 0);
+  assert.equal((await f.request("GET", undefined, "member")).status, 403);
 });

@@ -29,6 +29,8 @@
     // 国内主机连不上 Anthropic/OpenAI，个人 Claude、ChatGPT 账号无法接入：关掉后“设置”里不再显示“AI 访问权限”，全员走公司模型。
     "core": {
       "HARNESS": "pi",
+      "QM_DEFAULT_TIMEZONE": "Asia/Shanghai",
+      "QM_SLACK": "off",
       "PERSONAL_MODEL_ACCOUNTS_ENABLED": "false",
       "SUGGESTED_ACTIVITIES_CONTEXT": "All staff use the product in Simplified Chinese. Write every title and prompt in Simplified Chinese, using 你 rather than 您.",
       "ORG_BRAND_SELF_LABEL": "默契"

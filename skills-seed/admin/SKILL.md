@@ -66,7 +66,7 @@ GET /v1/admin/whoami        → {"isAdmin":true,"role":"org_admin","scopeId":"or
 
 ## Check connector sources
 
-During admin onboarding, check this silently before offering Slack bot setup or personal
+During admin onboarding, check this silently before <!--slack-->offering Slack bot setup or <!--/slack-->personal
 connections. A source is either Composio or the org's own OAuth apps. Never inspect
 deployment secrets.
 
@@ -105,7 +105,7 @@ block (`<web origin>/keychain`). Link `<web origin>/admin/credentials` and
 offer the drop link. Never invent URLs or ask for keys or client secrets in chat. Never
 ask regular users to configure a source.
 
-## Guide Slack installation
+<!--slack-->## Guide Slack installation
 
 Check this silently before offering Slack bot setup during admin onboarding. It is
 separate from personal account connections. Verify admin status first. On a
@@ -156,7 +156,7 @@ instructions together instead of promising a checklist or fabricating a token-dr
 Without managed installation, use the returned `createUrl` and the known dashboard's
 workspace app guide. Do not ask for a configuration token this flow cannot consume.
 Have them enter credentials only in its secure form. Do not guess scopes, callback
-URLs, or credential requirements. Setup is optional; continue onboarding if deferred.
+URLs, or credential requirements. Setup is optional; continue onboarding if deferred.<!--/slack-->
 
 ## Finding the scope
 

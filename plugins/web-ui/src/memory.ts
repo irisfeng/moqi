@@ -14,6 +14,7 @@ interface Fact {
 }
 
 let facts: Fact[] = [];
+let withheld = 0;
 let notice = "";
 let busy = false;
 let search = "";
@@ -21,6 +22,7 @@ let editing: { id: string; text: string } | null = null;
 
 export function resetMemoryState(): void {
   facts = [];
+  withheld = 0;
   notice = "";
   busy = false;
   search = "";
@@ -32,7 +34,9 @@ async function change(method: "PATCH" | "DELETE", body: object, done: string): P
   notice = "";
   drawMemory();
   try {
-    facts = (await api<{ facts?: Fact[] }>("/api/memory", { method, body: JSON.stringify(body) })).facts ?? [];
+    const r = await api<{ facts?: Fact[]; withheld?: number }>("/api/memory", { method, body: JSON.stringify(body) });
+    facts = r.facts ?? [];
+    withheld = r.withheld ?? 0;
     editing = null;
     notice = done;
   } catch (e) {
@@ -131,6 +135,13 @@ function drawMemory(loading = false): void {
         /></label>
       </div>
       ${notice || loading ? html`<div class="status">${notice || "Loading…"}</div>` : nothing}
+      ${
+        withheld
+          ? html`<div class="card-meta memory-withheld">
+              Facts kept with the project or group conversations they came from, not listed here: ${withheld}
+            </div>`
+          : nothing
+      }
       <div class="memory-editor">
         <div class="memory-facts">
           ${
@@ -155,9 +166,10 @@ export async function renderMemory(): Promise<void> {
   notice = "";
   drawMemory(true);
   try {
-    const r = await api<{ facts?: Fact[] }>("/api/memory");
+    const r = await api<{ facts?: Fact[]; withheld?: number }>("/api/memory");
     if (seq !== appState.viewRenderSeq || appState.currentView !== "memory") return;
     facts = r.facts ?? [];
+    withheld = r.withheld ?? 0;
   } catch (e) {
     if (seq !== appState.viewRenderSeq || appState.currentView !== "memory") return;
     notice = errMessage(e, "Failed to load memory.");
